@@ -1,0 +1,73 @@
+name: Propose upstream update
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.repository == 'nairsh/monocode'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      commit: ${{ steps.merge.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Propose a merge without changing main
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch https://github.com/hardbeat920/monocode.git main
+          upstream=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo 'Already includes upstream main.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="codex/upstream-${upstream:0:12}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Existing proposal: $branch. Review it before retrying." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          if ! git merge --no-ff --no-edit "$upstream"; then
+            echo 'Upstream conflicts with the fork. Main was not changed. Conflicted paths:' >> "$GITHUB_STEP_SUMMARY"
+            git diff --name-only --diff-filter=U >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          cat > "$RUNNER_TEMP/upstream-pr.md" <<'BODY'
+          Merge upstream main into this fork while preserving both histories.
+
+          The **Propose upstream update** run builds and tests this exact merge commit. GitHub does not start normal push/PR workflows for events created with GITHUB_TOKEN; inspect that run's macOS build before merging.
+
+          Review workspace navigation, composer, transcript grouping, fork build configuration, and update behavior. A clean Git merge does not prove that custom behavior is preserved. This PR is never automatically merged.
+          BODY
+          gh pr create --base main --head "$branch" --title "Review upstream update ${upstream:0:12}" --body-file "$RUNNER_TEMP/upstream-pr.md"
+
+  validate:
+    needs: merge
+    if: needs.merge.outputs.commit != ''
+    uses: ./.github/workflows/fork-build.yml
+    with:
+      ref: ${{ needs.merge.outputs.commit }}

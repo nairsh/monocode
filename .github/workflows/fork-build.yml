@@ -1,0 +1,93 @@
+name: Fork macOS build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    if: github.repository == 'nairsh/monocode'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm test
+        env:
+          # Let happy-dom supply browser storage, not Node's optional disk storage.
+          NODE_OPTIONS: --no-experimental-webstorage
+      - run: npm run test:host
+      - run: cargo test --locked
+      - name: Build Apple Silicon installer
+        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.fork.conf.json
+      - name: Verify app and record source
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=target/aarch64-apple-darwin/release/bundle/macos/MonoCode.app
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
+          codesign --verify --deep --strict "$app"
+          git rev-parse HEAD > target/aarch64-apple-darwin/release/bundle/dmg/SOURCE_COMMIT.txt
+          cd target/aarch64-apple-darwin/release/bundle/dmg
+          shasum -a 256 ./*.dmg > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MonoCode-macOS-arm64-${{ github.run_id }}
+          path: target/aarch64-apple-darwin/release/bundle/dmg/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: macos
+    if: github.repository == 'nairsh/monocode' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: MonoCode-macOS-arm64-${{ github.run_id }}
+          path: installer
+      - name: Publish an immutable fork prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="fork-${SOURCE_SHA:0:12}"
+          cat > "$RUNNER_TEMP/release.md" <<'BODY'
+          Personal MonoCode fork for Apple Silicon Macs. Download the DMG and its SHA256SUMS.txt checksum.
+
+          This build uses ad-hoc signing and is not Apple-notarized. macOS may require an explicit Open Anyway approval in Privacy & Security. Automatic in-app updating is disabled, so an upstream release cannot replace this fork.
+
+          The app keeps MonoCode's application identifier and existing data location. Quit the old app before replacing it in Applications; do not delete your application data.
+          BODY
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; keeping its original artifacts."
+          else
+            gh release create "$tag" installer/* --target "$SOURCE_SHA" --prerelease --title "MonoCode fork ${SOURCE_SHA:0:12} (Apple Silicon)" --notes-file "$RUNNER_TEMP/release.md"
+          fi
