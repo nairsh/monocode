@@ -23,6 +23,29 @@ export class TranscriptTurnCache {
       this.inlineWork === inlineWork
     )
       return this.turns;
+    const before = this.blocks;
+    const tail = blocks[blocks.length - 1];
+    const oldTail = before?.[before.length - 1];
+    const lastTurn = this.turns[this.turns.length - 1];
+    // The common streaming update replaces only the final answer. Keep all
+    // historical groups without regrouping and allocating them on every chunk.
+    // Structural edits and Mono boundaries still use the full grouping rules.
+    if (
+      before && before.length === blocks.length &&
+      this.managed === managed && this.inlineWork === inlineWork &&
+      tail?.role === "assistant" && oldTail?.role === "assistant" &&
+      tail.id === oldTail.id && !tail.internal && !oldTail.internal &&
+      !tail.monoHabit && !oldTail.monoHabit &&
+      lastTurn?.[lastTurn.length - 1] === oldTail &&
+      blocks.every((block, index) => index === blocks.length - 1 || block === before[index])
+    ) {
+      this.blocks = blocks;
+      if (tail !== oldTail) {
+        this.turns = this.turns.slice();
+        this.turns[this.turns.length - 1] = [...lastTurn.slice(0, -1), tail];
+      }
+      return this.turns;
+    }
     const previous = new Map(this.turns.map((turn) => [turn[0].id, turn]));
     const grouped = inlineWork
       ? groupMonoChatTurns(blocks, managed)

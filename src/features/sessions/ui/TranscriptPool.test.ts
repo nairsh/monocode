@@ -80,6 +80,24 @@ afterEach(() => {
 });
 
 describe("transcript pool", () => {
+  it("evicts parked DOM over its size budget without evicting active panes", () => {
+    const pool = new TranscriptPool(12, 5);
+    const host = document.createElement("div");
+    const show = (id: string, nodes: number) => {
+      pool.show(id, host, createElement(Probe, { id }));
+      const entry = pool.getSnapshot().find((entry) => entry.id === id)!;
+      for (let i = 0; i < nodes; i++) entry.container.append(document.createElement("span"));
+    };
+    show("active", 10);
+    show("small", 3);
+    pool.park("small", host);
+    show("newer", 3);
+    pool.park("newer", host);
+    expect(pool.getSnapshot().map((entry) => entry.id)).toEqual(["active", "newer"]);
+    pool.park("active", host);
+    expect(pool.getSnapshot().map((entry) => entry.id)).toEqual(["newer"]);
+  });
+
   it("cycles through ten chats without rebuilding any transcript", () => {
     const pool = new TranscriptPool();
     const ids = Array.from({ length: 10 }, (_, index) => `chat-${index}`);

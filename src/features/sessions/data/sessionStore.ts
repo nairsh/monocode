@@ -375,6 +375,18 @@ function enqueueSessionWrite<T>(
   return run;
 }
 
+// Project lists observe completed writes, rather than unrelated live token updates.
+const sessionStoreListeners = new Set<(cwd?: string) => void>();
+
+export function subscribeSessionStoreChanges(listener: (cwd?: string) => void) {
+  sessionStoreListeners.add(listener);
+  return () => { sessionStoreListeners.delete(listener); };
+}
+
+function notifySessionStoreChanged(cwd?: string) {
+  for (const listener of sessionStoreListeners) listener(cwd);
+}
+
 export async function upsertSession(
   session: Session,
 ): Promise<SessionSummary | null> {
@@ -441,7 +453,10 @@ export async function upsertSession(
       },
     });
   });
-  return summary ? normalizeSummary(summary) : null;
+  if (!summary) return null;
+  const normalized = normalizeSummary(summary);
+  notifySessionStoreChanged(normalized.cwd);
+  return normalized;
 }
 
 /**
@@ -490,14 +505,15 @@ export async function listSessionsByProject(
   return rows.map(normalizeSummary);
 }
 
-export function rebaseProjectSessions(
+export async function rebaseProjectSessions(
   fromCwd: string,
   toCwd: string,
 ): Promise<void> {
-  return invoke<void>("session_rebase_project", {
+  await invoke<void>("session_rebase_project", {
     fromCwd: normalizeProjectPath(fromCwd),
     toCwd: normalizeProjectPath(toCwd),
   });
+  notifySessionStoreChanged();
 }
 
 export async function listLinkedSessions(): Promise<SessionSummary[]> {
@@ -757,6 +773,7 @@ export async function deleteSession(
       invoke<void>("session_delete", { sessionId, imagePaths }),
     );
     monoSavedBlocks.delete(sessionId);
+    notifySessionStoreChanged();
     const tombstone = setTimeout(
       () => deletedSessionIds.delete(sessionId),
       60_000,
@@ -776,6 +793,7 @@ export async function discardDraftSessionRecord(
     invoke<void>("session_delete", { sessionId, imagePaths: [] }),
   );
   monoSavedBlocks.delete(sessionId);
+  notifySessionStoreChanged();
 }
 
 export async function setSessionArchived(
@@ -785,6 +803,7 @@ export async function setSessionArchived(
   await enqueueSessionWrite(sessionId, () =>
     invoke<void>("session_set_archived", { sessionId, archived }),
   );
+  notifySessionStoreChanged();
 }
 
 export async function setSessionPinned(
@@ -792,6 +811,7 @@ export async function setSessionPinned(
   pinned: boolean,
 ): Promise<void> {
   await invoke<void>("session_set_pinned", { sessionId, pinned });
+  notifySessionStoreChanged();
 }
 
 export async function setSessionLinkedWorkItem(
@@ -805,6 +825,7 @@ export async function setSessionLinkedWorkItem(
       linkedWorkItem: linkedWorkItem ?? null,
     }),
   );
+  notifySessionStoreChanged();
 }
 
 /** Drain pending saves before a worktree removal changes stored session context. */

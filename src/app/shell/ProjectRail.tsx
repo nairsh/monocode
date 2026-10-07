@@ -16,6 +16,7 @@ import {
 } from "../../shared/ui/icons";
 import {
   createContext,
+  memo,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -103,6 +104,7 @@ import { useProjectMenu } from "./useProjectMenu";
 import { MonoRailSection, type MonoRailProps } from "./MonoRailSection";
 import {
   listSessionsByProject,
+  subscribeSessionStoreChanges,
   type SessionSummary,
 } from "../../features/sessions/data/sessionStore";
 import { compareSessionSummaries } from "../../features/sessions/data/sessionHistory";
@@ -1031,7 +1033,8 @@ function ProjectCard({
   );
   const [threadLimit, setThreadLimit] = useState(THREAD_PAGE);
   const shownThreads = threadRows?.slice(0, threadLimit) ?? [];
-  const threadListRef = useThreadSlide();
+  const threadOrder = JSON.stringify(expanded ? shownThreads.map((row) => row.id) : []);
+  const threadListRef = useThreadSlide(threadOrder);
   // The open chat carries the highlight once it is listed beneath.
   const headerSelected =
     selected &&
@@ -1265,15 +1268,23 @@ function useProjectThreadRows(
   useEffect(() => {
     if (!enabled || current || remote) return;
     let cancelled = false;
-    void listSessionsByProject(path)
-      .then((rows) => {
-        if (!cancelled) setStored(rows);
-      })
-      .catch(() => undefined);
+    let revision = 0;
+    const refresh = (changedPath?: string) => {
+      if (changedPath && !sameProjectPath(path, changedPath)) return;
+      const request = ++revision;
+      void listSessionsByProject(path)
+        .then((rows) => {
+          if (!cancelled && request === revision) setStored(rows);
+        })
+        .catch(() => undefined);
+    };
+    const unsubscribe = subscribeSessionStoreChanges(refresh);
+    refresh();
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [enabled, current, remote, path, currentRows]);
+  }, [enabled, current, remote, path]);
   // Unknown until loaded (and never listed for another machine's project).
   const rows = current ? currentRows : stored;
   const busyIds = threads?.busyIds;
@@ -1295,7 +1306,7 @@ function useProjectThreadRows(
 }
 
 /** Animate existing rows from their previous slots when attention changes. */
-function useThreadSlide() {
+function useThreadSlide(order: string) {
   const list = useRef<HTMLUListElement>(null);
   const positions = useRef(new Map<string, number>());
   const animations = useRef(new Map<string, Animation>());
@@ -1324,7 +1335,7 @@ function useThreadSlide() {
       }
     }
     positions.current = next;
-  });
+  }, [order]);
   useLayoutEffect(() => () => {
     for (const animation of animations.current.values()) animation.cancel();
     animations.current.clear();
@@ -1332,7 +1343,7 @@ function useThreadSlide() {
   return list;
 }
 
-function ThreadRow({
+const ThreadRow = memo(function ThreadRow({
   session,
   active,
   busy,
@@ -1484,7 +1495,7 @@ function ThreadRow({
       ) : null}
     </li>
   );
-}
+});
 
 function isBusyPath(path: string, busy: Set<string>): boolean {
   for (const other of busy) {

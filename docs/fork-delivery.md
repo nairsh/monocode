@@ -35,7 +35,8 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 ## Validation on 2026-10-08
 
 - Production TypeScript/Vite/Rust/Tauri build completed; ARM64 app signature and DMG integrity verified.
-- Web: 457 test files passed, 4,853 tests passed, 13 skipped. Local Node 26 initially interfered with happy-dom storage; `NODE_OPTIONS=--no-experimental-webstorage` resolved the failures. The fork build uses that test setting as well.
+- Web after the performance fixes: 457 test files passed, 4,859 tests passed, 13 skipped. Local Node 26 initially interfered with happy-dom storage; `NODE_OPTIONS=--no-experimental-webstorage` resolved the failures. The fork build uses that test setting as well.
+- The targeted sidebar, transcript cache and transcript pool suite passed all 43 tests. TypeScript checking passed. These cover unnecessary database/layout/grouping work as well as existing interactions.
 - Host: 100 tests passed, 5 skipped.
 - Rust: 586 tests passed, 1 ignored.
 - Both new workflows passed actionlint 1.7.12 and the patch passed whitespace validation.
@@ -45,4 +46,4 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 - The restored app's “Review and commit monocode changes” chat confirms completion of the earlier review, fixes, tests, commit and push of `b9c3971`. No GitHub check was attached to that review. The counts above were independently rerun for this delivery.
 - Installed 0.9.0 at `/Applications/MonoCode.app` and visually verified project/chat restoration. Previous 0.7.0 moved to Trash. The old app ZIP and pre-launch application-data copy are in `~/Library/Application Support/MonoCode-fork-backups/2026-10-08/`.
 
-Runtime performance recommendations remain unimplemented; no comparative speed or energy improvement is claimed for this delivery change.
+The first performance fixes now scope sidebar refreshes to successful saved changes, skip unchanged row-position measurements, reuse historical transcript groups during final-answer streaming, and bound parked transcript DOM. See the comparison's implementation section for regression evidence and remaining work. No comparative whole-app speed or energy improvement is claimed.

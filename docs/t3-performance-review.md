@@ -104,7 +104,28 @@ MonoCode already lazy-loads several major surfaces and uses separate quick-compo
 
 Measure initial imports, highlighter initialization, provider discovery, file prefetch, session hydration, animation loops and hidden-window work. Keep visual effects and user preferences intact unless a trace identifies a material cost. Record the renderer/webview processes as well as the Rust process and provider children; otherwise measurements can attribute provider workload to UI design incorrectly.
 
-## Implementation order and acceptance plan
+### 10. Terminal throughput needs flow control, not only batching
+
+MonoCode already coalesces native PTY output into 32 KiB reads with an 8 ms time window (`src-tauri/src/pty.rs`). PTY means the pseudo-terminal connected to the shell process. The renderer passes received output to xterm's `write` method (`TerminalView.tsx`), without a consumption acknowledgment in that shown path. Native batching reduces bridge calls but does not by itself limit a slow renderer's pending work. Process cleanup already signals the process group and escalates termination; do not remove it when changing output delivery.
+
+T3's [terminal OutputProtocol.ts](https://github.com/pingdotgg/t3code/blob/95ccbf406626a8a80fa545777a6388bdf5153086/apps/server/src/terminal/OutputProtocol.ts) permits an acknowledgment window of up to eight pending chunks or a 64 KiB threshold before waiting for real client acknowledgment. A chunk can cross the threshold, so it is not a strict maximum allocation. Its [terminal Manager.ts](https://github.com/pingdotgg/t3code/blob/95ccbf406626a8a80fa545777a6388bdf5153086/apps/server/src/terminal/Manager.ts) separately defaults history retention to 5,000 lines / 8 MiB and limits retained inactive sessions. These are distinct limits on in-flight delivery and saved history.
+
+**Transfer:** profile noisy terminal output and use xterm write-completion callbacks to acknowledge consumed batches if the bridge backlog is material. Keep a bounded native-to-renderer window, with disposal unblocking producers. Do not discard arbitrary terminal bytes: escape sequences and UTF-8 can cross chunks. Test sustained output, interactive keystrokes during output, hidden panes, resize, close and process-tree cleanup. Limit retention independently of throughput. This is lower priority than the chat path unless terminal-heavy use dominates the trace.
+
+## Implemented sidebar and transcript fixes
+
+Following the architecture review, the fork now includes focused changes to the rendering path:
+
+- Expanded noncurrent projects subscribe to completed session-store writes. Streaming changes to the current project's array no longer reload every other expanded project from SQLite. Writes with a known project refresh only that project; archive/delete/pin/rebase operations invalidate expanded lists after success. Failed writes do not invalidate. A request revision prevents a late response from replacing a newer list.
+- Fixed-height thread rows measure positions only when their displayed ID order changes, including collapse/expand and pagination. Previously their layout effect read every row's `offsetTop` on each render. Memoized rows and stable local action callbacks also reuse unchanged row rendering.
+- The transcript turn cache handles immutable changes to the final assistant answer without regrouping every historical turn. It still compares prefix references, so this is not constant-time processing. Structural changes, historical edits, hidden/internal messages and special Mono boundaries fall back to the existing complete grouping rules.
+- The parked transcript pool has a 20,000 DOM-node budget in addition to its twelve-transcript count limit. Counting stops once a single transcript exceeds the budget. Active panes are exempt; small chats still reuse their mounted views. This is a bounded retention heuristic, not a measured byte limit or active-history virtualization.
+
+Regression fixtures exercise 30 successive live-list updates with **zero additional other-project database reads and zero row-position reads**, successful versus failed/unrelated writes, and 30 final-answer updates with **zero full-history grouping calls**, in ordinary and Mono modes. Pool tests cover eviction under a small synthetic node budget while retaining an oversized active pane. Existing ordering, reduced-motion animation, rename, actions, history edits and grouping tests remain in the suite.
+
+These are verified reductions in specific work, not whole-app CPU or memory benchmark results. The broader scoped-state refactor, active transcript virtualization, remote push transport, payload projection, incremental highlighting and persistence changes below remain future work. No new browser or other T3 product features were added.
+
+## Remaining implementation order and acceptance plan
 
 1. Establish a production baseline: same machine, same transcript fixture, same provider output recording, same window size. Record median and slow-tail input-to-paint, thread-open latency, streaming frame time, retained DOM, whole app process memory, idle CPU, request counts and disk writes. Separate local and remote runs. Repeat cold and warm runs.
 2. Narrow state subscriptions and scope directory refreshes. These target unnecessary work without changing the wire protocol or durable data model.
@@ -115,4 +136,4 @@ Measure initial imports, highlighter initialization, provider discovery, file pr
 
 Acceptance fixtures: 20/200/2,000 turns; many tool rows; a multi-megabyte code block; one foreground plus five background streams; twelve chat revisits; remote disconnect during a tool completion; sleep/wake; and an idle window after all runs settle. Keep existing navigation/composer/transcript-group regression tests in every stage. Do not claim improvement until the same fixture improves with no functional regression.
 
-No T3 implementation code has been copied in this change. If later copying substantial portions, retain its MIT copyright and license notice. The present deliverable records transferable designs and their tradeoffs, while leaving runtime behavior unchanged during release preparation.
+No T3 implementation code has been copied in this change. If later copying substantial portions, retain its MIT copyright and license notice. The fixes above apply its principles of scoped work and bounded retention using MonoCode's existing architecture.

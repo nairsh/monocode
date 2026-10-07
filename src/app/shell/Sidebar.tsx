@@ -35,6 +35,7 @@ import {
 } from "../../shared/ui/icons";
 import {
   memo,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -670,6 +671,18 @@ function SidebarComponent({
       !session.orchestrationLeadId &&
       inWorktreeFocus(session, focusedWorktree),
   );
+  const renameRailSession = useCallback((session: SessionSummary, title: string) => {
+    if (remoteProjectFor(session.cwd)) onRenameSession?.(session.id, title);
+    else onRenameLocalSession?.(session.id, title);
+  }, [onRenameSession, onRenameLocalSession]);
+  const archiveRailSession = useCallback((session: SessionSummary, archived: boolean) => {
+    if (remoteProjectFor(session.cwd)) onArchiveSession?.(session.id, archived);
+    else onArchiveLocalSession?.(session.id, archived);
+  }, [onArchiveSession, onArchiveLocalSession]);
+  const deleteRailSession = useCallback((session: SessionSummary) => {
+    if (remoteProjectFor(session.cwd)) onDeleteSession?.(session.id);
+    else onDeleteLocalSession?.(session.id);
+  }, [onDeleteSession, onDeleteLocalSession]);
   const visibleSessions = [
     ...filterSessionsByQuery(
       filterSessionsByStatus(
@@ -2366,25 +2379,13 @@ function SidebarComponent({
                   onSelect: onSelectSession,
                   onNew: onNewInProject,
                   onRename: onRenameLocalSession || remoteProject
-                    ? (session, title) => {
-                        if (remoteProjectFor(session.cwd))
-                          onRenameSession?.(session.id, title);
-                        else onRenameLocalSession?.(session.id, title);
-                      }
+                    ? renameRailSession
                     : undefined,
                   onArchive: onArchiveLocalSession || remoteProject
-                    ? (session, archived) => {
-                        if (remoteProjectFor(session.cwd))
-                          onArchiveSession?.(session.id, archived);
-                        else onArchiveLocalSession?.(session.id, archived);
-                      }
+                    ? archiveRailSession
                     : undefined,
                   onDelete: onDeleteLocalSession || remoteProject
-                    ? (session) => {
-                        if (remoteProjectFor(session.cwd))
-                          onDeleteSession?.(session.id);
-                        else onDeleteLocalSession?.(session.id);
-                      }
+                    ? deleteRailSession
                     : undefined,
                 }
               : undefined

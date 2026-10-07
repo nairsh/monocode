@@ -4,6 +4,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { SessionSummary } from "../../features/sessions/data/sessionStore";
+import { setSessionArchived, upsertSession } from "../../features/sessions/data/sessionStore";
+import { newSession } from "../../features/sessions/model/session";
+import { invoke } from "@tauri-apps/api/core";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const { listSessionsByProject } = vi.hoisted(() => ({
   listSessionsByProject: vi.fn(),
@@ -53,6 +58,7 @@ const header = (project: string) =>
   )!;
 
 beforeEach(() => {
+  vi.mocked(invoke).mockReset().mockRejectedValue(new Error("Not running in Tauri"));
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const stored = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -187,6 +193,47 @@ it("prioritizes unread threads in another expanded project", async () => {
   expect(chatButtons("other").map((button) => button.textContent)).toEqual([
     "Chat other-1", "Chat other-2",
   ]);
+});
+
+it("does not reload other projects or measure unchanged rows during live updates", async () => {
+  await act(async () => root.render(createElement(Sidebar, props)));
+  await act(async () => header("other").click());
+  listSessionsByProject.mockClear();
+  const offset = vi.spyOn(HTMLElement.prototype, "offsetTop", "get");
+  try {
+    for (let index = 0; index < 30; index++) {
+      props.sessions = props.sessions.slice();
+      await act(async () => root.render(createElement(Sidebar, props)));
+    }
+    expect(listSessionsByProject).not.toHaveBeenCalled();
+    expect(offset).not.toHaveBeenCalled();
+    expect(chatButtons("other")[0].textContent).toBe("Chat other-1");
+  } finally {
+    offset.mockRestore();
+  }
+});
+
+it("refreshes other projects after a successful write, but not failed or unrelated writes", async () => {
+  await act(async () => root.render(createElement(Sidebar, props)));
+  await act(async () => header("other").click());
+  listSessionsByProject.mockClear();
+  const session = newSession("claude", "/work/project");
+  session.blocks = [{ id: "u", role: "user", text: "Hello" }];
+  vi.mocked(invoke).mockResolvedValue(chat(session.id, session.cwd, 1));
+  await act(async () => { await upsertSession(session); });
+  expect(listSessionsByProject).not.toHaveBeenCalled();
+
+  vi.mocked(invoke).mockRejectedValueOnce(new Error("Disk busy"));
+  await act(async () => {
+    await expect(setSessionArchived("other-1", true)).rejects.toThrow("Disk busy");
+  });
+  expect(listSessionsByProject).not.toHaveBeenCalled();
+
+  listSessionsByProject.mockResolvedValue([]);
+  vi.mocked(invoke).mockResolvedValue(undefined);
+  await act(async () => { await setSessionArchived("other-1", true); });
+  expect(listSessionsByProject).toHaveBeenCalledOnce();
+  expect(chatButtons("other")).toHaveLength(0);
 });
 
 it.each([false, true])("slides reordered rows while respecting reduced motion (%s)", async (reducedMotion) => {

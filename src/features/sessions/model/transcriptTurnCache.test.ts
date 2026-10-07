@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as activity from "./transcriptActivity";
 import type { Block } from "./session";
 import { groupTurns } from "./transcriptActivity";
 import { TranscriptTurnCache } from "./transcriptTurnCache";
@@ -11,6 +12,28 @@ function conversation(): Block[] {
 }
 
 describe("transcript turn cache", () => {
+  it.each([false, true])("skips full history grouping during answer streaming (Mono: %s)", (inlineWork) => {
+    const cache = new TranscriptTurnCache();
+    let blocks = conversation();
+    cache.group(blocks, false, inlineWork);
+    const grouped = vi.spyOn(activity, inlineWork ? "groupMonoChatTurns" : "groupTurns");
+    try {
+      for (let chunk = 0; chunk < 30; chunk++) {
+        blocks = [...blocks.slice(0, -1), { ...blocks.at(-1)!, text: `Chunk ${chunk}` }];
+        const result = cache.group(blocks, false, inlineWork);
+        expect(result.at(-1)?.at(-1)?.text).toBe(`Chunk ${chunk}`);
+      }
+      expect(grouped).not.toHaveBeenCalled();
+      blocks = [...blocks, { id: "next-user", role: "user", text: "Next" }];
+      expect(cache.group(blocks, false, inlineWork)).toEqual(
+        inlineWork ? activity.groupMonoChatTurns(blocks) : groupTurns(blocks),
+      );
+      expect(grouped).toHaveBeenCalled();
+    } finally {
+      grouped.mockRestore();
+    }
+  });
+
   it("reuses settled history as the latest reply streams", () => {
     const cache = new TranscriptTurnCache();
     const blocks = conversation();

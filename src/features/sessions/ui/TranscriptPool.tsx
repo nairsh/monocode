@@ -10,6 +10,9 @@ import { createPortal } from "react-dom";
 
 /** Transcripts kept mounted after their pane closes, so a revisit skips the rebuild. */
 export const TRANSCRIPT_POOL_LIMIT = 12;
+// A count alone could retain twelve enormous detached transcripts. Bound the
+// cached DOM as well; active panes are never evicted to meet this budget.
+export const TRANSCRIPT_POOL_NODE_LIMIT = 20_000;
 
 type PooledProps = { visible?: boolean; parked?: boolean };
 
@@ -19,6 +22,7 @@ export type TranscriptPoolEntry = {
   element: ReactElement<PooledProps>;
   onMouseDown?: () => void;
   host: HTMLElement | null;
+  parkedNodes?: number;
 };
 
 /**
@@ -32,7 +36,10 @@ export class TranscriptPool {
   private listeners = new Set<() => void>();
   private snapshot: TranscriptPoolEntry[] = [];
 
-  constructor(private readonly limit = TRANSCRIPT_POOL_LIMIT) {}
+  constructor(
+    private readonly limit = TRANSCRIPT_POOL_LIMIT,
+    private readonly nodeLimit = TRANSCRIPT_POOL_NODE_LIMIT,
+  ) {}
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -73,6 +80,7 @@ export class TranscriptPool {
     this.entries.set(id, {
       ...entry,
       host: null,
+      parkedNodes: countNodes(entry.container, this.nodeLimit),
       onMouseDown: undefined,
       element: cloneElement(entry.element, { visible: false, parked: true }),
     });
@@ -82,12 +90,18 @@ export class TranscriptPool {
 
   private trim() {
     let parked = 0;
-    for (const entry of this.entries.values()) if (!entry.host) parked += 1;
+    let nodes = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.host) continue;
+      parked += 1;
+      nodes += entry.parkedNodes ?? 0;
+    }
     for (const entry of [...this.entries.values()]) {
-      if (parked <= this.limit) break;
+      if (parked <= this.limit && nodes <= this.nodeLimit) break;
       if (entry.host) continue;
       this.entries.delete(entry.id);
       parked -= 1;
+      nodes -= entry.parkedNodes ?? 0;
     }
   }
 
@@ -95,6 +109,14 @@ export class TranscriptPool {
     this.snapshot = [...this.entries.values()];
     for (const listener of this.listeners) listener();
   }
+}
+
+function countNodes(container: HTMLElement, limit: number) {
+  const walker = document.createTreeWalker(container);
+  let count = 0;
+  // Stop counting as soon as this transcript alone exceeds the budget.
+  while (count <= limit && walker.nextNode()) count++;
+  return count;
 }
 
 function sameElement(
