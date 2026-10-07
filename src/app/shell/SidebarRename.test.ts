@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatSessionTitle } from "../../features/sessions/model/session";
 import { formatReminderTime } from "../../features/sessions/model/sessionReminders";
 import { Sidebar } from "./Sidebar";
+import { compareSessionSummaries, filterSessionsByQuery } from "../../features/sessions/data/sessionHistory";
 import {
   loadSessionFolders,
   saveSessionFolders,
@@ -15,8 +16,17 @@ import {
   createMono,
   saveMonoSessionId,
 } from "../../features/monos/model/mono";
+import { clearHabitRun, markHabitRun } from "../../features/monos/model/monoHabits";
 
 // Keep native services out of these menu/input interaction tests.
+vi.mock("../../features/sessions/data/sessionHistory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../features/sessions/data/sessionHistory")>();
+  return {
+    ...actual,
+    compareSessionSummaries: vi.fn(actual.compareSessionSummaries),
+    filterSessionsByQuery: vi.fn(actual.filterSessionsByQuery),
+  };
+});
 vi.mock("../../features/source-control/hooks/useProjectDiffStats", () => ({
   useProjectDiffStats: vi.fn(() => null),
 }));
@@ -149,6 +159,41 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+it("skips session filtering and sorting on unrelated shell updates", () => {
+  props.openSessions = [];
+  props.sessions = [...props.sessions, { ...props.sessions[0], id: "session-2" }];
+  act(() => render());
+  vi.mocked(compareSessionSummaries).mockClear();
+  vi.mocked(filterSessionsByQuery).mockClear();
+  for (let chunk = 0; chunk < 30; chunk++) {
+    props = { ...props, busyProjectPaths: ["/workspace/project"] };
+    act(() => render());
+  }
+  expect(filterSessionsByQuery).not.toHaveBeenCalled();
+  expect(compareSessionSummaries).not.toHaveBeenCalled();
+  props = { ...props, sessions: props.sessions.map((session) => ({ ...session, title: "renamed" })) };
+  act(() => render());
+  expect(filterSessionsByQuery).toHaveBeenCalled();
+  expect(compareSessionSummaries).toHaveBeenCalled();
+});
+
+it("updates cached visibility when Mono ownership or hidden-run registration changes", () => {
+  props.openSessions = [];
+  act(() => render());
+  expect(card()).not.toBeNull();
+  markHabitRun("session-1", "mono");
+  try {
+    props = { ...props, busyProjectPaths: [] };
+    act(() => render());
+    expect(card()).toBeNull();
+  } finally { clearHabitRun("session-1"); }
+  props = { ...props, busyProjectPaths: [] };
+  act(() => render());
+  expect(card()).not.toBeNull();
+  act(() => saveMonoSessionId(createMono([props.cwd]).id, "session-1"));
+  expect(card()).toBeNull();
 });
 
 it("leaves the resident agent and its description out of the session list", () => {

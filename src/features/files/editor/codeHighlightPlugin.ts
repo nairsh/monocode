@@ -19,6 +19,8 @@ import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
  * characters) also let different blocks share a result. This keeps the same
  * `CodeHighlighterPlugin` shape with a bounded LRU and an exact key, and loads
  * languages into one highlighter per theme pair instead of one per language.
+ * Completed lines additionally share a grammar-state prefix cache (at most
+ * eight entries and maxChars source characters, separate from result caching).
  *
  * Mounted blocks hold their tokens in component state, so eviction only means
  * a remounted block briefly shows plain text while it is highlighted again.
@@ -66,6 +68,57 @@ export function createBoundedCodePlugin(
   const results = new Map<string, HighlightResult>();
   const pending = new Map<string, Set<HighlightCallback>>();
   let cachedChars = 0;
+  // Adapted from T3 Code's completed-line grammar-state strategy; see NOTICE.
+  // The plugin has no document ID, so retain at most one prefix per language /
+  // theme pair and require an exact prefix match before reusing it.
+  const prefixes = new Map<string, { code: string; result: ReturnType<Highlighter["codeToTokens"]> }>();
+  let prefixChars = 0;
+
+  const tokenize = (highlighter: Highlighter, code: string, lang: string, names: readonly [string, string]) => {
+    const options = { lang: lang as BundledLanguage, themes: { light: names[0], dark: names[1] } };
+    if (lang === "text" || code.includes("\r") || code.length > maxChars) {
+      return highlighter.codeToTokens(code, options);
+    }
+    const key = `${lang}\u0000${names[0]}\u0000${names[1]}`;
+    let prefix = prefixes.get(key);
+    if (prefix && !code.startsWith(prefix.code)) prefix = undefined;
+    const end = code.lastIndexOf("\n") + 1;
+    const rebase = (result: ReturnType<Highlighter["codeToTokens"]>, offset: number) =>
+      offset === 0 ? result.tokens : result.tokens.map((line) =>
+        line.map((token) => ({ ...token, offset: token.offset + offset })),
+      );
+    if (end > (prefix?.code.length ?? 0)) {
+      const offset = prefix?.code.length ?? 0;
+      // Exclude the final newline: tokenizing its empty line would advance
+      // grammar state a second time before the unfinished line arrives.
+      const completed = highlighter.codeToTokens(code.slice(offset, end - 1), {
+        ...options,
+        grammarState: prefix?.result.grammarState,
+      });
+      if (!completed.grammarState) return highlighter.codeToTokens(code, options);
+      prefix = {
+        code: code.slice(0, end),
+        result: { ...completed, tokens: [...(prefix?.result.tokens ?? []), ...rebase(completed, offset)] },
+      };
+    }
+    if (!prefix) return highlighter.codeToTokens(code, options);
+    const previous = prefixes.get(key);
+    if (previous) prefixChars -= previous.code.length;
+    prefixes.delete(key);
+    prefixes.set(key, prefix);
+    prefixChars += prefix.code.length;
+    while (prefixes.size > Math.min(maxEntries, 8) || prefixChars > maxChars) {
+      const oldest = prefixes.keys().next().value;
+      if (oldest === undefined) break;
+      prefixChars -= prefixes.get(oldest)!.code.length;
+      prefixes.delete(oldest);
+    }
+    const tail = highlighter.codeToTokens(code.slice(prefix.code.length), {
+      ...options,
+      grammarState: prefix.result.grammarState,
+    });
+    return { ...tail, tokens: [...prefix.result.tokens, ...rebase(tail, prefix.code.length)] };
+  };
 
   const highlighterFor = (pair: [ThemeInput, ThemeInput]) => {
     const key = `${themeName(pair[0])}\u0000${themeName(pair[1])}`;
@@ -124,10 +177,7 @@ export function createBoundedCodePlugin(
           const usable = highlighter.getLoadedLanguages().includes(lang)
             ? lang
             : "text";
-          const result = highlighter.codeToTokens(code, {
-            lang: usable as BundledLanguage,
-            themes: { light: names[0], dark: names[1] },
-          });
+          const result = tokenize(highlighter, code, usable, names);
           remember(key, result);
           const callbacks = pending.get(key);
           pending.delete(key);

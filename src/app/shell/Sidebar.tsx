@@ -348,6 +348,8 @@ type Props = {
   monoViewActive?: boolean;
 };
 
+const EMPTY_OPEN_SESSIONS: SessionSummary[] = [];
+
 function SidebarComponent({
   cwd,
   gitCwd,
@@ -361,7 +363,7 @@ function SidebarComponent({
   busySessionIds,
   approvalSessionIds,
   activeSessionId,
-  openSessions = [],
+  openSessions = EMPTY_OPEN_SESSIONS,
   status,
   pending,
   onSelectSession: onSelectLocalSession,
@@ -657,8 +659,14 @@ function SidebarComponent({
     : pending && sessions.length === 0;
   const worktreeFocus = useWorktreeFocus(cwd);
   const focusedWorktree = remoteProject ? undefined : worktreeFocus;
-  useSyncExternalStore(subscribeMonos, monosSnapshot);
-  const listedSessions = mergeFolderSessionSummaries(
+  const monoRosterSnapshot = useSyncExternalStore(subscribeMonos, monosSnapshot);
+  // Habit runs are usually ephemeral, but their registry is independent of
+  // summary identity. Keep its exclusions current when another prop rerenders.
+  const hiddenHabitIds = [...projectSessions, ...openSessions]
+    .filter((session) => isHabitRun(session.id))
+    .map((session) => session.id)
+    .join("\0");
+  const listedSessions = useMemo(() => mergeFolderSessionSummaries(
     projectSessions,
     remoteProject ? [] : openSessions,
     sessionFolders,
@@ -670,7 +678,10 @@ function SidebarComponent({
       !isHabitRun(session.id) &&
       !session.orchestrationLeadId &&
       inWorktreeFocus(session, focusedWorktree),
-  );
+  ), [
+    projectSessions, remoteProject, openSessions, sessionFolders,
+    focusedWorktree, monoRosterSnapshot, hiddenHabitIds,
+  ]);
   const renameRailSession = useCallback((session: SessionSummary, title: string) => {
     if (remoteProjectFor(session.cwd)) onRenameSession?.(session.id, title);
     else onRenameLocalSession?.(session.id, title);
@@ -683,7 +694,7 @@ function SidebarComponent({
     if (remoteProjectFor(session.cwd)) onDeleteSession?.(session.id);
     else onDeleteLocalSession?.(session.id);
   }, [onDeleteSession, onDeleteLocalSession]);
-  const visibleSessions = [
+  const visibleSessions = useMemo(() => [
     ...filterSessionsByQuery(
       filterSessionsByStatus(
         filterSessionsByTime(
@@ -704,7 +715,10 @@ function SidebarComponent({
       ),
       searchQuery,
     ),
-  ].sort(compareSessionSummaries);
+  ].sort(compareSessionSummaries), [
+    listedSessions, sessionFilters, now, listedBusySessionIds,
+    listedApprovalSessionIds, unseenFinishedIds, searchQuery,
+  ]);
   const filtersActive = hasActiveSessionFilters(sessionFilters);
   const searchNarrowed = Boolean(searchQuery.trim());
   // Summaries for the whole project stay in `sessions` so filters still work.

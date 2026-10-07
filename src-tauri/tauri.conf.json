@@ -51,6 +51,7 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "../NOTICE": "NOTICE",
       "macos/Assets.car": "Assets.car"
     },
     "macOS": {

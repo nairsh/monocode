@@ -810,7 +810,7 @@ export const FileTree = memo(function FileTree({
   }, [cwd]);
 
   useEffect(() => {
-    const unsub = subscribeDirsChanged(() => setEpoch((n) => n + 1));
+    const unsub = subscribeDirsChanged(() => setEpoch((n) => n + 1), cwd);
     const onResume = () => {
       if (!document.hidden) notifyDirsChanged();
     };
@@ -821,7 +821,7 @@ export const FileTree = memo(function FileTree({
       window.removeEventListener("focus", onResume);
       document.removeEventListener("visibilitychange", onResume);
     };
-  }, []);
+  }, [cwd]);
 
   useEffect(() => {
     if (!cwd.startsWith(REMOTE_PATH_PREFIX)) return;

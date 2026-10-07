@@ -34,6 +34,96 @@ function text(result: HighlightResult): string {
 }
 
 describe("bounded code highlight plugin", () => {
+  it("matches full highlighting while streaming, editing, and interleaving documents", async () => {
+    const plugin = createBoundedCodePlugin();
+    const full = await shiki.createHighlighter({
+      themes: plugin.getThemes(), langs: ["typescript", "python", "html"],
+      engine: createJavaScriptRegexEngine({ forgiving: true }),
+    });
+    const fixtures = [
+      ["typescript", '/* comment\ncontinued */\nconst text = `hello\n${42} world`;\n// 🦊\n'],
+      ["python", 'text = """multi\nline"""\nprint(text)\n'],
+      ["html", '<script>\nconst x = "value";\n</script>\n<style>\na { color: red; }\n</style>'],
+      ["typescript", 'const x = 1;\r\n/* comment\r\nend */\r\n'],
+    ];
+    try {
+      for (const [lang, source] of fixtures) {
+        for (let end = 1; end <= source.length; end += 3) {
+          const code = source.slice(0, end);
+          const actual = await highlight(plugin, code, lang);
+          const expected = full.codeToTokens(code, {
+            lang: lang as BundledLanguage, themes: { light: "github-light", dark: "github-dark" },
+          });
+          expect(actual.tokens).toEqual(expected.tokens);
+          expect(actual.fg).toEqual(expected.fg);
+          expect(actual.bg).toEqual(expected.bg);
+        }
+      }
+      for (const code of ["/* one\nend */\nx", "// other\nconst y = 2;", "/* one\nend */\nxyz", "/* edit\nend */\nz", "short", "\n\nlast\n"]) {
+        expect((await highlight(plugin, code)).tokens).toEqual(full.codeToTokens(code, {
+          lang: "typescript", themes: { light: "github-light", dark: "github-dark" },
+        }).tokens);
+      }
+    } finally { full.dispose(); }
+  }, 20_000);
+
+  it("tokenizes only the new suffix of a growing code fence", async () => {
+    const plugin = createBoundedCodePlugin();
+    const highlighter = await shiki.createHighlighter({
+      themes: plugin.getThemes(), langs: ["typescript"],
+      engine: createJavaScriptRegexEngine({ forgiving: true }),
+    });
+    vi.mocked(shiki.createHighlighter).mockResolvedValueOnce(highlighter);
+    const tokenize = vi.spyOn(highlighter, "codeToTokens");
+    try {
+      const prefix = "const value = 1;\n".repeat(200);
+      await highlight(plugin, prefix);
+      tokenize.mockClear();
+      for (let chunk = 1; chunk <= 30; chunk++) await highlight(plugin, prefix + "x".repeat(chunk));
+      const processed = tokenize.mock.calls.reduce((sum, [code]) => sum + code.length, 0);
+      expect(processed).toBe(465);
+      // A full pass would tokenize the 3,200-character prefix thirty times.
+      expect(processed).toBeLessThan(prefix.length);
+    } finally { tokenize.mockRestore(); highlighter.dispose(); }
+  }, 20_000);
+
+  it("keeps completed token lines and isolates theme switches, shortening and edits", async () => {
+    const plugin = createBoundedCodePlugin();
+    const themes: [shiki.BundledTheme, shiki.BundledTheme][] = [
+      ["github-light", "github-dark"], ["vitesse-light", "vitesse-dark"],
+    ];
+    const full = await shiki.createHighlighter({
+      themes: themes.flat(), langs: ["typescript"],
+      engine: createJavaScriptRegexEngine({ forgiving: true }),
+    });
+    const request = (code: string, pair: typeof themes[number]) => new Promise<HighlightResult>((resolve) => {
+      const cached = plugin.highlight({ code, language: "typescript", themes: pair }, resolve);
+      if (cached) resolve(cached);
+    });
+    try {
+      const prefix = "/* multi\nline */\nconst value = 1;\n";
+      const first = await request(prefix + "v", themes[0]);
+      const next = await request(prefix + "value", themes[0]);
+      expect(next.tokens[0]).toBe(first.tokens[0]);
+      expect(next.tokens[2]).toBe(first.tokens[2]);
+      for (const [code, pair] of [
+        [prefix + "value", themes[1]],
+        [prefix + "value!", themes[0]],
+        ["/* short\n", themes[0]],
+        ["/* edited\nline */\nconst value = 2;\nvalue", themes[0]],
+        [prefix + "value!", themes[1]],
+      ] as [string, typeof themes[number]][]) {
+        const actual = await request(code, pair);
+        const expected = full.codeToTokens(code, {
+          lang: "typescript", themes: { light: pair[0], dark: pair[1] },
+        });
+        expect(actual.tokens).toEqual(expected.tokens);
+        expect(actual.fg).toEqual(expected.fg);
+        expect(actual.bg).toEqual(expected.bg);
+      }
+    } finally { full.dispose(); }
+  }, 20_000);
+
   it("shares one highlight run across concurrent requests and notifies every callback", async () => {
     const plugin = createBoundedCodePlugin();
     const source = "const shared = 1;";

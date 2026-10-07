@@ -1,10 +1,13 @@
 import { listDir, type FsEntry } from "../../../platform/tauri/fs";
 import { pathSegments } from "./fileName";
-import { joinPath, parentPath } from "../../../shared/lib/paths";
+import { isEqualOrInside, joinPath, parentPath } from "../../../shared/lib/paths";
 
 const expandedByProject = new Map<string, Set<string>>();
 const selectedByProject = new Map<string, string | null>();
 const dirs = new Map<string, FsEntry[]>();
+const pendingDirs = new Map<string, Promise<FsEntry[]>>();
+const activeRoots = new Map<string, number>();
+const MAX_CACHED_DIRS = 256;
 const listeners = new Set<() => void>();
 
 const REFRESH_MS = 150;
@@ -36,15 +39,30 @@ export function peekDir(path: string): FsEntry[] | null {
 
 export function listCachedDir(path: string): Promise<FsEntry[]> {
   const hit = dirs.get(path);
-  if (hit) return Promise.resolve(hit);
-  return listDir(path).then((entries) => {
-    dirs.set(path, entries);
+  if (hit) {
+    dirs.delete(path);
+    dirs.set(path, hit);
+    return Promise.resolve(hit);
+  }
+  const pending = pendingDirs.get(path);
+  if (pending) return pending;
+  const request = listDir(path).then((entries) => {
+    // A refresh or deletion may have invalidated this request while it ran.
+    if (pendingDirs.get(path) === request) {
+      dirs.set(path, entries);
+      while (dirs.size > MAX_CACHED_DIRS) dirs.delete(dirs.keys().next().value!);
+    }
     return entries;
+  }).finally(() => {
+    if (pendingDirs.get(path) === request) pendingDirs.delete(path);
   });
+  pendingDirs.set(path, request);
+  return request;
 }
 
 export function refreshDir(path: string): Promise<FsEntry[]> {
   dirs.delete(path);
+  pendingDirs.delete(path);
   return listCachedDir(path);
 }
 
@@ -52,25 +70,40 @@ export function forgetDir(path: string) {
   for (const key of [...dirs.keys()]) {
     if (key === path || key.startsWith(`${path}/`)) dirs.delete(key);
   }
+  for (const key of pendingDirs.keys()) {
+    if (key === path || key.startsWith(`${path}/`)) pendingDirs.delete(key);
+  }
 }
 
 /** Re-list every cached folder. Agent writes and window focus use this. */
-export async function refreshCachedDirs(): Promise<void> {
-  const paths = [...dirs.keys()];
+export async function refreshCachedDirs(paths = [...dirs.keys()]): Promise<void> {
   if (paths.length === 0) return;
-  await Promise.all(
-    paths.map((path) =>
-      refreshDir(path).catch(() => {
-        forgetDir(path);
-      }),
-    ),
-  );
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, paths.length) }, async () => {
+    while (cursor < paths.length) {
+      const path = paths[cursor++];
+      // Failure invalidates this listing; it must not erase a newer request.
+      try {
+        await refreshDir(path);
+      } catch {
+        // A missing parent invalidates its children too. A newer parent read
+        // must remain authoritative if this refresh lost a race with it.
+        if (!pendingDirs.has(path) && !dirs.has(path)) forgetDir(path);
+      }
+    }
+  }));
 }
 
-export function subscribeDirsChanged(listener: () => void): () => void {
+export function subscribeDirsChanged(listener: () => void, root?: string): () => void {
   listeners.add(listener);
+  if (root) activeRoots.set(root, (activeRoots.get(root) ?? 0) + 1);
   return () => {
     listeners.delete(listener);
+    if (root) {
+      const remaining = (activeRoots.get(root) ?? 1) - 1;
+      if (remaining) activeRoots.set(root, remaining);
+      else activeRoots.delete(root);
+    }
   };
 }
 
@@ -95,7 +128,20 @@ async function runRefresh() {
   }
   refreshing = true;
   try {
-    await refreshCachedDirs();
+    const roots = [...activeRoots.keys()];
+    const active = (path: string) => roots.some((root) => isEqualOrInside(path, root));
+    const paths = new Set<string>();
+    for (const path of dirs.keys()) {
+      if (active(path)) paths.add(path);
+      else dirs.delete(path); // Inactive projects reload on their next visit.
+    }
+    // Cold reads can have started before the write that triggered refresh.
+    // Invalidate them too, then reread active paths through the same workers.
+    for (const path of pendingDirs.keys()) {
+      if (active(path)) paths.add(path);
+      pendingDirs.delete(path);
+    }
+    await refreshCachedDirs([...paths]);
     for (const listener of listeners) listener();
   } finally {
     refreshing = false;

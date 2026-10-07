@@ -70,7 +70,7 @@ export function isEqualOrInside(path: string, root: string): boolean {
   const base = trimSlash(root);
   const key = pathKey(normalized);
   const baseKey = pathKey(base);
-  return key === baseKey || key.startsWith(`${baseKey}/`);
+  return key === baseKey || key.startsWith(baseKey === "/" ? "/" : `${baseKey}/`);
 }
 
 export function joinPath(parent: string, relative: string): string {

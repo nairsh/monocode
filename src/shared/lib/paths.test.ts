@@ -220,6 +220,14 @@ describe("parentPath and joinPath", () => {
 });
 
 describe("path relations", () => {
+  it("handles local roots and trailing slashes without crossing remote boundaries", () => {
+    expect(isEqualOrInside("/tmp/child", "/")).toBe(true);
+    expect(isEqualOrInside("/tmp/tree/child", "/tmp/tree/")).toBe(true);
+    expect(isEqualOrInside("/tmp/tree-other", "/tmp/tree/")).toBe(false);
+    expect(isEqualOrInside("remote://host/tmp/child", "/")).toBe(false);
+    expect(isEqualOrInside("remote://host/tree/child", "remote://host/tree/")).toBe(true);
+    expect(isEqualOrInside("remote://other/tree/child", "remote://host/tree/")).toBe(false);
+  });
   it("treats backslash and slash as the same path", () => {
     expect(isEqualOrInside("C:\\Users\\me\\app\\src", "C:/Users/me/app")).toBe(
       true,

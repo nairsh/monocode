@@ -123,7 +123,9 @@ Following the architecture review, the fork now includes focused changes to the 
 
 Regression fixtures exercise 30 successive live-list updates with **zero additional other-project database reads and zero row-position reads**, successful versus failed/unrelated writes, and 30 final-answer updates with **zero full-history grouping calls**, in ordinary and Mono modes. Pool tests cover eviction under a small synthetic node budget while retaining an oversized active pane. Existing ordering, reduced-motion animation, rename, actions, history edits and grouping tests remain in the suite.
 
-These are verified reductions in specific work, not whole-app CPU or memory benchmark results. The broader scoped-state refactor, active transcript virtualization, remote push transport, payload projection, incremental highlighting and persistence changes below remain future work. No new browser or other T3 product features were added.
+The follow-up batch also stabilizes history/open-thread summary publication during text-only updates and memoizes dependent Sidebar session filtering/sorting; its regression fixtures perform zero new summary timestamps and zero additional session filters/order comparisons across 30 respective updates. Real metadata, saved-history and orchestration changes still publish. Explorer automatic refreshes now follow mounted project roots, share cold reads, retain at most 256 listings and use at most four refresh workers. Completed code lines reuse Shiki grammar state under an exact language/theme/source-prefix match, with bounded prefix retention; the growing-tail fixture tokenizes 465 rather than 96,465 characters after its initial prefix. See [the commit review](t3-performance-commit-review.md) for coverage, implementation and limits.
+
+These are verified reductions in specific work, not whole-app CPU or memory benchmark results. The broader scoped-state refactor, active transcript virtualization, remote push transport, payload projection and persistence changes remain future work. No new browser or other T3 product features were added.
 
 ## Remaining implementation order and acceptance plan
 
@@ -136,4 +138,4 @@ These are verified reductions in specific work, not whole-app CPU or memory benc
 
 Acceptance fixtures: 20/200/2,000 turns; many tool rows; a multi-megabyte code block; one foreground plus five background streams; twelve chat revisits; remote disconnect during a tool completion; sleep/wake; and an idle window after all runs settle. Keep existing navigation/composer/transcript-group regression tests in every stage. Do not claim improvement until the same fixture improves with no functional regression.
 
-No T3 implementation code has been copied in this change. If later copying substantial portions, retain its MIT copyright and license notice. The fixes above apply its principles of scoped work and bounded retention using MonoCode's existing architecture.
+The completed-line grammar-state highlighting adaptation is attributed to T3 Code in the repository's `NOTICE`, including its MIT copyright/license notice; that notice is bundled with the application. The other fixes apply scoped-work and bounded-retention principles using MonoCode's existing architecture.

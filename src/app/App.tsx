@@ -728,9 +728,9 @@ import {
   mergeHistorySummary,
   mergeProjectHistorySummary,
   replaceProjectHistory,
-  historyWithLiveSessions,
   summaryFromSession,
 } from "../features/sessions/data/sessionHistory";
+import { SidebarSessionSummaries } from "../features/sessions/data/sidebarSessionSummaries";
 import {
   CONTINUE_PROMPT,
   canAutoContinue,
@@ -11042,12 +11042,11 @@ function Workspace({
     [history, sidebarCwd],
   );
 
-  const sidebarHistory = useMemo(
-    () =>
-      historyWithLiveSessions(
+  const [sidebarSummaryCache] = useState(() => new SidebarSessionSummaries());
+  const sidebarSummaries = useMemo(
+    () => sidebarSummaryCache.update(
         history,
-        // A habit's hidden run is never one of the project's chats.
-        promptableSessions,
+        sessions,
         sidebarCwd,
         {
           ...(projectBranches?.current
@@ -11062,11 +11061,13 @@ function Workspace({
     [
       history,
       projectBranches,
-      promptableSessions,
+      sessions,
       sidebarCwd,
       orchestrationRuns,
+      sidebarSummaryCache,
     ],
   );
+  const sidebarHistory = sidebarSummaries.history;
   const {
     unseen: inboxUnseen,
     linkedSessionUpdateIds,
@@ -11108,28 +11109,7 @@ function Workspace({
     () => ciRepairSessions(history, sessions),
     [history, sessions],
   );
-  const openProjectSessions = useMemo(
-    () =>
-      sessions
-        .filter(
-          (session) =>
-            !session.inboxAsk &&
-            !session.ephemeral &&
-            !session.orchestrationLeadId &&
-            sameProjectPath(session.cwd, sidebarCwd),
-        )
-        .map((session) =>
-          summaryFromSession(session, {
-            ...(projectBranches?.current
-              ? { branch: projectBranches.current }
-              : {}),
-            ...(sidebarCwd && sidebarCwd !== "~"
-              ? { repo: projectName(sidebarCwd) }
-              : {}),
-          }),
-        ),
-    [projectBranches, sessions, sidebarCwd],
-  );
+  const openProjectSessions = sidebarSummaries.open;
 
   const onToggleSidebar = useCallback(() => {
     setProjectRailOpen((open) => {
