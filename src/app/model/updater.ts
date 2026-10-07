@@ -89,8 +89,10 @@ export async function runUpdateFlow(
       const idle: UpdaterSnapshot = { phase: "idle", currentVersion };
       onProgress?.(idle);
       if (manual) {
+        const releasesUrl = import.meta.env.VITE_RELEASES_URL ||
+          "https://github.com/hardbeat920/monocode/releases/latest";
         await message(
-          "Automatic updates aren't configured for this build.\n\nDownload releases at https://github.com/hardbeat920/monocode/releases/latest",
+          `Automatic updates aren't configured for this build.\n\nDownload releases at ${releasesUrl}`,
           { title: "MonoCode" },
         );
       }

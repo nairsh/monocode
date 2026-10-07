@@ -10,6 +10,13 @@ export default defineConfig(async ({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      "import.meta.env.VITE_RELEASES_URL": JSON.stringify(
+        mode === "fork"
+          ? "https://github.com/nairsh/monocode/releases"
+          : "https://github.com/hardbeat920/monocode/releases/latest",
+      ),
+    },
     clearScreen: false,
     build: {
       rollupOptions: {

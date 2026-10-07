@@ -19,6 +19,7 @@ import { runUpdateFlow } from "./updater";
 describe("updater", () => {
   afterEach(() => {
     vi.resetAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("keeps automatic checks quiet when updater endpoints are missing", async () => {
@@ -42,6 +43,19 @@ describe("updater", () => {
     });
     expect(message).toHaveBeenCalledWith(
       expect.stringContaining("https://github.com/hardbeat920/monocode/releases/latest"),
+      { title: "MonoCode" },
+    );
+  });
+
+  it("keeps fork users on the fork download page", async () => {
+    vi.stubEnv("VITE_RELEASES_URL", "https://github.com/nairsh/monocode/releases");
+    getVersion.mockResolvedValue("0.9.0");
+    check.mockRejectedValue(new Error("Updater does not have any endpoints set"));
+
+    await runUpdateFlow(true);
+
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("https://github.com/nairsh/monocode/releases"),
       { title: "MonoCode" },
     );
   });

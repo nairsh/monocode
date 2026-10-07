@@ -1,4 +1,7 @@
 {
+  "build": {
+    "beforeBuildCommand": "npm run build -- --mode fork"
+  },
   "bundle": {
     "createUpdaterArtifacts": false,
     "macOS": { "signingIdentity": "-" }

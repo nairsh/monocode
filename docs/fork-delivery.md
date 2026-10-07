@@ -8,7 +8,7 @@ Repository: https://github.com/nairsh/monocode, already a GitHub fork of https:/
 
 The original upstream `Release` workflow remains available for upstream's signing/hosting setup. Do not use `v*` tags for personal builds: that workflow requires Apple/updater/R2 secrets this fork does not inherit. Personal tags use `fork-*`.
 
-The fork configuration disables updater artifacts and leaves the in-app updater key/endpoints empty. Upstream's updater must not overwrite the fork. This build is ad-hoc signed, not notarized; a downloaded app can require macOS Privacy & Security → Open Anyway. Normal notarized distribution requires the owner's Apple signing credentials. Do not disable Gatekeeper globally.
+The fork configuration disables updater artifacts and leaves the in-app updater key/endpoints empty. It builds Vite in `fork` mode so the manual update message points to this fork's releases as well. Upstream's updater must not overwrite the fork. This build is ad-hoc signed, not notarized; a downloaded app can require macOS Privacy & Security → Open Anyway. Normal notarized distribution requires the owner's Apple signing credentials. Do not disable Gatekeeper globally.
 
 The application name/identifier stay `MonoCode` / `com.monocode.desktop` to preserve existing application data. Quit the previous app before replacing `/Applications/MonoCode.app`. Keep a recoverable copy of the old application and preserve its data; deleting the application data is unnecessary. Only one installed active application should remain at the normal Applications path.
 
@@ -39,6 +39,8 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 - Host: 100 tests passed, 5 skipped.
 - Rust: 586 tests passed, 1 ignored.
 - Both new workflows passed actionlint 1.7.12 and the patch passed whitespace validation.
+- The upstream workflow's first dispatch exposed a reusable-workflow permission ceiling error; the corrected dispatch completed successfully and found upstream already included. No real new-upstream merge/conflict has occurred yet.
+- The final manual-download routing change passed all seven updater tests (including the new fork routing regression check) and was rebuilt in fork mode.
 - Existing compiler warnings: unused macOS imports; CSS optimizer does not recognize the transcript search `::highlight` pseudo-element. Build succeeded.
 - The restored app's “Review and commit monocode changes” chat confirms completion of the earlier review, fixes, tests, commit and push of `b9c3971`. No GitHub check was attached to that review. The counts above were independently rerun for this delivery.
 - Installed 0.9.0 at `/Applications/MonoCode.app` and visually verified project/chat restoration. Previous 0.7.0 moved to Trash. The old app ZIP and pre-launch application-data copy are in `~/Library/Application Support/MonoCode-fork-backups/2026-10-08/`.
