@@ -176,14 +176,17 @@ import {
   getModelSnapshot,
   hasLiveCatalog,
   loadDefaultModels,
+  loadHiddenModels,
   loadHiddenPickerProviders,
   loadLastModelChoice,
   modelsFor,
   resolveModel,
   saveDefaultModel,
   saveLastModelChoice,
+  saveModelHidden,
   savePickerProviderVisible,
   subscribeModels,
+  type AgentModel,
 } from "../../sessions/model/models";
 import {
   pathKey,
@@ -3760,6 +3763,9 @@ function ProviderRow({
           }))}
         />
       ) : null}
+      {available && models.length > 1 ? (
+        <PickerModelsButton harness={harness} models={models} />
+      ) : null}
       <SecondaryButton
         onClick={() => current && onDefault(harness, current.id)}
         disabled={isDefault || !current}
@@ -3780,6 +3786,71 @@ function ProviderRow({
         </div>
       ) : null}
     </Row>
+  );
+}
+
+/** Checklist of which of a provider's models the model picker lists. */
+function PickerModelsButton({
+  harness,
+  models,
+}: {
+  harness: HarnessId;
+  models: AgentModel[];
+}) {
+  const anchor = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const [hidden, setHidden] = useState(() => new Set(loadHiddenModels()));
+  const shownCount = models.filter((model) => !hidden.has(model.id)).length;
+  const toggle = (id: string, show: boolean) => {
+    saveModelHidden(id, !show);
+    setHidden(new Set(loadHiddenModels()));
+  };
+  return (
+    <>
+      <SecondaryButton
+        ref={anchor}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {shownCount === models.length
+          ? "All models"
+          : `${shownCount || models.length} of ${models.length} models`}
+      </SecondaryButton>
+      {open ? (
+        <Popover
+          anchor={anchor}
+          align="end"
+          width={260}
+          maxHeight={360}
+          onDismiss={() => setOpen(false)}
+          role="dialog"
+          aria-label={`${HARNESS_TITLE[harness]} models in the picker`}
+          className="overflow-y-auto p-1"
+        >
+          <p className="px-2 pb-1 pt-1 text-[11px] text-content/45">
+            Show in the model picker
+          </p>
+          {models.map((model) => (
+            <label
+              key={model.id}
+              className="flex cursor-default items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13px] text-content/85 hover:bg-content/8"
+            >
+              <input
+                type="checkbox"
+                checked={!hidden.has(model.id)}
+                onChange={(event) => toggle(model.id, event.target.checked)}
+                className="size-3.5 shrink-0 accent-accent"
+              />
+              <span className="min-w-0 truncate">
+                {model.provider?.name ? `${model.provider.name} · ` : ""}
+                {model.name}
+              </span>
+            </label>
+          ))}
+        </Popover>
+      ) : null}
+    </>
   );
 }
 

@@ -6,6 +6,7 @@ import {
   isReadTool,
   isSearchTool,
   isWeakToolTitle,
+  looksLikeToolCode,
 } from "../../../integrations/harness/core/preview";
 import { leafName } from "../../files/model/fileName";
 import {
@@ -65,6 +66,13 @@ export function toolCallState(block: Block): ToolCallState {
 
 export function toolCallLabel(block: Block, cwd?: string): string {
   const preview = block.tool?.preview;
+  // Older sessions may already contain a script misidentified as a read.
+  if (
+    (preview?.path && looksLikeToolCode(preview.path)) ||
+    (preview?.fileName && looksLikeToolCode(preview.fileName))
+  ) {
+    return "Run tool";
+  }
   const path = preview?.path
     ? displayPath(preview.path, cwd)
     : preview?.fileName;
@@ -808,6 +816,7 @@ export function toolCategory(block: Block): ActivityWorkKind {
   const title = block.text || block.tool?.title;
   const preview = block.tool?.preview;
   const label = toolCallLabel(block);
+  if (label === "Run tool") return "other";
   if (isAgentTool(kind, title)) return "agent";
   if (isEditTool(kind, title, preview)) return "edit";
   if (isSearchTool(kind, title, preview)) return "research";
@@ -1090,56 +1099,7 @@ export function activityPhaseTitle(phase: ActivityPhase, live = false): string {
   return workSummaryLine(phase.steps, live);
 }
 
-/** The span of a turn that folds away once the agent has answered for it. */
-export type WorkFold = { start: number; end: number };
-
-/**
- * The work a turn can put away: everything from the first thing the agent did
- * up to the last group it has already narrated past, leaving the user's
- * message above and the answer that summarised the work below.
- *
- * Prose following a group puts its work away, except for calls still awaiting
- * approval. As the turn streams, each new paragraph folds the work and running
- * commentary before it, leaving the final answer visible. A late approval can
- * reopen that boundary so its controls remain available.
- *
- * Persisted interjections (system blocks with interjection chrome) are neither
- * prose nor work, so while the turn is live they stand on their own and stop
- * the fold: an answer the harness already showed never folds behind an
- * interjection that arrived after it. A settled turn groups them into the
- * trail itself, where the fold simply spans them.
- *
- * The message the agent yielded with, while work it left in the background
- * was still running, is its answer to the prompt. Whatever a finished task
- * wakes it up to say afterwards comes below that answer, not in its place.
- */
-export function foldableWork(items: TurnItem[]): WorkFold | undefined {
-  let end = -1;
-  let answered = false;
-  for (let index = yieldedAt(items) - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "activity") {
-      if (answered && isFoldableItem(item)) {
-        end = index;
-        break;
-      }
-      continue;
-    }
-    if (item.type === "block" && isProseBlock(item.block)) answered = true;
-  }
-  if (end < 0) return undefined;
-  // Only work and the agent's commentary on it fold. A plan, a task list or a
-  // call waiting on approval stays where the agent put it.
-  let start = end;
-  while (start > 0 && isFoldableItem(items[start - 1])) start -= 1;
-  return { start, end };
-}
-
-/**
- * Where the fold has to stop: the first group of background rows, which sits
- * right under the message the agent yielded with. The whole turn when there
- * is none.
- */
+/** The first background group after the reply the agent yielded with. */
 function yieldedAt(items: TurnItem[]): number {
   const index = items.findIndex((item, at) => {
     const before = items[at - 1];
@@ -1154,35 +1114,15 @@ function yieldedAt(items: TurnItem[]): number {
 }
 
 function isFoldableItem(item: TurnItem): boolean {
-  // A stack of delegated runs is work, so the fold reaches across it and the
-  // turn's status line stays at the top. The rows themselves never collapse —
-  // the transcript pins them outside the fold's body.
   if (item.type === "subagents") return true;
   return item.type === "activity"
     ? !item.blocks.some(needsApproval)
     : isProseBlock(item.block);
 }
 
-/**
- * Where a turn's work begins, fold or no fold: the line the work folds behind
- * has a place to sit from the start, so it fades in rather than appearing
- * under the reader's eye and shoving the answer down.
- */
+/** Where the turn's status line sits, above its first work or commentary. */
 export function firstFoldableIndex(items: TurnItem[]): number {
   return items.findIndex(isFoldableItem);
-}
-
-/** Every block inside a fold, work and commentary alike. */
-export function foldedBlocks(items: TurnItem[], fold: WorkFold): Block[] {
-  return items.slice(fold.start, fold.end + 1).flatMap((item) =>
-    item.type === "block"
-      ? [item.block]
-      : // Delegated runs keep their own rows, so they are not part of what
-        // the fold summarises.
-        item.type === "subagents"
-        ? []
-        : item.blocks,
-  );
 }
 
 /** True when a nested scroller should consume this wheel, not the parent. */

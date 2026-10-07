@@ -18,6 +18,7 @@ import {
   Wrench,
   X,
 } from "../../../shared/ui/icons";
+import { formatInteger } from "../../../shared/lib/numbers";
 import {
   memo,
   startTransition,
@@ -111,8 +112,6 @@ import {
   activityStillRunning,
   buildActivityPhases,
   firstFoldableIndex,
-  foldableWork,
-  foldedBlocks,
   initialThinkingIndex,
   isFailedStatus,
   isIncompleteTool,
@@ -354,14 +353,9 @@ function AgentTranscriptComponent({
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [loadEarlierError, setLoadEarlierError] = useState(false);
   const loadEarlierPending = useRef(false);
-  // Turns whose folded work the reader has opened, by turn id.
-  const [openWork, setOpenWork] = useState<Record<string, boolean>>({});
   const [searchCurrent, setSearchCurrent] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const highlightOwner = useRef(Symbol("transcript-search"));
-  const toggleWork = useCallback((turnId: string, currentlyOpen: boolean) => {
-    setOpenWork((open) => ({ ...open, [turnId]: !currentlyOpen }));
-  }, []);
   // Stretch the last turn after a send while this tab stays open. Closing
   // the tab is a new visit: the remount uses the true transcript height so
   // the latest reply sits near the composer instead of a hole of empty space.
@@ -803,11 +797,9 @@ function AgentTranscriptComponent({
       );
       if (!turn || !revealBlock(blockId)) return false;
       const turnId = turn[0].id;
-      // A result inside folded work needs its row rendered before measuring it.
+      // A result inside a collapsed group needs its row rendered before
+      // measuring it.
       flushSync(() => {
-        setOpenWork((current) =>
-          current[turnId] ? current : { ...current, [turnId]: true },
-        );
         setSearchCurrent(blockId);
         setSearchQuery(query);
       });
@@ -881,7 +873,7 @@ function AgentTranscriptComponent({
       if (frame) cancelAnimationFrame(frame);
       clearTranscriptHighlights(owner);
     };
-  }, [visible, searchQuery, searchCurrent, visibleTurnCount, openWork]);
+  }, [visible, searchQuery, searchCurrent, visibleTurnCount]);
 
   refreshChatMotion.current = useBottomChatMotion(
     scrollerEl,
@@ -1026,14 +1018,11 @@ function AgentTranscriptComponent({
           // leaving the prompt and the answer to it.
           const turnId = turn[0].id;
           const spawnedSessions = inlineWork ? monoSpawnedSessions(turn) : [];
-          const fold = inlineWork ? undefined : foldableWork(items);
-          const folded = fold ? foldedBlocks(items, fold) : [];
-          const summarizedWork = inlineWork
-            ? items.flatMap((item) =>
-                item.type === "block" ? [] : item.blocks,
-              )
-            : folded;
-          const workOpen = openWork[turnId] ?? false;
+          // Every run of calls is its own collapsible group between the prose
+          // around it, so the turn never folds as a whole.
+          const summarizedWork = items.flatMap((item) =>
+            item.type === "block" ? [] : item.blocks,
+          );
           // The fold line is the turn's status line from the first token to
           // the last: the mark, and the clock beside it. It never moves, so a
           // turn settling does not shuffle the layout around the answer.
@@ -1075,11 +1064,10 @@ function AgentTranscriptComponent({
             standaloneReply ||
             live ||
             durationMs != null ||
-            (inlineWork
-              ? items.some(
-                  (item) => item.type !== "block" || item.block.role !== "user",
-                )
-              : !!fold);
+            (inlineWork &&
+              items.some(
+                (item) => item.type !== "block" || item.block.role !== "user",
+              ));
           // It sits where the work starts, from before there is any: the row
           // is there from the first token, so nothing shoves the answer down
           // when the turn folds.
@@ -1092,11 +1080,7 @@ function AgentTranscriptComponent({
                       item.type !== "block" || item.block.role !== "user",
                   )
                 : firstFoldableIndex(items);
-          const foldLineAt = fold
-            ? fold.start
-            : firstWork >= 0
-              ? firstWork
-              : items.length;
+          const foldLineAt = firstWork >= 0 ? firstWork : items.length;
           const isCurrentItem = (item: TurnItem) =>
             item.type === "block"
               ? item.block.id === searchCurrent
@@ -1206,21 +1190,6 @@ function AgentTranscriptComponent({
                 }
               />
             );
-          // The fold reaches across a stack of delegated runs, but those rows
-          // do not collapse with it: they are lifted out and parked under the
-          // work, where they stay put however often it re-folds.
-          const foldEntries = fold
-            ? items.slice(fold.start, fold.end + 1).map((entry, offset) => ({
-                entry,
-                index: fold.start + offset,
-              }))
-            : [];
-          const foldSubagents = foldEntries.filter(
-            ({ entry }) => entry.type === "subagents",
-          );
-          const foldWork = foldEntries.filter(
-            ({ entry }) => entry.type !== "subagents",
-          );
           const foldLineRow = (
             <TurnRow key="work-fold" folded={!showFoldLine}>
               {inlineWork ? (
@@ -1255,9 +1224,6 @@ function AgentTranscriptComponent({
                   harness={turnHarness}
                   agentMascot={agentMascot}
                   live={live}
-                  expandable={!!fold}
-                  open={workOpen && !!fold}
-                  onToggle={() => toggleWork(turnId, workOpen)}
                 />
               )}
             </TurnRow>
@@ -1285,58 +1251,6 @@ function AgentTranscriptComponent({
                     !item.blocks.some(needsApproval)
                   )
                     return itemIndex === foldLineAt ? [foldLineRow] : [];
-                  const inFold =
-                    !!fold && itemIndex >= fold.start && itemIndex <= fold.end;
-                  if (inFold) {
-                    if (itemIndex !== fold.start) return [];
-                    return [
-                      foldLineRow,
-                      <TurnRow key="work-details" folded={!workOpen}>
-                        {() =>
-                          foldWork.map(({ entry, index }, offset) => (
-                            <div
-                              key={turnItemKey(entry)}
-                              data-transcript-search-item
-                              data-transcript-search-current={
-                                isCurrentItem(entry) || undefined
-                              }
-                              className={`flow-root pb-1 last:pb-0 pl-5 zen-fold-rail ${
-                                offset === foldWork.length - 1
-                                  ? "zen-fold-tail"
-                                  : ""
-                              }${
-                                // Prose the trail holds is the agent talking
-                                // while it works; the marker lets it read as
-                                // process, not result.
-                                entry.type === "block" &&
-                                isProseBlock(entry.block)
-                                  ? " zen-fold-prose"
-                                  : ""
-                              }`}
-                            >
-                              {renderItem(entry, index)}
-                            </div>
-                          ))
-                        }
-                      </TurnRow>,
-                      // Delegated runs sit under the agent's own work, not
-                      // among it: they are a second thing the turn is doing,
-                      // and reading them as the first steps of the main trail
-                      // is what made them look like its work.
-                      ...foldSubagents.map(({ entry, index }) => (
-                        <div
-                          key={turnItemKey(entry)}
-                          data-transcript-search-item
-                          data-transcript-search-current={
-                            isCurrentItem(entry) || undefined
-                          }
-                          className="flow-root pb-1"
-                        >
-                          {renderItem(entry, index)}
-                        </div>
-                      )),
-                    ];
-                  }
                   const row = (
                     <div
                       key={turnItemKey(item)}
@@ -2637,10 +2551,9 @@ function turnItemKey(item: TurnItem): string {
 }
 
 /**
- * The line a turn's work folds behind: the agent's mark, and the clock —
- * ticking while the agent works, how long it took once it is done. Everything
- * the fold holds stays one click away, so the settled transcript reads as
- * prompt, answer, and a receipt for the work in between.
+ * The turn's status line: the agent's mark, and the clock — ticking while the
+ * agent works, how long it took once it is done. The work itself sits below in
+ * its own groups, each opening on its own.
  */
 function WorkFoldLine({
   title,
@@ -2648,95 +2561,42 @@ function WorkFoldLine({
   harness,
   agentMascot,
   live = false,
-  expandable,
-  open,
-  onToggle,
 }: {
   title: ReactNode;
   kind: ActivityPhaseKind;
   harness?: HarnessId;
   agentMascot?: Props["agentMascot"];
   live?: boolean;
-  expandable: boolean;
-  open: boolean;
-  onToggle: () => void;
 }) {
-  const icon = (
-    <span className="relative flex size-3.5 shrink-0 items-center justify-center">
-      {open ? (
-        // Open, the chevron stays put: it is the way back, and hunting for it
-        // under the cursor is no way to close what you opened.
-        <ChevronRight
-          className="size-3.5 rotate-90 text-content/45"
-          strokeWidth={1.75}
-        />
-      ) : (
-        <>
-          {agentMascot ? (
-            <PixelMascot
-              name={agentMascot.mascot}
-              color={agentMascot.color}
-              still
-              className={`size-3.5 shrink-0 ${expandable ? "group-hover:opacity-0" : ""}`}
-            />
-          ) : harness ? (
-            <HarnessIcon
-              harness={harness}
-              className={`size-3.5 shrink-0 ${expandable ? "group-hover:opacity-0" : ""}`}
-            />
-          ) : (
-            <ActivityPhaseIcon
-              kind={kind}
-              className={expandable ? "group-hover:opacity-0" : ""}
-            />
-          )}
-          {expandable ? (
-            <ChevronRight
-              className="absolute size-3.5 text-content/45 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-              strokeWidth={1.75}
-            />
-          ) : null}
-        </>
-      )}
-    </span>
-  );
-  // While the agent runs, the clock shimmers here rather than at the bottom,
-  // which is now bare.
-  const label = live ? (
-    title
-  ) : (
-    <span className="min-w-0 flex-1 truncate font-sans text-sm text-content/50 transition-colors duration-200 group-hover:text-content/80">
-      {title}
-    </span>
-  );
-  const row = `flex w-full min-w-0 items-center gap-1.5 px-4 py-1 text-left${
-    open ? " zen-fold-drop" : ""
-  }`;
-
-  if (!expandable) {
-    return (
-      <div
-        className={`group ${row}`}
-        role={live ? "status" : undefined}
-        aria-live={live ? "polite" : undefined}
-      >
-        {icon}
-        {label}
-      </div>
-    );
-  }
   return (
-    <button
-      type="button"
-      aria-expanded={open}
-      aria-label={open ? "Hide the work" : "Show the work"}
+    <div
+      className="flex w-full min-w-0 items-center gap-1.5 px-4 py-1 text-left"
+      role={live ? "status" : undefined}
       aria-live={live ? "polite" : undefined}
-      onClick={onToggle}
-      className={`group ${row}`}
     >
-      {icon}
-      {label}
-    </button>
+      <span className="relative flex size-3.5 shrink-0 items-center justify-center">
+        {agentMascot ? (
+          <PixelMascot
+            name={agentMascot.mascot}
+            color={agentMascot.color}
+            still
+            className="size-3.5 shrink-0"
+          />
+        ) : harness ? (
+          <HarnessIcon harness={harness} className="size-3.5 shrink-0" />
+        ) : (
+          <ActivityPhaseIcon kind={kind} />
+        )}
+      </span>
+      {/* While the agent runs, the clock shimmers here. */}
+      {live ? (
+        title
+      ) : (
+        <span className="min-w-0 flex-1 truncate font-sans text-sm text-content/50">
+          {title}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -3170,6 +3030,24 @@ export function MonoActivityTrail({
  * While live, the open body stays a short scrolling window pinned to the
  * newest step; after the turn settles an opened group is full height again.
  */
+/**
+ * Keeps a group's body mounted until its close transition has played, so
+ * collapsing eases shut instead of snapping. Closed bodies still unmount, which
+ * keeps a long transcript's settled steps out of the DOM.
+ */
+function useCollapseMount(open: boolean): boolean {
+  const [shown, setShown] = useState(open);
+  if (open && !shown) setShown(true);
+  useEffect(() => {
+    if (open || !shown) return;
+    // Matches the `.zen-phase-body` transition; reduced motion never fires
+    // transitionend, so a timer is the reliable end.
+    const timer = window.setTimeout(() => setShown(false), 340);
+    return () => window.clearTimeout(timer);
+  }, [open, shown]);
+  return open || shown;
+}
+
 function ActivityPhaseGroup({
   phase,
   cwd,
@@ -3188,6 +3066,7 @@ function ActivityPhaseGroup({
   const [override, setOverride] = useState<boolean | null>(null);
   const waiting = phase.steps.some(needsApproval);
   const open = waiting || (override ?? active);
+  const mounted = useCollapseMount(open);
   const [liveScroller, setLiveScroller] = useState<HTMLDivElement | null>(null);
   useLivePhaseScroll(liveScroller, active && open, phase.steps);
   // Steps already here when the group mounted, or that landed while it was
@@ -3286,8 +3165,8 @@ function ActivityPhaseGroup({
         </span>
         {label}
       </button>
-      <div className="zen-phase-body" data-open={open}>
-        {open ? (
+      <div className="zen-phase-body" data-open={open} inert={!open}>
+        {mounted ? (
           <div
             ref={setLiveScroller}
             className={active || !open ? "zen-phase-live" : undefined}
@@ -3517,6 +3396,7 @@ function SubagentPanel({
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
 }) {
+  const mounted = useCollapseMount(open);
   const name = subagentName(block);
   const brief = subagentBrief(block);
   const model = subagentModelName(block);
@@ -3605,8 +3485,8 @@ function SubagentPanel({
           strokeWidth={1.75}
         />
       </button>
-      <div className="zen-phase-body" data-open={open}>
-        {open ? (
+      <div className="zen-phase-body" data-open={open} inert={!open}>
+        {mounted ? (
           /*
            * No scroll window of its own. Each phase inside already keeps the
            * group the run is working in to a short pinned window; wrapping a
@@ -4482,6 +4362,15 @@ function ToolCallSummary({
     previewMatchesFile &&
     (preview.contentOnly ||
       preview.lines?.some((line) => line.kind !== "context"));
+  // The counts belong to the preview's file, so only a matching preview shows
+  // them. `lines` is capped, so the provider's totals are the only honest ones.
+  const diffCounts =
+    (action === "Edit" || action === "Write") &&
+    preview?.kind === "write" &&
+    previewMatchesFile &&
+    (preview.additions || preview.deletions)
+      ? { additions: preview.additions ?? 0, deletions: preview.deletions ?? 0 }
+      : undefined;
   const actionTone = failed ? "text-red-400" : "text-content/50";
   const targetTone = failed
     ? "text-red-400"
@@ -4506,7 +4395,7 @@ function ToolCallSummary({
             className={`-my-0.5 flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 text-left hover:text-sky-300 ${
               chip
                 ? `max-w-full bg-content/6 hover:bg-content/10 ${targetTone}`
-                : `flex-1 hover:bg-content/6 ${targetTone}`
+                : `${diffCounts ? "" : "flex-1 "}hover:bg-content/6 ${targetTone}`
             }`}
           >
             <FileTypeIcon name={fileName} isDir={false} />
@@ -4550,6 +4439,19 @@ function ToolCallSummary({
           <span className="min-w-0 truncate">{target}</span>
         </span>
       )}
+      {diffCounts ? (
+        <span
+          className="shrink-0 tabular-nums text-[12px]"
+          aria-label={`${diffCounts.additions} added, ${diffCounts.deletions} removed`}
+        >
+          <span className="text-diff-add-fg">
+            +{formatInteger(diffCounts.additions)}
+          </span>{" "}
+          <span className="text-diff-del-fg">
+            -{formatInteger(diffCounts.deletions)}
+          </span>
+        </span>
+      ) : null}
     </span>
   );
 }

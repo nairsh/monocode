@@ -16,6 +16,7 @@ import {
   loadFavoriteModels,
   modelEffortSetting,
   modelsFor,
+  pickerModels,
   preferredModelSettings,
   saveFavoriteModels,
   showProviderInModelPicker,
@@ -82,7 +83,7 @@ export function QuickModelSelector({
             (item): item is AgentModel =>
               !!item && providers.includes(item.harness),
           )
-      : modelsFor(visibleTab);
+      : pickerModels(modelsFor(visibleTab), model.id);
   const models = filterQuickModels(pool, query);
   const effort =
     modelEffortSetting(model) ??

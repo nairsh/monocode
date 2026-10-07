@@ -7,6 +7,7 @@ import {
 import { SidebarWorktreeSwitcher } from "../../features/source-control/ui/SidebarWorktreeSwitcher";
 import { OrchestrationSidebarAgents } from "../../features/orchestration/ui/OrchestrationSidebarAgents";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { createPortal } from "react-dom";
 import {
   Archive,
   Chatting,
@@ -159,7 +160,7 @@ import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview"
 import { ProjectRail } from "./ProjectRail";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
 import { RailAction } from "./RailAction";
-import { TerminalSpinner } from "../../features/sessions/ui/TerminalSpinner";
+import { NineDotSpinner } from "../../features/sessions/ui/NineDotSpinner";
 import { DevModeSlot, IconButton, TabVisitNav } from "./TitleBar";
 import { ProjectSearch } from "../../features/projects/ui/ProjectSearch";
 import { Popover } from "../../shared/ui/Popover";
@@ -304,6 +305,10 @@ type Props = {
   liveAgents?: LiveAgent[];
   onSelectAgent?: (sessionId: string) => void;
   onSelectProject?: (path: string) => void;
+  /** Starts a chat in a project from its row on the rail. */
+  onNewInProject?: (path: string) => void;
+  /** Where the workspace panel docks while the project rail is open. */
+  rightSlot?: HTMLElement | null;
   onOpenProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
   onNew?: () => string | void;
@@ -401,6 +406,8 @@ function SidebarComponent({
   liveAgents = [],
   onSelectAgent,
   onSelectProject,
+  onNewInProject,
+  rightSlot,
   onOpenProject,
   onRemoveProject,
   onNew,
@@ -435,7 +442,12 @@ function SidebarComponent({
   monoViewActive = false,
 }: Props) {
   const remoteProject = isRemoteProjectPath(cwd);
-  const tab: SidebarTabId = requestedTab;
+  // With the full rail open, chats are listed under each project there.
+  const threadsOnRail =
+    Boolean(onSelectProject && onOpenProject && onNewInProject) &&
+    projectRailOpen;
+  const tab: SidebarTabId =
+    threadsOnRail && requestedTab === "sessions" ? "files" : requestedTab;
   const remote = useRemoteProjectSessions(cwd, remoteProject);
   const hostProject = remoteProject ? remoteProjectFor(cwd) : undefined;
   const remoteChange = async (
@@ -556,7 +568,12 @@ function SidebarComponent({
     remoteProject && hostProject
       ? remotePath(hostProject.environmentId, remoteExecutionCwd ?? hostProject.cwd)
       : gitCwd || cwd;
+  // Beside the open project rail, the workspace panel docks on the right.
+  const dockRight = Boolean(
+    rightSlot && onSelectProject && onOpenProject && projectRailOpen,
+  );
   const resize = useDragResize({
+    direction: dockRight ? "left" : "right",
     min: MIN_WIDTH,
     max: () => Math.min(MAX_WIDTH, Math.floor(window.innerWidth * 0.5)),
     defaultWidth: DEFAULT_WIDTH,
@@ -743,11 +760,13 @@ function SidebarComponent({
   const sessionListKey = `${cwd}\0${sessionFilters.showArchived}\0${sessionFilters.time}\0${sessionFilters.hiddenHarnesses.join(",")}\0${sessionFilters.status.working}\0${sessionFilters.status.needsApproval}\0${sessionFilters.status.done}\0${searchQuery}`;
   const sessionHarnesses = harnessesInSessions(projectSessions);
   const narrowedByUser = searchNarrowed || filtersActive;
-  const visibleTabs = tabOrder.filter((itemId) => itemId !== "inbox");
+  const hiddenTab = (itemId: SidebarTab) =>
+    itemId === "inbox" || (threadsOnRail && itemId === "sessions");
+  const visibleTabs = tabOrder.filter((itemId) => !hiddenTab(itemId));
   const sortable = useAnimatedReorder(visibleTabs, (ids) => {
     let index = 0;
     const next = tabOrder.map((itemId) =>
-      itemId === "inbox" ? itemId : ids[index++],
+      hiddenTab(itemId) ? itemId : ids[index++],
     );
     setTabOrder(next);
     saveSidebarTabOrder(next);
@@ -869,6 +888,46 @@ function SidebarComponent({
       if (drawerClosing) setDrawerMounted(false);
     };
   }, [drawerRendered, drawerClosing]);
+
+  // The right-docked panel stays mounted and slides its width open or shut.
+  const dockRef = useRef<HTMLDivElement>(null);
+  const dockAnimation = useRef<Animation | null>(null);
+  const dockShown = useRef(sidebarVisible);
+  useLayoutEffect(() => {
+    const dock = dockRef.current;
+    if (!dock || dockShown.current === sidebarVisible) {
+      dockShown.current = sidebarVisible;
+      return;
+    }
+    dockShown.current = sidebarVisible;
+    const full =
+      dock.firstElementChild instanceof HTMLElement
+        ? dock.firstElementChild.offsetWidth
+        : 0;
+    const from = dockAnimation.current
+      ? dock.getBoundingClientRect().width
+      : sidebarVisible
+        ? 0
+        : full;
+    dockAnimation.current?.cancel();
+    dockAnimation.current = null;
+    if (
+      typeof dock.animate !== "function" ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+    const animation = dock.animate(
+      [{ width: `${from}px` }, { width: `${sidebarVisible ? full : 0}px` }],
+      sidebarVisible
+        ? { duration: 200, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+        : { duration: 160, easing: "cubic-bezier(0.4, 0, 1, 1)" },
+    );
+    dockAnimation.current = animation;
+    animation.onfinish = () => {
+      if (dockAnimation.current === animation) dockAnimation.current = null;
+    };
+  }, [sidebarVisible, dockRight]);
 
   useEffect(() => {
     if (!drawerVisible) return;
@@ -1676,7 +1735,9 @@ function SidebarComponent({
   const sidebarContent = (
     <aside
       ref={resize.setPaneRef}
-      className="body-glass relative flex h-full min-h-0 shrink-0 flex-col border-r border-stroke"
+      className={`body-glass relative flex h-full min-h-0 shrink-0 flex-col border-stroke ${
+        dockRight ? "border-l" : "border-r"
+      }`}
     >
       {railVisible ? (
         <>
@@ -2208,7 +2269,9 @@ function SidebarComponent({
         aria-valuenow={resize.width}
         aria-valuemin={MIN_WIDTH}
         aria-valuemax={MAX_WIDTH}
-        className={`absolute inset-y-0 -right-px z-10 w-1.5 cursor-col-resize touch-none ${
+        className={`absolute inset-y-0 z-10 w-1.5 cursor-col-resize touch-none ${
+          dockRight ? "-left-px" : "-right-px"
+        } ${
           resize.dragging ? "bg-content/15" : "hover:bg-content/10"
         }`}
         onPointerDown={resize.onPointerDown}
@@ -2292,9 +2355,59 @@ function SidebarComponent({
           onOpenWhatsNew={onOpenWhatsNew}
           onDismissUpdate={onDismissUpdate}
           monos={railMonos}
+          threads={
+            onNewInProject
+              ? {
+                  current: listedSessions,
+                  activeSessionId: activeListedSessionId,
+                  busyIds: listedBusySessionIds,
+                  approvalIds: listedApprovalSessionIds,
+                  unseenIds: unseenFinishedIds,
+                  onSelect: onSelectSession,
+                  onNew: onNewInProject,
+                  onRename: onRenameLocalSession || remoteProject
+                    ? (session, title) => {
+                        if (remoteProjectFor(session.cwd))
+                          onRenameSession?.(session.id, title);
+                        else onRenameLocalSession?.(session.id, title);
+                      }
+                    : undefined,
+                  onArchive: onArchiveLocalSession || remoteProject
+                    ? (session, archived) => {
+                        if (remoteProjectFor(session.cwd))
+                          onArchiveSession?.(session.id, archived);
+                        else onArchiveLocalSession?.(session.id, archived);
+                      }
+                    : undefined,
+                  onDelete: onDeleteLocalSession || remoteProject
+                    ? (session) => {
+                        if (remoteProjectFor(session.cwd))
+                          onDeleteSession?.(session.id);
+                        else onDeleteLocalSession?.(session.id);
+                      }
+                    : undefined,
+                }
+              : undefined
+          }
         />
       ) : null}
-      {sidebarVisible ? sidebarContent : null}
+      {dockRight && rightSlot
+        ? createPortal(
+            // Pinned to the left edge, so the panel slides in from the right.
+            <div
+              ref={dockRef}
+              inert={!sidebarVisible || undefined}
+              className={`flex h-full shrink-0 justify-start overflow-hidden ${
+                sidebarVisible ? "" : "w-0"
+              }`}
+            >
+              {sidebarAvailable ? sidebarContent : null}
+            </div>,
+            rightSlot,
+          )
+        : sidebarVisible
+          ? sidebarContent
+          : null}
       {drawerRendered ? (
         // Pinned to the right edge, so the sidebar slides in as the width grows.
         <div
@@ -2960,7 +3073,7 @@ function FolderRow({
         {!expanded && needsApproval ? (
           <CircleAlert className="size-3 text-amber-400" strokeWidth={1.75} />
         ) : !expanded && busy ? (
-          <TerminalSpinner className="inline-block w-3 select-none text-center text-[11px] leading-none text-accent" />
+          <NineDotSpinner className="text-accent" />
         ) : !expanded && done ? (
           <Check className="size-3 text-emerald-400" strokeWidth={2.25} />
         ) : null}
@@ -3216,7 +3329,7 @@ const SessionCard = memo(function SessionCard({
         </>
       ) : busy ? (
         <>
-          <TerminalSpinner className="inline-block w-3 select-none text-center text-[11px] leading-none text-accent" />
+          <NineDotSpinner className="text-accent" />
           <span>Working...</span>
         </>
       ) : done ? (

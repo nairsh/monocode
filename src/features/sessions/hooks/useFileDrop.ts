@@ -5,6 +5,7 @@ import {
   type ExplorerFilePointerDragDetail,
 } from "../../../shared/lib/drag";
 import { dragPointToClient } from "../../../shared/lib/dragPoint";
+import { loadUiScale } from "../../settings/model/uiScale";
 import type { Attachment } from "../model/session";
 import {
   attachmentsFromFiles,
@@ -119,7 +120,7 @@ export function useFileDrop({
           return;
         }
         const { x, y } = event.payload.position;
-        const point = dragPointToClient(x, y);
+        const point = dragPointToClient(x, y, loadUiScale());
         const over = overTarget(point.x, point.y);
         const supported = state.current.attachmentsSupported;
         if (event.payload.type === "enter" || event.payload.type === "over") {

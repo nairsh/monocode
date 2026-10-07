@@ -1,4 +1,12 @@
-import { LoaderCircle, Plus, Search, File, Trash2, X } from "../../../shared/ui/icons";
+import {
+  ImagePlus,
+  LoaderCircle,
+  Plus,
+  Search,
+  File,
+  Trash2,
+  X,
+} from "../../../shared/ui/icons";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   useCallback,
@@ -6,6 +14,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -36,6 +45,8 @@ import {
 } from "../notes";
 import {
   insertNoteImagesMarkdown,
+  pickNoteImages,
+  saveNoteImagesFromClipboard,
   saveNoteImagesFromFiles,
   saveNoteImagesFromPaths,
   type NoteImageAsset,
@@ -53,6 +64,7 @@ import {
 } from "../../workspace/model/tabGroups";
 import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
 import { MarkdownSourceEditor } from "../../sessions/ui/MarkdownSourceEditor";
+import { filesFromClipboard } from "../../sessions/model/attachments";
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 420;
@@ -923,21 +935,37 @@ function NoteEditor({
             </div>
           ) : null}
         </header>
-        <div
-          role="tablist"
-          aria-label="Note sections"
-          className="flex h-9 items-stretch gap-4 border-b border-stroke"
-        >
-          <NoteDetailTab
-            label="Preview"
-            selected={mode === "preview"}
-            onSelect={() => setMode("preview")}
-          />
-          <NoteDetailTab
-            label="Source"
-            selected={mode === "source"}
-            onSelect={() => setMode("source")}
-          />
+        <div className="flex h-9 items-stretch border-b border-stroke">
+          <div
+            role="tablist"
+            aria-label="Note sections"
+            className="flex items-stretch gap-4"
+          >
+            <NoteDetailTab
+              label="Preview"
+              selected={mode === "preview"}
+              onSelect={() => setMode("preview")}
+            />
+            <NoteDetailTab
+              label="Source"
+              selected={mode === "source"}
+              onSelect={() => setMode("source")}
+            />
+          </div>
+          <button
+            type="button"
+            aria-label="Add image"
+            title="Add image"
+            disabled={imageBusy}
+            onClick={() => {
+              const range = insertionRange();
+              void addDroppedImages(() => pickNoteImages(note.id), range);
+            }}
+            className="ml-auto flex items-center gap-1 text-[12px] text-content/50 hover:text-content disabled:opacity-50"
+          >
+            <ImagePlus className="size-3.5" />
+            Image
+          </button>
         </div>
         <div
           ref={dropZoneRef}
@@ -981,6 +1009,27 @@ function NoteEditor({
               textareaRef={sourceFieldRef}
               autoFocus={blank}
               value={body}
+              onPaste={(event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+                const range = insertionRange();
+                const files = filesFromClipboard(event.clipboardData);
+                if (files.some((file) => file.type.startsWith("image/"))) {
+                  event.preventDefault();
+                  void addDroppedImages(
+                    () => saveNoteImagesFromFiles(note.id, files),
+                    range,
+                  );
+                  return;
+                }
+                // Text is the textarea's to insert. A paste with nothing the
+                // webview can see is a screenshot on the native clipboard.
+                if (files.length || event.clipboardData.getData("text/plain"))
+                  return;
+                event.preventDefault();
+                void addDroppedImages(
+                  () => saveNoteImagesFromClipboard(note.id),
+                  range,
+                );
+              }}
               onChange={(next) => {
                 editNote({ body: next });
                 scheduleSave();

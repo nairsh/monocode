@@ -1,11 +1,11 @@
 import {
-  ArrowUp,
   AiIdea,
   Check,
   CircleDashed,
   CursorMagicSelection,
   FilePlus,
   Plus,
+  SendArrow,
   Share,
   Square,
   StickyNote,
@@ -37,7 +37,6 @@ import {
   nativeClipboardAttachments,
 } from "../../../platform/tauri/clipboard";
 import { useFileDrop } from "../hooks/useFileDrop";
-import type { ContextUsage } from "../model/contextUsage";
 import {
   loadProjectFiles,
   peekProjectFiles,
@@ -98,7 +97,6 @@ import {
 } from "../../skills/model/skills";
 import { AccessPicker } from "./AccessPicker";
 import { ComposerRunner } from "./ComposerRunner";
-import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "../../source-control/ui/BranchPicker";
 import { WorktreePicker } from "../../source-control/ui/WorktreePicker";
@@ -224,8 +222,6 @@ type Props = {
   /** Keeps local file mentions, skills, and app modes off for host sessions. */
   remoteSession?: boolean;
   remoteFeatures?: { attachments: boolean; plan: boolean; draft: boolean };
-  context?: ContextUsage;
-  compactSupported?: boolean;
   quoteRequest?: QuoteRequest;
   initialDraft?: string;
   draftResetToken?: number;
@@ -293,6 +289,11 @@ type Props = {
   children?: ReactNode;
 };
 
+/** Below this the docked field stacks above its buttons instead of squeezing. */
+const MIN_INLINE_FIELD_WIDTH = 140;
+const BOX_RESIZE_MS = 200;
+const BOX_RESIZE_EASING = "cubic-bezier(0.22, 1, 0.36, 1)";
+
 function ToolButton({
   active,
   disabled,
@@ -313,7 +314,7 @@ function ToolButton({
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
-      className={`grid size-6.5 shrink-0 place-items-center rounded-md ${
+      className={`grid size-7 shrink-0 place-items-center rounded-full transition-colors ${
         active
           ? "bg-selection-emphasis text-content"
           : "bg-selection text-content/50 hover:bg-selection-hover hover:text-content"
@@ -349,8 +350,6 @@ export function Composer({
   hideTopBar = false,
   remoteSession = false,
   remoteFeatures,
-  context,
-  compactSupported = false,
   quoteRequest,
   initialDraft,
   draftResetToken,
@@ -591,6 +590,48 @@ export function Composer({
     // The indent can rewrap the first line after the input already resized.
     if (ref.current) resizeComposer(ref.current);
   }, [modeIndent]);
+  // Docked, the composer is one pill-shaped row until the text wraps there.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const leadRef = useRef<HTMLDivElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const trailRef = useRef<HTMLDivElement>(null);
+  const inlineMeasure = useRef<HTMLTextAreaElement>(null);
+  const [wraps, setWraps] = useState(false);
+  useLayoutEffect(() => {
+    const row = rowRef.current;
+    const measure = inlineMeasure.current;
+    const parts = [leadRef.current, toolsRef.current, trailRef.current];
+    if (shell || !row || !measure || parts.some((part) => !part)) return;
+    const fit = () => {
+      if (!row.clientWidth) return;
+      // Always measure at the inline width, whatever the layout is now, so
+      // stacking the field can never make it fit inline again and flip back.
+      const style = getComputedStyle(row);
+      const gap = Number.parseFloat(style.columnGap) || 0;
+      const width =
+        row.clientWidth -
+        Number.parseFloat(style.paddingLeft) -
+        Number.parseFloat(style.paddingRight) -
+        parts.reduce((sum, part) => sum + (part?.offsetWidth ?? 0) + gap, 0);
+      measure.style.width = `${Math.max(0, width)}px`;
+      measure.style.textIndent = modeIndent ?? "";
+      measure.value = ref.current?.value ?? draft;
+      const field = getComputedStyle(measure);
+      const line =
+        Number.parseFloat(field.lineHeight) +
+        Number.parseFloat(field.paddingTop) +
+        Number.parseFloat(field.paddingBottom);
+      setWraps(
+        width < MIN_INLINE_FIELD_WIDTH || measure.scrollHeight > line + 1,
+      );
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(row);
+    for (const part of parts) if (part) observer.observe(part);
+    return () => observer.disconnect();
+  }, [shell, draft, modeIndent]);
+  const boxHeight = useRef(0);
   const mentionFiles = useMemo(
     () => (notesEnabled ? [...files, ...notesAsProjectFiles(notes)] : files),
     [files, notes, notesEnabled],
@@ -1709,6 +1750,63 @@ export function Composer({
     });
   };
 
+  const showTopBar = !(
+    hideTopBar ||
+    ((remote ? hideBranchPicker : hideProjectPicker) &&
+      !(worktreeRemoved && onWorktreeChange && !hideBranchPicker))
+  );
+  // Anything above the text turns the pill into a box with the field on top.
+  const stacked =
+    shell ||
+    wraps ||
+    showTopBar ||
+    attachments.length > 0 ||
+    !!pasteError ||
+    !!inboxCard ||
+    !!noteCard ||
+    !!handoffCard;
+  useLayoutEffect(() => {
+    // The field moved, so its wrapped height changed with its width.
+    if (ref.current) resizeComposer(ref.current);
+    const box = boxRef.current;
+    const from = boxHeight.current;
+    if (!box || shell || !from) return;
+    const to = box.offsetHeight;
+    if (
+      Math.abs(from - to) < 1 ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+      return;
+    // Grow or settle between the pill and the box instead of snapping.
+    box.style.overflow = "hidden";
+    const animation = box.animate(
+      [{ height: `${from}px` }, { height: `${to}px` }],
+      { duration: BOX_RESIZE_MS, easing: BOX_RESIZE_EASING },
+    );
+    const settle = () => {
+      box.style.overflow = "";
+    };
+    animation.onfinish = settle;
+    animation.oncancel = settle;
+    return () => animation.cancel();
+  }, [stacked, shell]);
+  useLayoutEffect(() => {
+    boxHeight.current = boxRef.current?.offsetHeight ?? 0;
+  });
+  const fieldPadding = shell
+    ? "px-1"
+    : stacked
+      ? "px-1.5"
+      : "px-1.5 py-[3px]";
+  // Keep the gutter outside the scrolling layers, so a long draft cannot
+  // scroll its text into the space reserved beneath an attachment.
+  const fieldGutter = shell ? "py-4" : stacked ? "pt-1 pb-2" : "";
+  const highlightInsets = shell
+    ? "inset-x-0 top-4 bottom-4"
+    : stacked
+      ? "inset-x-0 top-1 bottom-2"
+      : "inset-0";
+
   return (
     <div
       data-composer
@@ -1906,10 +2004,13 @@ export function Composer({
           ref={boxRef}
           data-composer-box
           data-composer-editing={resendEdited ? "" : undefined}
+          data-composer-shape={shell ? "box" : "pill"}
           className={`relative z-10 border bg-content/3 backdrop-blur-sm ${
+            shell ? "rounded-2xl" : "rounded-[22px]"
+          } ${
             resendEdited
-              ? "edit-last-turn-composer rounded-lg"
-              : "rounded-lg border-content/10 has-focus:border-content/20"
+              ? "edit-last-turn-composer"
+              : "border-content/10 has-focus:border-content/20"
           } ${
             fileDrag
               ? "border-accent/60"
@@ -1919,11 +2020,11 @@ export function Composer({
           }`}
         >
           {fileDrag ? (
-            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-lg bg-accent/8 text-[12px] text-content/70">
+            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-[inherit] bg-accent/8 text-[12px] text-content/70">
               Drop files to attach
             </div>
           ) : null}
-          {hideTopBar ? null : (
+          {!showTopBar ? null : (
             <div className="flex min-w-0 items-center gap-2.5 overflow-hidden px-3 pt-2.5">
               {!remote && !hideProjectPicker ? (
                 <CwdPicker
@@ -1936,9 +2037,8 @@ export function Composer({
                   onClose={() => ref.current?.focus()}
                 />
               ) : null}
-              {hideBranchPicker ? null : draftWorkspace &&
-                onWorkspaceModeChange &&
-                onWorktreeBaseChange ? (
+              {!hideBranchPicker && remote && draftWorkspace &&
+              onWorkspaceModeChange && onWorktreeBaseChange ? (
                 <>
                   <WorkspacePicker
                     cwd={executionCwd}
@@ -1961,7 +2061,7 @@ export function Composer({
                     />
                   ) : null}
                 </>
-              ) : worktreeRemoved && onWorktreeChange ? (
+              ) : !hideBranchPicker && worktreeRemoved && onWorktreeChange ? (
                 <WorktreePicker
                   cwd={cwd}
                   executionCwd={executionCwd}
@@ -1972,7 +2072,7 @@ export function Composer({
                   onManage={onManageWorktrees}
                   onClose={() => ref.current?.focus()}
                 />
-              ) : (
+              ) : !hideBranchPicker && remote ? (
                 <>
                   {onWorktreeChange ? (
                     <WorkspaceIdentity
@@ -1987,27 +2087,17 @@ export function Composer({
                     onClose={() => ref.current?.focus()}
                   />
                 </>
-              )}
-              <div className="ml-auto flex shrink-0 items-center">
-                <ContextMeter
-                  usage={context}
-                  onCompact={
-                    compactSupported && !worktreeRemoved
-                      ? onCompactContext
-                      : undefined
-                  }
-                  compactDisabled={busy}
-                />
-              </div>
+              ) : null}
             </div>
           )}
 
           {attachments.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+            <div className="flex flex-wrap items-end gap-2 px-3 pt-3">
               {attachments.map((file) => (
                 <AttachmentChip
                   key={file.id}
                   attachment={file}
+                  large
                   onRemove={() => removeAttachment(file.id)}
                 />
               ))}
@@ -2035,296 +2125,303 @@ export function Composer({
             />
           ) : null}
 
-          <div className="relative">
+          <div
+            ref={rowRef}
+            data-layout={stacked ? "stacked" : "inline"}
+            className={`composer-row relative grid items-center gap-x-1 ${
+              shell ? "px-2 pb-2" : "p-2"
+            }`}
+          >
             <div
-              ref={highlightRef}
-              aria-hidden
-              style={{ textIndent: modeIndent }}
-              className={`composer-highlight pointer-events-none absolute inset-0 max-h-40 overflow-hidden whitespace-pre-wrap wrap-break-word px-3 text-sm leading-5.5 text-content font-sans ${
-                shell ? "py-4" : "py-3"
-              }`}
+              className={`composer-row-field relative min-w-0 overflow-hidden ${fieldGutter}`}
             >
-              <ComposerHighlight
-                text={draft}
-                mode={leadingMode}
-                names={skillNames}
-                mentions={mentionIndex.labels}
-                mcpTags={selectedMcp}
+              <div
+                ref={highlightRef}
+                aria-hidden
+                style={{ textIndent: modeIndent }}
+                className={`composer-highlight pointer-events-none absolute ${highlightInsets} max-h-40 overflow-hidden whitespace-pre-wrap wrap-break-word text-sm leading-5.5 text-content font-sans ${fieldPadding}`}
+              >
+                <ComposerHighlight
+                  text={draft}
+                  mode={leadingMode}
+                  names={skillNames}
+                  mentions={mentionIndex.labels}
+                  mcpTags={selectedMcp}
+                />
+              </div>
+              <textarea
+                ref={ref}
+                data-composer-empty={navigationEmpty ? "true" : undefined}
+                style={{ textIndent: modeIndent }}
+                rows={1}
+                spellCheck={false}
+                defaultValue={mountDraft}
+                placeholder={
+                  worktreeRemoved
+                    ? "Select a branch or worktree to continue…"
+                    : inboxCard
+                      ? "Add a note, or send to start…"
+                      : noteCard
+                        ? "Add a message, or send…"
+                        : handoffCard
+                          ? "Add context, or send to continue…"
+                          : (placeholder ??
+                            "Ask, build, / for commands, @ for references... ")
+                }
+                aria-label={inputAriaLabel}
+                disabled={disabled}
+                className={`composer-field scrollbar-none relative block max-h-40 w-full resize-none overflow-x-hidden whitespace-pre-wrap wrap-break-word bg-transparent text-sm leading-5.5 outline-none placeholder:overflow-hidden placeholder:text-ellipsis placeholder:whitespace-nowrap font-sans ${fieldPadding}`}
+                onFocus={onFocus}
+                onKeyDown={onKeyDown}
+                onPaste={onPaste}
+                onScroll={(e) => syncHighlightScroll(e.currentTarget)}
+                onClick={(e) => syncTokensFromTextarea(e.currentTarget)}
+                onKeyUp={(e) => syncTokensFromTextarea(e.currentTarget)}
+                onSelect={(e) => syncTokensFromTextarea(e.currentTarget)}
+                onInput={(e) => {
+                  const el = e.currentTarget;
+                  if (enterBtwFromPrefix(el)) return;
+                  resizeComposer(el);
+                  draftRevisionRef.current += 1;
+                  setDraft(el.value);
+                  setSelectedMcp((current) => {
+                    const retained = current.filter(
+                      (tag) => taggedMcpServers(el.value, [tag]).length > 0,
+                    );
+                    return retained.length === current.length
+                      ? current
+                      : retained;
+                  });
+                  setPasteError(null);
+                  if (
+                    sessionFolderSelected &&
+                    !consumeSessionFolderCommand(el.value).matched
+                  ) {
+                    setSessionFolderSelected(false);
+                  }
+                  syncHasValue(el.value, attachments);
+                  syncTokensFromTextarea(el);
+                }}
               />
             </div>
-            <textarea
-              ref={ref}
-              data-composer-empty={navigationEmpty ? "true" : undefined}
-              style={{ textIndent: modeIndent }}
-              rows={1}
-              spellCheck={false}
-              defaultValue={mountDraft}
-              placeholder={
-                worktreeRemoved
-                  ? "Select a branch or worktree to continue…"
-                  : inboxCard
-                    ? "Add a note, or send to start…"
-                    : noteCard
-                      ? "Add a message, or send…"
-                      : handoffCard
-                        ? "Add context, or send to continue…"
-                        : (placeholder ??
-                          (shell
-                            ? "Ask, build, / for commands, @ for references... "
-                            : "Ask, build, / for commands, @ for references... "))
-              }
-              aria-label={inputAriaLabel}
-              disabled={disabled}
-              className={`composer-field scrollbar-none relative max-h-40 w-full resize-none overflow-x-hidden whitespace-pre-wrap wrap-break-word bg-transparent px-3 text-sm leading-5.5 outline-none placeholder:overflow-hidden placeholder:text-ellipsis placeholder:whitespace-nowrap font-sans ${
-                shell ? "py-4" : "py-3"
-              }`}
-              onFocus={onFocus}
-              onKeyDown={onKeyDown}
-              onPaste={onPaste}
-              onScroll={(e) => syncHighlightScroll(e.currentTarget)}
-              onClick={(e) => syncTokensFromTextarea(e.currentTarget)}
-              onKeyUp={(e) => syncTokensFromTextarea(e.currentTarget)}
-              onSelect={(e) => syncTokensFromTextarea(e.currentTarget)}
-              onInput={(e) => {
-                const el = e.currentTarget;
-                if (enterBtwFromPrefix(el)) return;
-                resizeComposer(el);
-                draftRevisionRef.current += 1;
-                setDraft(el.value);
-                setSelectedMcp((current) => {
-                  const retained = current.filter(
-                    (tag) => taggedMcpServers(el.value, [tag]).length > 0,
-                  );
-                  return retained.length === current.length
-                    ? current
-                    : retained;
-                });
-                setPasteError(null);
-                if (
-                  sessionFolderSelected &&
-                  !consumeSessionFolderCommand(el.value).matched
-                ) {
-                  setSessionFolderSelected(false);
-                }
-                syncHasValue(el.value, attachments);
-                syncTokensFromTextarea(el);
-              }}
-            />
-          </div>
 
-          <div className="flex items-center gap-1 px-2 pb-2">
             <div
-              ref={plusRef}
-              className={compact ? "hidden" : "relative shrink-0"}
+              ref={leadRef}
+              className="composer-row-lead flex min-w-0 items-center gap-1"
             >
-              <ToolButton
-                label="Add files or choose a mode"
-                active={plusOpen}
-                onClick={() => setPlusOpen((open) => !open)}
+              <div
+                ref={plusRef}
+                className={compact ? "hidden" : "relative shrink-0"}
               >
-                <Plus className="size-3.5" strokeWidth={1.5} />
-              </ToolButton>
-              {plusOpen ? (
-                <Popover
-                  anchor={plusRef}
-                  side="top"
-                  align="start"
-                  width={250}
-                  onDismiss={() => setPlusOpen(false)}
-                  data-composer-plus
-                  className="p-1.5"
+                <ToolButton
+                  label="Add files or choose a mode"
+                  active={plusOpen}
+                  onClick={() => setPlusOpen((open) => !open)}
                 >
-                  <p className="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-content/40">
-                    Add to message
-                  </p>
-                  <button
-                    type="button"
-                    disabled={!attachmentsSupported}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      setPlusOpen(false);
-                      attachFromPicker();
-                    }}
-                    className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  <Plus className="size-4" strokeWidth={1.5} />
+                </ToolButton>
+                {plusOpen ? (
+                  <Popover
+                    anchor={plusRef}
+                    side="top"
+                    align="start"
+                    width={250}
+                    onDismiss={() => setPlusOpen(false)}
+                    data-composer-plus
+                    className="p-1.5"
                   >
-                    <FilePlus className="mt-0.5 size-4 shrink-0" />
-                    <span className="min-w-0">
-                      <span className="block text-[13px]">Upload file</span>
-                      <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                        {attachmentsSupported
-                          ? "Attach files or images"
-                          : remote && !remoteFeatures?.attachments
-                            ? "Update this machine’s host to attach files"
-                            : `${HARNESS_TITLE[harness]} does not support attachments`}
-                      </span>
-                    </span>
-                  </button>
-                  {!remote || remoteFeatures?.plan ? (
+                    <p className="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-content/40">
+                      Add to message
+                    </p>
                     <button
                       type="button"
-                      aria-pressed={planActive}
+                      disabled={!attachmentsSupported}
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => {
-                        setPlanSelected(!planActive);
-                        if (planActive) clearLeadingMode(PLAN_COMMAND.name);
-                        setOperatorSelected(false);
-                        setOrchestrationSelected(false);
-                        setDraftSelected(false);
                         setPlusOpen(false);
-                        ref.current?.focus();
+                        attachFromPicker();
                       }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      <AiIdea className="mt-0.5 size-4 shrink-0 text-yellow-300/80" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[13px]">Plan mode</span>
+                      <FilePlus className="mt-0.5 size-4 shrink-0" />
+                      <span className="min-w-0">
+                        <span className="block text-[13px]">Upload file</span>
                         <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                          Review a plan before building
+                          {attachmentsSupported
+                            ? "Attach files or images"
+                            : remote && !remoteFeatures?.attachments
+                              ? "Update this machine’s host to attach files"
+                              : `${HARNESS_TITLE[harness]} does not support attachments`}
                         </span>
                       </span>
-                      {planActive ? (
-                        <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
-                      ) : null}
                     </button>
-                  ) : null}
-                  {!remote ? (
-                    <button
-                      type="button"
-                      aria-pressed={operatorActive}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => {
-                        setOperatorSelected(!operatorActive);
-                        if (operatorActive) {
-                          clearLeadingMode(OPERATOR_COMMAND.name);
-                        }
-                        setPlanSelected(false);
-                        setOrchestrationSelected(false);
-                        setDraftSelected(false);
-                        setPlusOpen(false);
-                        ref.current?.focus();
-                      }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                    >
-                      <CursorMagicSelection className="mt-0.5 size-4 shrink-0 text-sky-300/80" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[13px]">Operator</span>
-                        <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                          Give this thread access to MonoCode
-                        </span>
-                      </span>
-                      {operatorActive ? (
-                        <Check className="mt-0.5 size-3.5 shrink-0 text-sky-300/80" />
-                      ) : null}
-                    </button>
-                  ) : null}
-                  {!remote && !hideTopBar && (
-                    <button
-                      type="button"
-                      aria-pressed={orchestrationActive}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => {
-                        setOrchestrationSelected(!orchestrationActive);
-                        if (orchestrationActive) {
-                          clearLeadingMode(ORCHESTRATOR_COMMAND.name);
-                        }
-                        setPlanSelected(false);
-                        setOperatorSelected(false);
-                        setDraftSelected(false);
-                        setPlusOpen(false);
-                        ref.current?.focus();
-                      }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                    >
-                      <Share className="mt-0.5 size-4 shrink-0 text-fuchsia-300/65" />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-1.5">
-                          <span className="text-[13px]">Orchestrator</span>
-                          <span className="rounded-full bg-fuchsia-300/10 px-1.5 py-0.5 text-[9px] font-medium leading-none tracking-wide text-fuchsia-200/55 mb-px">
-                            v1
+                    {!remote || remoteFeatures?.plan ? (
+                      <button
+                        type="button"
+                        aria-pressed={planActive}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setPlanSelected(!planActive);
+                          if (planActive) clearLeadingMode(PLAN_COMMAND.name);
+                          setOperatorSelected(false);
+                          setOrchestrationSelected(false);
+                          setDraftSelected(false);
+                          setPlusOpen(false);
+                          ref.current?.focus();
+                        }}
+                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                      >
+                        <AiIdea className="mt-0.5 size-4 shrink-0 text-yellow-300/80" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[13px]">Plan mode</span>
+                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
+                            Review a plan before building
                           </span>
                         </span>
-                        <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                          Plan and coordinate agent work
+                        {planActive ? (
+                          <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
+                        ) : null}
+                      </button>
+                    ) : null}
+                    {!remote ? (
+                      <button
+                        type="button"
+                        aria-pressed={operatorActive}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          setOperatorSelected(!operatorActive);
+                          if (operatorActive) {
+                            clearLeadingMode(OPERATOR_COMMAND.name);
+                          }
+                          setPlanSelected(false);
+                          setOrchestrationSelected(false);
+                          setDraftSelected(false);
+                          setPlusOpen(false);
+                          ref.current?.focus();
+                        }}
+                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                      >
+                        <CursorMagicSelection className="mt-0.5 size-4 shrink-0 text-sky-300/80" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[13px]">Operator</span>
+                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
+                            Give this thread access to MonoCode
+                          </span>
                         </span>
-                      </span>
-                      {orchestrationActive && (
-                        <Check className="mt-0.5 size-3.5 shrink-0 text-fuchsia-300/80" />
-                      )}
-                    </button>
-                  )}
-                  {canSaveDraft && onSaveDraft ? (
-                    <button
-                      type="button"
-                      aria-pressed={draftActive}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => {
-                        setDraftSelected(!draftActive);
-                        if (draftActive) clearLeadingMode(DRAFT_COMMAND.name);
-                        setPlanSelected(false);
-                        setOperatorSelected(false);
-                        setOrchestrationSelected(false);
-                        setPlusOpen(false);
-                        ref.current?.focus();
-                      }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                    >
-                      <CircleDashed className="mt-0.5 size-4 shrink-0 text-content/60" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[13px]">Draft</span>
-                        <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                          Save this message without starting the agent
+                        {operatorActive ? (
+                          <Check className="mt-0.5 size-3.5 shrink-0 text-sky-300/80" />
+                        ) : null}
+                      </button>
+                    ) : null}
+                    {!remote && !hideTopBar && (
+                      <button
+                        type="button"
+                        aria-pressed={orchestrationActive}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          setOrchestrationSelected(!orchestrationActive);
+                          if (orchestrationActive) {
+                            clearLeadingMode(ORCHESTRATOR_COMMAND.name);
+                          }
+                          setPlanSelected(false);
+                          setOperatorSelected(false);
+                          setDraftSelected(false);
+                          setPlusOpen(false);
+                          ref.current?.focus();
+                        }}
+                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                      >
+                        <Share className="mt-0.5 size-4 shrink-0 text-fuchsia-300/65" />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-[13px]">Orchestrator</span>
+                            <span className="rounded-full bg-fuchsia-300/10 px-1.5 py-0.5 text-[9px] font-medium leading-none tracking-wide text-fuchsia-200/55 mb-px">
+                              v1
+                            </span>
+                          </span>
+                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
+                            Plan and coordinate agent work
+                          </span>
                         </span>
-                      </span>
-                      {draftActive ? (
-                        <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
-                      ) : null}
-                    </button>
-                  ) : null}
-                </Popover>
+                        {orchestrationActive && (
+                          <Check className="mt-0.5 size-3.5 shrink-0 text-fuchsia-300/80" />
+                        )}
+                      </button>
+                    )}
+                    {canSaveDraft && onSaveDraft ? (
+                      <button
+                        type="button"
+                        aria-pressed={draftActive}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => {
+                          setDraftSelected(!draftActive);
+                          if (draftActive) clearLeadingMode(DRAFT_COMMAND.name);
+                          setPlanSelected(false);
+                          setOperatorSelected(false);
+                          setOrchestrationSelected(false);
+                          setPlusOpen(false);
+                          ref.current?.focus();
+                        }}
+                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                      >
+                        <CircleDashed className="mt-0.5 size-4 shrink-0 text-content/60" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[13px]">Draft</span>
+                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
+                            Save this message without starting the agent
+                          </span>
+                        </span>
+                        {draftActive ? (
+                          <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
+                        ) : null}
+                      </button>
+                    ) : null}
+                  </Popover>
+                ) : null}
+              </div>
+              {!compact && operatorActive ? (
+                <ModeCommandPill
+                  name={OPERATOR_COMMAND.name}
+                  onClear={() => {
+                    setOperatorSelected(false);
+                    clearLeadingMode(OPERATOR_COMMAND.name);
+                    ref.current?.focus();
+                  }}
+                />
+              ) : null}
+              {!compact && orchestrationActive ? (
+                <ModeCommandPill
+                  name={ORCHESTRATOR_COMMAND.name}
+                  onClear={() => {
+                    setOrchestrationSelected(false);
+                    clearLeadingMode(ORCHESTRATOR_COMMAND.name);
+                    ref.current?.focus();
+                  }}
+                />
+              ) : null}
+              {!compact && planActive ? (
+                <ModeCommandPill
+                  name={PLAN_COMMAND.name}
+                  onClear={() => {
+                    setPlanSelected(false);
+                    clearLeadingMode(PLAN_COMMAND.name);
+                    ref.current?.focus();
+                  }}
+                />
+              ) : null}
+              {!compact && draftActive ? (
+                <ModeCommandPill
+                  name={DRAFT_COMMAND.name}
+                  onClear={() => {
+                    setDraftSelected(false);
+                    clearLeadingMode(DRAFT_COMMAND.name);
+                    ref.current?.focus();
+                  }}
+                />
               ) : null}
             </div>
-            {!compact && operatorActive ? (
-              <ModeCommandPill
-                name={OPERATOR_COMMAND.name}
-                onClear={() => {
-                  setOperatorSelected(false);
-                  clearLeadingMode(OPERATOR_COMMAND.name);
-                  ref.current?.focus();
-                }}
-              />
-            ) : null}
-            {!compact && orchestrationActive ? (
-              <ModeCommandPill
-                name={ORCHESTRATOR_COMMAND.name}
-                onClear={() => {
-                  setOrchestrationSelected(false);
-                  clearLeadingMode(ORCHESTRATOR_COMMAND.name);
-                  ref.current?.focus();
-                }}
-              />
-            ) : null}
-            {!compact && planActive ? (
-              <ModeCommandPill
-                name={PLAN_COMMAND.name}
-                onClear={() => {
-                  setPlanSelected(false);
-                  clearLeadingMode(PLAN_COMMAND.name);
-                  ref.current?.focus();
-                }}
-              />
-            ) : null}
-            {!compact && draftActive ? (
-              <ModeCommandPill
-                name={DRAFT_COMMAND.name}
-                onClear={() => {
-                  setDraftSelected(false);
-                  clearLeadingMode(DRAFT_COMMAND.name);
-                  ref.current?.focus();
-                }}
-              />
-            ) : null}
             <div
-              className="composer-toolbar flex min-w-0 flex-1 items-center"
+              className="composer-toolbar composer-row-tools flex min-w-0 items-center"
               onWheel={(e) => {
                 if (
                   e.target instanceof Element &&
@@ -2339,8 +2436,12 @@ export function Composer({
                 if (e.deltaX === 0 && e.deltaY !== 0) el.scrollLeft += e.deltaY;
               }}
             >
-              <div className="flex shrink-0 items-center gap-1">
+              <div
+                ref={toolsRef}
+                className="flex shrink-0 items-center gap-0.5"
+              >
                 <ModelPicker
+                  variant="ghost"
                   harness={harness}
                   model={model}
                   values={modelSettings}
@@ -2356,6 +2457,7 @@ export function Composer({
                 />
                 {controlsBeside ? (
                   <ModelControlPills
+                    variant="ghost"
                     harness={harness}
                     model={model}
                     values={modelSettings}
@@ -2367,6 +2469,7 @@ export function Composer({
                 ) : null}
                 {!compact && harness !== "fx" ? (
                   <AccessPicker
+                    variant="ghost"
                     value={runtimeMode}
                     busy={busy}
                     onChange={onRuntimeModeChange}
@@ -2376,30 +2479,45 @@ export function Composer({
               </div>
             </div>
 
-            {resendEdited ? (
-              <button
-                type="button"
-                title="Stop editing last message"
-                aria-label="Stop editing last message"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={exitEditMode}
-                className="edit-last-turn-button flex h-6.5 shrink-0 items-center gap-1 rounded-md border border-current/20 px-2 text-[11px] font-medium transition-[background-color,color,border-color] hover:border-current/35 hover:bg-content/15 hover:text-content focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-              >
-                <X className="size-3" strokeWidth={1.8} />
-                <span>Cancel edit</span>
-              </button>
-            ) : null}
-            <div className="flex shrink-0 items-center gap-1">
-              <ComposerAction
-                busy={busy}
-                disabled={disabled}
-                hasValue={hasValue && !worktreeRemoved}
-                allowBusySubmit={allowBusySubmit}
-                label={draftActive ? "Save draft" : "Send"}
-                onSend={() => submit(ref.current?.value ?? "")}
-                onStop={() => onStop?.()}
-              />
+            <div
+              ref={trailRef}
+              className="composer-row-trail flex shrink-0 items-center gap-1.5"
+            >
+              {resendEdited ? (
+                <button
+                  type="button"
+                  title="Stop editing last message"
+                  aria-label="Stop editing last message"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={exitEditMode}
+                  className="edit-last-turn-button flex h-7 shrink-0 items-center gap-1 rounded-full border border-current/20 px-2 text-[11px] font-medium transition-[background-color,color,border-color] hover:border-current/35 hover:bg-content/15 hover:text-content focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                >
+                  <X className="size-3" strokeWidth={1.8} />
+                  <span>Cancel edit</span>
+                </button>
+              ) : null}
+              <div className="flex shrink-0 items-center gap-2">
+                <ComposerAction
+                  busy={busy}
+                  disabled={disabled}
+                  hasValue={hasValue && !worktreeRemoved}
+                  allowBusySubmit={allowBusySubmit}
+                  label={draftActive ? "Save draft" : "Send"}
+                  onSend={() => submit(ref.current?.value ?? "")}
+                  onStop={() => onStop?.()}
+                />
+              </div>
             </div>
+            <textarea
+              ref={inlineMeasure}
+              aria-hidden
+              tabIndex={-1}
+              readOnly
+              rows={1}
+              className={`pointer-events-none invisible absolute left-0 top-0 h-0 resize-none overflow-hidden whitespace-pre-wrap wrap-break-word text-sm leading-5.5 font-sans ${
+                shell ? "" : "px-1.5 py-[3px]"
+              }`}
+            />
           </div>
         </div>
         {runnerLive && runnerEnabled && !remote ? (
@@ -2548,9 +2666,9 @@ export function ComposerAction({
         title={label}
         aria-label={label}
         disabled
-        className="composer-send primary-action grid size-6.5 place-items-center rounded-md disabled:cursor-default"
+        className="composer-send primary-action grid size-7 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-90 disabled:cursor-default"
       >
-        <ArrowUp className="size-3.5" strokeWidth={2.25} />
+        <SendArrow className="size-4" strokeWidth={2} />
       </button>
     );
   }
@@ -2561,9 +2679,9 @@ export function ComposerAction({
         title={label}
         aria-label={label}
         onClick={onSend}
-        className="composer-send primary-action grid size-6.5 place-items-center rounded-md"
+        className="composer-send primary-action grid size-7 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-90"
       >
-        <ArrowUp className="size-3.5" strokeWidth={2.25} />
+        <SendArrow className="size-4" strokeWidth={2} />
       </button>
     ) : (
       <button
@@ -2571,9 +2689,9 @@ export function ComposerAction({
         title="Stop"
         aria-label="Stop"
         onClick={onStop}
-        className="grid size-6.5 place-items-center rounded-md bg-white text-black hover:bg-white/90"
+        className="primary-action grid size-7 place-items-center rounded-full transition-transform duration-150 active:scale-90"
       >
-        <Square className="size-2.5 fill-current" strokeWidth={0} />
+        <Square className="size-3 fill-current" strokeWidth={0} />
       </button>
     );
   }
@@ -2585,9 +2703,9 @@ export function ComposerAction({
       aria-label={label}
       disabled={!hasValue}
       onClick={onSend}
-      className="composer-send primary-action grid size-6.5 place-items-center rounded-md disabled:cursor-default"
+      className="composer-send primary-action grid size-7 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-90 disabled:cursor-default"
     >
-      <ArrowUp className="size-3.5" strokeWidth={2.25} />
+      <SendArrow className="size-4" strokeWidth={2} />
     </button>
   );
 }

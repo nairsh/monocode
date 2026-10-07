@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   attachmentsFromFiles,
   attachmentsFromPaths,
+  pickAttachments,
   revokeAttachment,
 } from "../sessions/model/attachments";
+import { nativeClipboardAttachments } from "../../platform/tauri/clipboard";
 import type { Attachment } from "../sessions/model/session";
 
 export const NOTE_IMAGE_PREFIX = "/note-assets/";
@@ -32,13 +34,30 @@ export async function saveNoteImagesFromPaths(
   return saveNoteImageAttachments(noteId, await attachmentsFromPaths(paths));
 }
 
+/**
+ * A screenshot on the native clipboard, which a webview paste never sees.
+ * An empty clipboard adds nothing rather than failing.
+ */
+export async function saveNoteImagesFromClipboard(
+  noteId: string,
+): Promise<NoteImageAsset[]> {
+  const { files } = await nativeClipboardAttachments("");
+  return files.length ? saveNoteImageAttachments(noteId, files) : [];
+}
+
+/** Images chosen in the file picker. Cancelling adds nothing. */
+export async function pickNoteImages(noteId: string): Promise<NoteImageAsset[]> {
+  const files = await pickAttachments();
+  return files.length ? saveNoteImageAttachments(noteId, files) : [];
+}
+
 async function saveNoteImageAttachments(
   noteId: string,
   attachments: Attachment[],
 ): Promise<NoteImageAsset[]> {
   const images = attachments.filter((file) => file.kind === "image");
   if (images.length === 0) {
-    throw new Error("Drop a PNG, JPG, GIF, WebP, or SVG image.");
+    throw new Error("Add a PNG, JPG, GIF, WebP, or SVG image.");
   }
 
   const saved: NoteImageAsset[] = [];

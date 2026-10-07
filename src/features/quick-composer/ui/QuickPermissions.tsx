@@ -4,7 +4,7 @@ import {
   Lock,
   Pencil,
   Shield,
-  Sparkles,
+  ShieldCode,
 } from "../../../shared/ui/icons";
 import {
   RUNTIME_MODES,
@@ -16,7 +16,7 @@ import {
 const ICONS = {
   supervised: Lock,
   "auto-accept-edits": Pencil,
-  auto: Sparkles,
+  auto: ShieldCode,
   "full-access": Shield,
 };
 

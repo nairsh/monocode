@@ -22,7 +22,6 @@ import { LinkedWorkItemUpdateNotice } from "../../inbox/ui/LinkedWorkItemUpdateN
 import { SessionReview } from "./SessionReview";
 import { PromptOutline } from "./PromptOutline";
 import {
-  canCompactHarnessContext,
   type ApprovalDecision,
   type UserQuestionReply,
 } from "../../../integrations/harness";
@@ -637,7 +636,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
       cwd={session.cwd}
       executionCwd={workCwd}
       sessionId={session.id}
-      compactSupported={canCompactHarnessContext(session.harness)}
       recents={recents}
       hideProjectPicker={
         !!session.inboxAsk ||
@@ -645,7 +643,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
       }
       hideBranchPicker={!!session.inboxAsk || managed}
       hideTopBar={!!session.inboxAsk}
-      context={session.context}
       quoteRequest={quoteRequest}
       initialDraft={
         draftRef.current ??
@@ -1102,7 +1099,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
               ref={composerDockMotion.dockedRef}
               data-session-composer
               inert={btw.open}
-              className="mx-auto w-full max-w-4xl shrink-0"
+              className="mx-auto w-full max-w-3xl shrink-0"
             >
               {agent ? (
                 <>

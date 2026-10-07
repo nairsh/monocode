@@ -860,6 +860,9 @@ function TitleBarComponent({
   // Until a project is picked, the rail and the sidebar hide, so nothing
   // project-scoped is actionable and the window controls need room.
   const projectless = !showCurrentProject;
+  // Beside the open project rail, the workspace sidebar docks on the right.
+  const sidebarOnRight =
+    projectRailOpen && !projectless && !mono && Boolean(onToggleSessionSidebar);
   // An open project is labeled in the sidebar, above Sessions / Explorer /
   // Changes. Without a project that sidebar is gone, so the picker stays here.
   const showProjectButton =
@@ -872,8 +875,19 @@ function TitleBarComponent({
   const trailingControls =
     showTrailingActions ||
     (mono && onShowMonoDetails) ||
+    sidebarOnRight ||
     (!IS_MAC && !hideWindowControls) ? (
       <div className="flex h-full shrink-0 items-stretch">
+        {sidebarOnRight ? (
+          <div className="flex items-center px-1.5">
+            <IconButton
+              label={`Toggle Session Sidebar (${MOD}${SHIFT}B)`}
+              onClick={onToggleSessionSidebar}
+            >
+              <PanelRightToggle className="size-3.5" strokeWidth={1.75} />
+            </IconButton>
+          </div>
+        ) : null}
         {mono && onShowMonoDetails ? (
           <div className="flex items-center px-3">
             <IconButton label="Show Mono details" onClick={onShowMonoDetails}>
@@ -943,7 +957,10 @@ function TitleBarComponent({
           </div>
         </>
       ) : null}
-      {!sessionSidebarOpen && !projectless && onToggleSessionSidebar ? (
+      {!sessionSidebarOpen &&
+      !sidebarOnRight &&
+      !projectless &&
+      onToggleSessionSidebar ? (
         <div className="flex shrink-0 items-center px-1.5">
           {IS_MAC && railClosed && !compactRail ? (
             <div className="w-[70px] shrink-0" />

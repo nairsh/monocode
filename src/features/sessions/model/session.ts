@@ -413,14 +413,14 @@ export const DEFAULT_RUNTIME_MODE: RuntimeMode = "supervised";
 export const RUNTIME_MODE_LABEL: Record<RuntimeMode, string> = {
   supervised: "Supervised",
   "auto-accept-edits": "Auto-accept edits",
-  auto: "Auto",
+  auto: "Approve for me",
   "full-access": "Full access",
 };
 
 export const RUNTIME_MODE_HINT: Record<RuntimeMode, string> = {
   supervised: "Ask before commands and file changes.",
   "auto-accept-edits": "Auto-approve edits, ask before other actions.",
-  auto: "An AI reviewer can approve or deny actions.",
+  auto: "Only ask for actions detected as potentially unsafe.",
   "full-access":
     "Allow commands, edits, and supported MCP confirmations in non-plan turns without prompts.",
 };

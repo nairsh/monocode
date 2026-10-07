@@ -696,7 +696,7 @@ export function BtwSheet({
         ref={sheetRef}
         role="dialog"
         aria-label="By-the-way conversations"
-        className="btw-sheet absolute inset-x-0 bottom-0 isolate mx-auto w-full max-w-4xl"
+        className="btw-sheet absolute inset-x-0 bottom-0 isolate mx-auto w-full max-w-3xl"
       >
         <GlassBackdrop
           ref={glassRef}

@@ -103,10 +103,10 @@ it("renders assigned projects in persistent collapsible groups", async () => {
   expect(groupRow.classList).toContain("project-reorder-item");
   expect(groupRow.classList).toContain("h-8");
   expect(groupRow.classList).toContain("px-2");
-  expect(button("Client work group options").className).toBe(
-    container.querySelector<HTMLButtonElement>(
+  expect(new Set(button("Client work group options").classList)).toEqual(
+    new Set(container.querySelector<HTMLButtonElement>(
       'button[aria-label="Project options"]',
-    )!.className,
+    )!.classList),
   );
 
   const header = button("Client work, 1 project");

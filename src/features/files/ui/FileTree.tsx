@@ -48,6 +48,7 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { REMOTE_PATH_PREFIX } from "../../../shared/lib/remotePaths";
 import { dragPointToClient } from "../../../shared/lib/dragPoint";
+import { loadUiScale } from "../../settings/model/uiScale";
 import {
   basename,
   clipboardFilePaths,
@@ -774,7 +775,7 @@ export const FileTree = memo(function FileTree({
     const treePathAt = (x: number, y: number): string | null => {
       const root = rootRef.current;
       if (!root) return null;
-      const point = dragPointToClient(x, y);
+      const point = dragPointToClient(x, y, loadUiScale());
       const el = document.elementFromPoint(point.x, point.y);
       if (!el || !root.contains(el)) return null;
       return el.closest<HTMLElement>("[role='treeitem']")?.title ?? cwd;

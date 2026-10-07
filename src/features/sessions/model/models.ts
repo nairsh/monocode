@@ -216,6 +216,7 @@ export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
 const FAVORITES_KEY = "monocode.favoriteModels";
 const MODEL_PICKER_TAB_KEY = "monocode.modelPickerTab";
 const HIDDEN_PICKER_PROVIDERS_KEY = "monocode.hiddenPickerProviders";
+const HIDDEN_MODELS_KEY = "monocode.hiddenModels";
 const LAST_MODEL_KEY = "monocode.lastModel";
 const LAST_MODEL_SETTINGS_KEY = "monocode.lastModelSettings";
 const DEFAULT_MODELS_KEY = "monocode.defaultModels";
@@ -707,6 +708,46 @@ export function savePickerProviderVisible(id: HarnessId, visible: boolean) {
     // private mode / quota
   }
   emitPickerVisibility();
+}
+
+export function loadHiddenModels(): string[] {
+  try {
+    const raw = localStorage.getItem(HIDDEN_MODELS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    return [];
+  }
+}
+
+export function saveModelHidden(id: string, hidden: boolean) {
+  const ids = new Set(loadHiddenModels());
+  if (hidden) ids.add(id);
+  else ids.delete(id);
+  try {
+    localStorage.setItem(HIDDEN_MODELS_KEY, JSON.stringify([...ids]));
+  } catch {
+    // private mode / quota
+  }
+  emitPickerVisibility();
+}
+
+/**
+ * A provider's picker list without the models hidden in Settings. The
+ * selected model always stays listed, and hiding every model shows them all.
+ */
+export function pickerModels(
+  models: AgentModel[],
+  selectedId?: string,
+): AgentModel[] {
+  const hidden = new Set(loadHiddenModels());
+  if (hidden.size === 0) return models;
+  const shown = models.filter(
+    (model) => !hidden.has(model.id) || model.id === selectedId,
+  );
+  return models.some((model) => !hidden.has(model.id)) ? shown : models;
 }
 
 /**

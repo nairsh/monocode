@@ -1172,6 +1172,9 @@ function Workspace({
     [],
   );
   const [projectRailOpen, setProjectRailOpen] = useState(loadProjectRailOpen);
+  const [workspaceSlot, setWorkspaceSlot] = useState<HTMLDivElement | null>(
+    null,
+  );
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(
     loadSessionSidebarOpen,
   );
@@ -5947,6 +5950,21 @@ function Workspace({
       workspaceNavigation.cancel,
       workspaceNavigation.selectProject,
     ],
+  );
+
+  /** A fresh chat in a project from the rail, switching to that project. */
+  const onNewInProject = useCallback(
+    (path: string) => {
+      closeMonoView();
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setAutomationsViewOpen(false);
+      if (looksLikeProject(path)) setProjectCwd(normalizeProjectPath(path));
+      setActiveTabId(createWorkspaceTab(path, worktreeFocus(path)));
+      setComposerFocused(true);
+    },
+    [closeMonoView, createWorkspaceTab],
   );
 
   const pickProject = useCallback(async () => {
@@ -12405,6 +12423,8 @@ function Workspace({
               liveAgents={liveAgents}
               onSelectAgent={onSelectLiveAgent}
               onSelectProject={onSelectProject}
+              onNewInProject={onNewInProject}
+              rightSlot={workspaceSlot}
               onOpenProject={pickProject}
               onRemoveProject={onRemoveProject}
               monos={
@@ -12854,6 +12874,15 @@ function Workspace({
                 <UsageFooter
                   providers={usageProviders}
                   session={usageSession}
+                  context={active?.inboxAsk ? undefined : active?.context}
+                  onCompactContext={
+                    active &&
+                    canCompactHarnessContext(active.harness) &&
+                    !active.worktreeRemoved
+                      ? () => onCompactContext(active.id)
+                      : undefined
+                  }
+                  compactDisabled={active?.busy}
                   project={active?.cwd ?? projectCwd}
                   onSelectAccount={onSelectProviderAccount}
                   onManageAccounts={() =>
@@ -12881,6 +12910,7 @@ function Workspace({
                 />
               )}
             </div>
+            <div ref={setWorkspaceSlot} className="flex h-full shrink-0 empty:hidden" />
           </div>
 
           {filePickerOpen ? (

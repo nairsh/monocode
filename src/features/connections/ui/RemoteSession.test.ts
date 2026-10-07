@@ -501,7 +501,7 @@ it("keeps an unopened remote conversation docked while its transcript loads", as
 
   await render();
   const composer = container.querySelector("[data-session-composer]");
-  expect(composer?.classList.contains("max-w-4xl")).toBe(true);
+  expect(composer?.classList.contains("max-w-3xl")).toBe(true);
   expect(container.textContent).not.toContain("Loading conversation…");
   expect(container.textContent).not.toContain("What should we work on?");
 

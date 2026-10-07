@@ -7,8 +7,6 @@ import {
   buildActivityPhases,
   editVerb,
   firstFoldableIndex,
-  foldableWork,
-  foldedBlocks,
   groupMonoChatTurns,
   groupMonoTurnItems,
   groupMonoTurns,
@@ -1067,32 +1065,6 @@ describe("the subagent stack", () => {
     ]);
   });
 
-  it("folds across a stack, so the turn's status line stays at the top", () => {
-    const items = groupTurnItems([
-      { id: "lead", role: "assistant", text: "Running two reviews." },
-      agent("a1"),
-      shell("s1"),
-      { id: "answer", role: "assistant", text: "Both agree." },
-    ]);
-    const fold = foldableWork(items);
-
-    expect(fold).toBeDefined();
-    // The stack does not cut the fold short: it starts at the turn's first
-    // work, which is where the "working for" line sits.
-    expect(fold!.start).toBe(0);
-    expect(items.slice(fold!.start, fold!.end + 1).map((i) => i.type)).toEqual([
-      "block",
-      "subagents",
-      "activity",
-    ]);
-    // The stack keeps its own rows, so it is not part of what the fold
-    // collapses or summarises.
-    expect(foldedBlocks(items, fold!).map((block) => block.id)).toEqual([
-      "lead",
-      "s1",
-    ]);
-  });
-
   it("shortens a run named with its whole brief, keeping the brief intact", () => {
     const briefed = agent(
       "a1",
@@ -1198,16 +1170,7 @@ describe("the settled work trail", () => {
       "activity",
       "block",
     ]);
-    // The fold spans the failed run's row, which the transcript parks under
-    // the fold line rather than collapsing into it — so the reason it died
-    // stays one click away, exactly as it was while live.
-    const fold = foldableWork(items)!;
-    expect(fold).toEqual({ start: 1, end: 3 });
-    expect(foldedBlocks(items, fold).map((block) => block.id)).toEqual([
-      "t1",
-      "ag",
-      "t2",
-    ]);
+
   });
 
   it("spans the whole trail once settled, status rows and notes included", () => {
@@ -1224,9 +1187,10 @@ describe("the settled work trail", () => {
       ],
       { settled: true },
     );
-    const fold = foldableWork(items);
-    expect(fold).toEqual({ start: 1, end: 1 });
-    const folded = foldedBlocks(items, fold!);
+    expect(items.map((item) => item.type)).toEqual(["block", "activity", "block"]);
+    const trail = items[1];
+    if (trail.type !== "activity") throw new Error("expected activity");
+    const folded = trail.blocks;
     expect(folded.map((block) => block.id)).toEqual([
       "t1",
       "st",
@@ -1257,9 +1221,6 @@ describe("the settled work trail", () => {
       "block",
       "activity",
     ]);
-    // The fold covers the work the answer answered for; the answer itself and
-    // the notes after it stay out.
-    expect(foldableWork(items)).toEqual({ start: 1, end: 1 });
     const trailing = items[3];
     if (trailing?.type !== "activity") throw new Error("expected activity");
     const phases = buildActivityPhases(trailing.blocks);
@@ -1295,13 +1256,9 @@ describe("the settled work trail", () => {
       ],
       { settled: true },
     );
-    const fold = foldableWork(items)!;
-    expect(foldedBlocks(items, fold).map((block) => block.id)).toEqual([
-      "t1",
-      "note",
-      "t2",
-    ]);
-    expect(items.slice(fold.end + 1).map((item) => item.type)).toEqual([
+    expect(items.filter((item) => item.type === "block").map((item) => item.block.id))
+      .toEqual(["u", "note", "answer", "late"]);
+    expect(items.slice(-3).map((item) => item.type)).toEqual([
       "block",
       "activity",
       "block",
@@ -1322,18 +1279,15 @@ describe("the settled work trail", () => {
       ],
       { settled: true },
     );
-    const fold = foldableWork(items)!;
-    expect(foldedBlocks(items, fold).map((block) => block.id)).toEqual([
-      "before",
-    ]);
-    expect(items.slice(fold.end + 1).map((item) => item.type)).toEqual([
+    expect(items[1]).toMatchObject({ type: "block", block: { id: "answer" } });
+    expect(items.slice(1).map((item) => item.type)).toEqual([
       "block",
       "activity",
       "block",
     ]);
   });
 
-  it("lets the settled fold reach across an interjection that stops it live", () => {
+  it("groups settled interjections with tools while keeping prose separate", () => {
     const turn = [
       { id: "u", role: "user", text: "go" },
       shell("t1"),
@@ -1342,18 +1296,17 @@ describe("the settled work trail", () => {
       shell("t2"),
       note("done", "All set."),
     ];
-    // Live: the interjection stands alone and bounds the fold.
-    expect(foldableWork(groupTurnItems(turn))).toEqual({ start: 4, end: 4 });
-    // Settled: it joins the trail and the fold spans the turn's work.
-    const items = groupTurnItems(turn, { settled: true });
-    const fold = foldableWork(items)!;
-    expect(fold).toEqual({ start: 1, end: 3 });
-    expect(foldedBlocks(items, fold).map((block) => block.id)).toEqual([
-      "t1",
-      "mid",
-      "i1",
-      "t2",
+    expect(groupTurnItems(turn).map((item) => item.type)).toEqual([
+      "block", "activity", "block", "block", "activity", "block",
     ]);
+    const items = groupTurnItems(turn, { settled: true });
+    expect(items.map((item) => item.type)).toEqual([
+      "block", "activity", "block", "activity", "block",
+    ]);
+    expect(items[2]).toMatchObject({ type: "block", block: { id: "mid" } });
+    const trail = items[3];
+    expect(trail.type === "activity" && trail.blocks.map((block) => block.id))
+      .toEqual(["i1", "t2"]);
   });
 
   it("never counts a status row as running work", () => {
@@ -1393,10 +1346,6 @@ describe("the settled work trail", () => {
         groupTurnItems(turn.slice(0, 3), options).map((item) => item.type),
       ).toEqual(["block", "activity", "block"]);
     }
-    // And the fold the answer puts away stops short of the error's row.
-    const items = groupTurnItems(turn, { settled: true });
-    const fold = foldableWork(items)!;
-    expect(foldedBlocks(items, fold).map((block) => block.id)).toEqual(["t1"]);
   });
 
   it("keeps a persisted interrupt outside the trail even without the tag", () => {
@@ -1426,131 +1375,14 @@ describe("the settled work trail", () => {
   });
 });
 
-describe("foldableWork", () => {
-  const items = (blocks: Block[]) => groupTurnItems(blocks);
-
-  it("folds the work the agent has already answered for", () => {
-    const turn = items([
+describe("firstFoldableIndex", () => {
+  it("places the status line above the first work", () => {
+    expect(firstFoldableIndex(groupTurnItems([
+      { id: "u", role: "user", text: "go" }, shell("c1"),
+    ]))).toBe(1);
+    expect(firstFoldableIndex(groupTurnItems([
       { id: "u", role: "user", text: "go" },
-      shell("c1"),
-      note("n1", "Checking the other half now."),
-      shell("c2"),
-      { id: "done", role: "assistant", text: "All set." },
-    ]);
-    const fold = foldableWork(turn);
-    expect(fold).toEqual({ start: 1, end: 3 });
-    expect(foldedBlocks(turn, fold!).map((block) => block.id)).toEqual([
-      "c1",
-      "n1",
-      "c2",
-    ]);
-  });
-
-  it("leaves work the agent has not answered for alone", () => {
-    expect(
-      foldableWork(items([{ id: "u", role: "user", text: "go" }, shell("c1")])),
-    ).toBeUndefined();
-    expect(
-      foldableWork(
-        items([
-          { id: "u", role: "user", text: "go" },
-          { id: "a", role: "assistant", text: "On it." },
-          shell("c1"),
-        ]),
-      ),
-    ).toBeUndefined();
-  });
-
-  it("keeps the live group outside the fold while the agent works on", () => {
-    const turn = items([
-      { id: "u", role: "user", text: "go" },
-      shell("c1"),
-      note("n1", "That worked. Running the tests."),
-      shell("c2", "pending"),
-    ]);
-    expect(foldableWork(turn)).toEqual({ start: 1, end: 1 });
-  });
-
-  it("never folds a plan or anything under it", () => {
-    const turn = items([
-      { id: "u", role: "user", text: "go" },
-      shell("c1"),
-      { id: "p", role: "plan", text: "## Plan" },
-      shell("c2"),
-      { id: "done", role: "assistant", text: "Built it." },
-    ]);
-    expect(foldableWork(turn)).toEqual({ start: 3, end: 3 });
-  });
-
-  it("uses an interjection as a hard boundary between answered work phases", () => {
-    const turn = items([
-      shell("before"),
-      note("answer", "The complete answer."),
-      {
-        id: "advisor",
-        role: "system",
-        text: "Check the fallback.",
-        interjection: { customType: "advisor", severity: "nit" },
-      },
-      shell("after"),
-      note("ack", "Checked."),
-    ]);
-    const fold = foldableWork(turn)!;
-
-    expect(fold).toEqual({ start: 3, end: 3 });
-    expect(foldedBlocks(turn, fold).map((block) => block.id)).toEqual([
-      "after",
-    ]);
-  });
-
-  it("leaves an approval attached to earlier work outside the fold", () => {
-    const turn = items([
-      shell("pending", "pending", { requestId: 1 }),
-      note("n1", "I need permission to run that command."),
-    ]);
-    expect(foldableWork(turn)).toBeUndefined();
-  });
-
-  it("does not swallow an earlier approval when later work folds", () => {
-    const turn = items([
-      shell("pending", "pending", { requestId: 1 }),
-      note("n1", "Checking something else meanwhile."),
-      shell("finished"),
-      note("n2", "That check passed."),
-    ]);
-    const fold = foldableWork(turn)!;
-    expect(foldedBlocks(turn, fold).map((block) => block.id)).toEqual([
-      "n1",
-      "finished",
-    ]);
-  });
-
-  it("folds work normally once its approval has been resolved", () => {
-    const turn = items([
-      shell("approved", "completed", { requestId: 1, decided: "allow" }),
-      note("n1", "The command succeeded."),
-    ]);
-    expect(foldableWork(turn)).toEqual({ start: 0, end: 0 });
-  });
-
-  it("gives the fold line a place to sit before there is a fold", () => {
-    const turn = items([{ id: "u", role: "user", text: "go" }, shell("c1")]);
-    expect(foldableWork(turn)).toBeUndefined();
-    expect(firstFoldableIndex(turn)).toBe(1);
-    expect(
-      firstFoldableIndex(items([{ id: "u", role: "user", text: "go" }])),
-    ).toBe(-1);
-  });
-
-  it("has nothing to fold in a turn that only answered", () => {
-    expect(
-      foldableWork(
-        items([
-          { id: "u", role: "user", text: "go" },
-          { id: "a", role: "assistant", text: "Here you go." },
-        ]),
-      ),
-    ).toBeUndefined();
+    ]))).toBe(-1);
   });
 });
 

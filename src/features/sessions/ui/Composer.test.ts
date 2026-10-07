@@ -1425,7 +1425,7 @@ describe("Composer question focus", () => {
     expect(textarea.value).toBe("");
   });
 
-  it("locks a started session to its worktree while keeping its branch editable", async () => {
+  it("leaves checkout and branch controls out of a started session's composer", async () => {
     await act(async () =>
       root.render(
         createElement(Composer, {
@@ -1446,19 +1446,15 @@ describe("Composer question focus", () => {
       ),
     );
 
-    const workspace = container.querySelector(
-      '[aria-label="Workspace Worktree"]',
-    );
-    expect(workspace?.tagName).toBe("DIV");
     expect(
-      container.querySelector('[aria-label="Choose working copy"]'),
+      container.querySelector('[aria-label="Workspace Worktree"]'),
     ).toBeNull();
     expect(
-      container.querySelector('[aria-label="Branch mc/greeting"]'),
-    ).not.toBeNull();
+      container.querySelector('[aria-label^="Branch "]'),
+    ).toBeNull();
   });
 
-  it("toggles a draft between the current checkout and a new worktree", async () => {
+  it("toggles a draft between the current checkout and a new worktree from the keyboard", async () => {
     const onWorkspaceModeChange = vi.fn();
     const onWorktreeBaseChange = vi.fn();
     const props = {
@@ -1487,18 +1483,9 @@ describe("Composer question focus", () => {
       ),
     );
     const textarea = container.querySelector("textarea")!;
-    const workspace = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Workspace Current checkout"]',
-    )!;
     expect(
-      container.querySelector('[aria-label="Branch main"]'),
-    ).not.toBeNull();
-    await act(async () => workspace.click());
-    expect(document.body.textContent).toContain("Existing worktree…");
-    expect(
-      container.querySelector('[aria-label="Branch main"]'),
-    ).not.toBeNull();
-    await act(async () => workspace.click());
+      container.querySelector('[aria-label="Workspace Current checkout"]'),
+    ).toBeNull();
 
     await act(async () =>
       textarea.dispatchEvent(

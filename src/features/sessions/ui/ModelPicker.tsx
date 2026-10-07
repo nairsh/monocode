@@ -28,6 +28,7 @@ import {
   saveFavoriteModels,
   showProviderInModelPicker,
   subscribeModels,
+  pickerModels,
   subscribePickerVisibility,
   type AgentModel,
   type ModelPickerTab,
@@ -67,7 +68,7 @@ type Props = {
   /** Which way the menus open; the composer sits low, so they open up. */
   side?: "top" | "bottom";
   /** `plain` drops the pill for rows like a details panel's property list. */
-  variant?: "pill" | "plain";
+  variant?: "pill" | "plain" | "ghost";
   /** Action label for recovery surfaces that open the same model chooser. */
   triggerLabel?: string;
   onChange: (harness: HarnessId, model: string) => void;
@@ -388,14 +389,23 @@ export function ModelPicker({
               (item): item is AgentModel =>
                 item != null && pickerHarnesses.includes(item.harness),
             )
-        : source.modelsFor(visibleTab);
+        : pickerModels(source.modelsFor(visibleTab), current.id);
     if (!needle) return pool;
     return pool.filter((item) =>
       `${item.name} ${HARNESS_TITLE[item.harness]} ${item.provider?.name ?? ""} ${item.provider?.id ?? ""}`
         .toLowerCase()
         .includes(needle),
     );
-  }, [source, catalogVersion, favorites, providerKey, query, visibleTab]);
+  }, [
+    source,
+    catalogVersion,
+    visibilityVersion,
+    current.id,
+    favorites,
+    providerKey,
+    query,
+    visibleTab,
+  ]);
 
   const dismiss = (restore: boolean) => {
     setOpen(false);
@@ -687,11 +697,14 @@ export function ModelPicker({
             ? `${triggerLabel} · ${triggerTitle}`
             : `${triggerTitle} · Recent models: right-click or ${MOD}.`
         }
-        aria-label={triggerLabel ?? `${HARNESS_TITLE[current.harness]}${
-          current.provider ? `, ${current.provider.name},` : ""
-        } ${current.name}${
-          triggerEffortLabel ? `, effort ${triggerEffortLabel}` : ""
-        }`}
+        aria-label={
+          triggerLabel ??
+          `${HARNESS_TITLE[current.harness]}${
+            current.provider ? `, ${current.provider.name},` : ""
+          } ${current.name}${
+            triggerEffortLabel ? `, effort ${triggerEffortLabel}` : ""
+          }`
+        }
         aria-keyshortcuts={`${MOD}.`}
         aria-expanded={open || recentMenu != null}
         aria-haspopup={hideSettings ? "dialog" : "menu"}
@@ -703,29 +716,37 @@ export function ModelPicker({
         }}
         onClick={() => togglePicker()}
         className={
-          variant === "plain"
-            ? `-mx-1.5 flex h-7 shrink-0 items-center gap-2 rounded-md px-1.5 text-[12px] text-content/85 ${
-                open ? "bg-content/8" : "hover:bg-content/6"
-              }`
-            : `flex h-6.5 shrink-0 items-center gap-1 rounded-md px-1.5 ${
+          variant === "ghost"
+            ? `flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2 text-[12.5px] transition-colors ${
                 open
-                  ? "bg-selection text-content"
-                  : "bg-selection text-content hover:bg-selection-hover"
+                  ? "bg-content/8 text-content"
+                  : "text-content/60 hover:bg-content/6 hover:text-content"
               }`
+            : variant === "plain"
+              ? `-mx-1.5 flex h-7 shrink-0 items-center gap-2 rounded-md px-1.5 text-[12px] text-content/85 ${
+                  open ? "bg-content/8" : "hover:bg-content/6"
+                }`
+              : `flex h-6.5 shrink-0 items-center gap-1 rounded-md px-1.5 ${
+                  open
+                    ? "bg-selection text-content"
+                    : "bg-selection text-content hover:bg-selection-hover"
+                }`
         }
       >
-        <HarnessIcon
-          harness={current.harness}
-          className={`${variant === "plain" ? "size-3.5" : "size-4"} shrink-0`}
-        />
+        {variant === "ghost" ? null : (
+          <HarnessIcon
+            harness={current.harness}
+            className={`${variant === "plain" ? "size-3.5" : "size-4"} shrink-0`}
+          />
+        )}
         <span
-          className={`whitespace-nowrap ${variant === "plain" ? "" : "text-[11px]"}`}
+          className={`whitespace-nowrap ${variant === "pill" ? "text-[11px]" : ""}`}
         >
           {triggerLabel ?? current.name}
         </span>
         {!triggerLabel && triggerEffortLabel ? (
           <span
-            className={`shrink-0 text-content/50 ${variant === "plain" ? "" : "text-[11px]"}`}
+            className={`shrink-0 text-content/50 ${variant === "pill" ? "text-[11px]" : ""}`}
           >
             {triggerEffortLabel}
           </span>
@@ -1031,9 +1052,10 @@ export function ModelControlPills({
   values,
   onSettingsChange,
   onClose,
+  variant,
 }: Pick<
   Props,
-  "harness" | "model" | "values" | "onSettingsChange" | "onClose"
+  "harness" | "model" | "values" | "onSettingsChange" | "onClose" | "variant"
 >) {
   const catalogVersion = useSyncExternalStore(
     subscribeModels,
@@ -1064,6 +1086,7 @@ export function ModelControlPills({
             setting={setting}
             values={values}
             onSettingsChange={onSettingsChange}
+            variant={variant}
           />
         ) : (
           <SelectPill
@@ -1071,6 +1094,7 @@ export function ModelControlPills({
             setting={setting}
             values={values}
             onSettingsChange={onSettingsChange}
+            variant={variant}
             onClose={onClose}
             additionalSettings={
               setting.id === effort?.id ? groupedSettings : undefined
@@ -1083,7 +1107,16 @@ export function ModelControlPills({
 }
 
 /** Trigger classes for a setting control in the pill or plain look. */
-function controlClass(variant: "pill" | "plain", open = false): string {
+function controlClass(
+  variant: "pill" | "plain" | "ghost",
+  open = false,
+): string {
+  if (variant === "ghost")
+    return `flex h-7 max-w-28 items-center gap-1.5 rounded-full px-2 text-[12.5px] transition-colors ${
+      open
+        ? "bg-content/8 text-content"
+        : "text-content/60 hover:bg-content/6 hover:text-content"
+    }`;
   return variant === "plain"
     ? `-mx-1.5 flex h-7 min-w-0 max-w-full items-center gap-2 rounded-md px-1.5 text-[12px] text-content/85 ${
         open ? "bg-content/8" : "hover:bg-content/6"
@@ -1159,7 +1192,7 @@ function TogglePill({
 }: {
   setting: ModelSetting;
   values: Record<string, string>;
-  variant?: "pill" | "plain";
+  variant?: "pill" | "plain" | "ghost";
   onSettingsChange: (settings: Record<string, string>) => void;
 }) {
   const on = settingValue(setting, values) === "true";
@@ -1220,7 +1253,7 @@ function SelectPill({
 }: {
   setting: ModelSetting;
   values: Record<string, string>;
-  variant?: "pill" | "plain";
+  variant?: "pill" | "plain" | "ghost";
   side?: "top" | "bottom";
   onSettingsChange: (settings: Record<string, string>) => void;
   onClose?: () => void;
@@ -1280,7 +1313,7 @@ function SelectPill({
           <Zap className="size-3.5 shrink-0" strokeWidth={1.75} />
         ) : null}
         <span
-          className={`min-w-0 truncate ${variant === "plain" ? "" : "text-[11px]"}`}
+          className={`min-w-0 truncate ${variant === "pill" ? "text-[11px]" : ""}`}
         >
           {valueLabel}
         </span>

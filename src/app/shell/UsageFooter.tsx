@@ -30,6 +30,8 @@ import {
 import { MOD } from "../../platform/tauri/platform";
 import { UsageProviderChip } from "./UsageProviderChip";
 import { PiUsage } from "./PiUsage";
+import { ContextMeter } from "../../features/sessions/ui/ContextMeter";
+import type { ContextUsage } from "../../features/sessions/model/contextUsage";
 import {
   ProviderSignInPanel,
   type ProviderSignInState,
@@ -46,6 +48,8 @@ import {
 } from "../../features/providers/model/providerAccounts";
 
 const CLOCK_MS = 30_000;
+/** Claude and Codex usage refreshes this often while the window is visible. */
+const USAGE_REFRESH_MS = 60_000;
 
 export type UsageFooterSession = {
   id?: string;
@@ -59,6 +63,9 @@ export function UsageFooter({
   providers,
   session,
   project,
+  context,
+  onCompactContext,
+  compactDisabled = false,
   terminals = [],
   terminalOpen = false,
   onToggleTerminal,
@@ -71,6 +78,9 @@ export function UsageFooter({
   providers: RateLimitProvider[];
   session?: UsageFooterSession;
   project?: string;
+  context?: ContextUsage;
+  onCompactContext?: () => void;
+  compactDisabled?: boolean;
   terminals?: RunningTerminal[];
   terminalOpen?: boolean;
   onToggleTerminal?: (fileId: string) => void;
@@ -176,6 +186,26 @@ export function UsageFooter({
     const timer = window.setInterval(() => setNow(Date.now()), CLOCK_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  // Quiet background refresh: straight to the shared cache, so the footer
+  // keeps its windows on screen and no spinner flashes every minute.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      if (wantClaude && claudeAccountAvailable)
+        void loadRateLimits("claude", claudeAccountId, true);
+      if (wantCodex && codexAccountAvailable)
+        void loadRateLimits("codex", codexAccountId, true);
+    }, USAGE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    claudeAccountAvailable,
+    claudeAccountId,
+    codexAccountAvailable,
+    codexAccountId,
+    wantClaude,
+    wantCodex,
+  ]);
 
   const consumeCodexReset = useCallback(
     async (creditId?: string) => {
@@ -369,8 +399,14 @@ export function UsageFooter({
       ) : session ? (
         <SessionChip key={session.id ?? session.harness} session={session} />
       ) : null}
-      {showTerminals || showTerminalButton ? (
+      {context || showTerminals || showTerminalButton ? (
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          <ContextMeter
+            key={session?.id}
+            usage={context}
+            onCompact={onCompactContext}
+            compactDisabled={compactDisabled}
+          />
           {showTerminals ? (
             <RunningTerminalChip
               terminals={terminals}

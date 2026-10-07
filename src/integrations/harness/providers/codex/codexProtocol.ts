@@ -19,6 +19,7 @@ import {
   composeToolTitle,
   extractToolPreview,
   formatAgentType,
+  looksLikeToolCode,
 } from "../../core/preview";
 import { formatShellIntent, inferShellIntent } from "../../core/shellIntent";
 import { streamTextDelta } from "../../core/streamText";
@@ -800,9 +801,9 @@ function mapToolItem(
   if (itemType === "mcpToolCall") {
     const server = stringField(item, "server") ?? "mcp";
     const tool = stringField(item, "tool") ?? "tool";
-    const title = `${server}:${tool}`;
     const status = mapItemStatus(stringField(item, "status"), completed);
     const args = item.arguments;
+    const title = stringField(asRecord(args), "title") ?? `${server}:${tool}`;
     const preview =
       extractToolPreview(
         { kind: "other", title, rawInput: args },
@@ -861,6 +862,7 @@ export function codexCommandPresentation(
     const action = actions[index];
     const type = stringField(action, "type");
     const path = stringField(action, "path");
+    if (path && looksLikeToolCode(path)) continue;
     const shownPath = path ? displayPath(path, cwd) : undefined;
     if (type === "search") {
       const query = stringField(action, "query");

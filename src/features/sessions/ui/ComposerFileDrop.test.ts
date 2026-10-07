@@ -287,6 +287,20 @@ describe("Composer image drops", () => {
     expect(attachmentCount()).toBe(1);
   });
 
+  it("divides the UI scale out of macOS native positions", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === "monocode.uiScale" ? "1.5" : null),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    });
+    await render();
+
+    // 600pt at 150% zoom is 400 CSS px, inside the 500px pane.
+    await nativeDrop(["/project/image.png"], 600, 600);
+
+    expect(attachmentCount()).toBe(1);
+  });
+
   it("does not attach native drops outside the session pane", async () => {
     await render();
     await nativeDrop(["/project/image.png"], 600, 600);

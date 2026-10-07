@@ -1,9 +1,10 @@
 import {
+  Check,
   ChevronDown,
   Lock,
   Pencil,
   Shield,
-  Sparkles,
+  ShieldCode,
 } from "../../../shared/ui/icons";
 import {
   useEffect,
@@ -25,15 +26,17 @@ type Props = {
   onClose?: () => void;
   busy?: boolean;
   side?: "top" | "bottom";
-  variant?: "pill" | "plain";
+  /** `ghost`: just the mode's icon, for the composer row. */
+  variant?: "pill" | "plain" | "ghost";
 };
 
-const MENU_WIDTH = 288;
+/** Same width as the model menu beside it. */
+const MENU_WIDTH = 250;
 
-const ICONS: Record<RuntimeMode, typeof Lock> = {
+const ICONS: Record<RuntimeMode, typeof Lock | typeof ShieldCode> = {
   supervised: Lock,
   "auto-accept-edits": Pencil,
-  auto: Sparkles,
+  auto: ShieldCode,
   "full-access": Shield,
 };
 
@@ -92,7 +95,7 @@ export function AccessPicker({
       <button
         type="button"
         data-access-picker-trigger
-        title={`${RUNTIME_MODE_HINT[value]}${busy ? " Changes apply to the next turn." : ""}`}
+        title={`${variant === "ghost" ? `${RUNTIME_MODE_LABEL[value]}: ` : ""}${RUNTIME_MODE_HINT[value]}${busy ? " Changes apply to the next turn." : ""}`}
         aria-label={RUNTIME_MODE_LABEL[value]}
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -105,30 +108,40 @@ export function AccessPicker({
           setOpen(true);
         }}
         className={
-          variant === "plain"
-            ? `-mx-1.5 flex h-7 max-w-52 items-center gap-2 rounded-md px-1.5 text-[12px] text-content/85 ${
-                open ? "bg-content/8" : "hover:bg-content/6"
-              }`
-            : `flex h-6.5 max-w-52 items-center gap-1 rounded-md px-1.5 ${
+          variant === "ghost"
+            ? `grid size-7 place-items-center rounded-full transition-colors ${
                 open
-                  ? "bg-selection text-content"
-                  : "bg-selection text-content hover:bg-selection-hover"
+                  ? "bg-content/8 text-content"
+                  : "text-content/60 hover:bg-content/6 hover:text-content"
               }`
+            : variant === "plain"
+              ? `-mx-1.5 flex h-7 max-w-52 items-center gap-2 rounded-md px-1.5 text-[12px] text-content/85 ${
+                  open ? "bg-content/8" : "hover:bg-content/6"
+                }`
+              : `flex h-6.5 max-w-52 items-center gap-1 rounded-md px-1.5 ${
+                  open
+                    ? "bg-selection text-content"
+                    : "bg-selection text-content hover:bg-selection-hover"
+                }`
         }
       >
         <Icon
-          className={`size-3.5 shrink-0 ${value === "full-access" ? "text-amber-400/90" : ""}`}
+          className={`${variant === "ghost" ? "size-[15px]" : "size-3.5"} shrink-0 ${value === "full-access" ? "text-amber-400/90" : ""}`}
           strokeWidth={1.75}
         />
-        <span
-          className={`min-w-0 truncate ${variant === "plain" ? "" : "text-[11px]"}`}
-        >
-          {RUNTIME_MODE_LABEL[value]}
-        </span>
-        <ChevronDown
-          className={`size-3 shrink-0 text-content/50 ${open ? "rotate-180" : ""}`}
-          strokeWidth={1.75}
-        />
+        {variant === "ghost" ? null : (
+          <>
+            <span
+              className={`min-w-0 truncate ${variant === "pill" ? "text-[11px]" : ""}`}
+            >
+              {RUNTIME_MODE_LABEL[value]}
+            </span>
+            <ChevronDown
+              className={`size-3 shrink-0 text-content/50 ${open ? "rotate-180" : ""}`}
+              strokeWidth={1.75}
+            />
+          </>
+        )}
       </button>
       {open ? (
         <Popover
@@ -142,7 +155,7 @@ export function AccessPicker({
           data-access-picker
           tabIndex={-1}
           onKeyDown={onMenuKey}
-          className="p-1"
+          className="p-1 font-sans"
         >
           {RUNTIME_MODES.map((mode, index) => {
             const ModeIcon = ICONS[mode];
@@ -157,24 +170,26 @@ export function AccessPicker({
                 onMouseDown={(e) => e.preventDefault()}
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(mode)}
-                className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left ${
-                  highlighted || selected
+                title={RUNTIME_MODE_HINT[mode]}
+                className={`flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${
+                  highlighted
                     ? "bg-selection text-content"
                     : "text-content hover:bg-content/5"
                 }`}
               >
                 <ModeIcon
-                  className={`mt-0.5 size-3.5 shrink-0 ${mode === "full-access" ? "text-amber-400/90" : "text-content/70"}`}
+                  className={`size-3.5 shrink-0 ${mode === "full-access" ? "text-amber-400/90" : "text-content/70"}`}
                   strokeWidth={1.75}
                 />
-                <span className="min-w-0">
-                  <span className="block text-[13px] font-medium leading-5">
-                    {RUNTIME_MODE_LABEL[mode]}
-                  </span>
-                  <span className="mt-0.5 block text-[11px] leading-4 text-content/50">
-                    {RUNTIME_MODE_HINT[mode]}
-                  </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {RUNTIME_MODE_LABEL[mode]}
                 </span>
+                {selected ? (
+                  <Check
+                    className="size-3.5 shrink-0 text-content/70"
+                    strokeWidth={1.75}
+                  />
+                ) : null}
               </button>
             );
           })}

@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyHarnessEvent } from "../../core/apply";
 import { newSession } from "../../../../features/sessions/model/session";
 import {
-  foldableWork,
-  foldedBlocks,
   groupTurnItems,
   workSummaryLine,
 } from "../../../../features/sessions/model/transcriptActivity";
@@ -1750,14 +1748,13 @@ describe("claude background tasks", () => {
         .map((block) => (block.tool?.background ? "[background]" : block.text)),
     ).toEqual(["waiting", "[background]", "It finished and printed done."]);
     const items = groupTurnItems(turn1, { settled: true });
-    const fold = foldableWork(items);
     const answer = items.at(-1);
     expect(answer?.type === "block" && answer.block.text).toBe(
       "It finished and printed done.",
     );
-    // What Claude yielded with is its answer; the follow-up does not fold it.
+    // What Claude yielded with remains a standalone message.
     expect(
-      (fold ? foldedBlocks(items, fold) : []).map((block) => block.text),
+      items.flatMap((item) => item.type === "block" ? [] : item.blocks.map((block) => block.text)),
     ).not.toContain("waiting");
   });
 

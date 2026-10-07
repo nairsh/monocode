@@ -342,26 +342,35 @@ html.has-native-glass:not(.theme-light) #root {
 .workspace-tab:not([data-reordering])
   > button:not([aria-selected="true"]):hover,
 .workspace-tab[data-dragging] > button:not([aria-selected="true"]),
-.project-reorder-item:not([data-reordering], [data-selected]):hover,
-.project-reorder-item[data-dragging]:not([data-selected]) {
+.project-reorder-item:not(
+    [data-reordering],
+    [data-reordering] > *,
+    [data-selected]
+  ):hover,
+.project-reorder-item[data-dragging]:not([data-selected]),
+[data-dragging] > .project-reorder-item:not([data-selected]) {
   background: color-mix(in srgb, var(--color-content) 5%, transparent);
   color: var(--color-content);
 }
 
 /* Keep project controls from appearing as rows pass beneath the pointer. */
-.project-reorder-item[data-reordering] [data-no-drag] {
+.project-reorder-item[data-reordering] [data-no-drag],
+[data-reordering] > .project-reorder-item [data-no-drag] {
   visibility: hidden;
 }
 
-.project-reorder-item[data-reordering] > button:first-of-type {
+.project-reorder-item[data-reordering] > button:first-of-type,
+[data-reordering] > .project-reorder-item > button:first-of-type {
   padding-right: 0;
 }
 
-.project-reorder-item[data-reordering] .project-card-logo {
+.project-reorder-item[data-reordering] .project-card-logo,
+[data-reordering] > .project-reorder-item .project-card-logo {
   opacity: 1;
 }
 
-.project-reorder-item[data-reordering] .project-card-stats {
+.project-reorder-item[data-reordering] .project-card-stats,
+[data-reordering] > .project-reorder-item .project-card-stats {
   display: flex;
 }
 
@@ -1541,11 +1550,46 @@ html.is-resizing * {
 }
 
 .composer-toolbar {
-  container: composer-toolbar / inline-size;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
+}
+
+/* Docked, the composer is one pill: attach, text, model and access, send. */
+.composer-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "lead field tools trail";
+}
+
+/* With more than a line (or anything above it), the text takes the top and
+   the controls sit beneath it, model and access beside attach. */
+.composer-row[data-layout="stacked"] {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "field field field"
+    "lead tools trail";
+}
+
+.composer-row-field {
+  grid-area: field;
+}
+
+.composer-row-lead {
+  grid-area: lead;
+}
+
+.composer-row-tools {
+  grid-area: tools;
+}
+
+.composer-row-trail {
+  grid-area: trail;
+}
+
+/* Inline-size containment would collapse the pill's content-sized column. */
+.composer-row[data-layout="stacked"] .composer-toolbar {
+  container: composer-toolbar / inline-size;
 }
 
 @container composer-toolbar (width < 220px) {
@@ -2850,122 +2894,6 @@ html.theme-light .mono-pill {
   border-bottom-left-radius: 8px;
 }
 
-/*
- * The connector: a line dropping out of the chevron and curving into the first
- * thing the fold holds, so opened work reads as hanging off that line rather
- * than running on from the answer below it. Same geometry as the phase rail —
- * 23px is the chevron's own centre (16px of row padding plus half a 14px
- * icon), and the curve is a quarter circle tangent to both.
- */
-.zen-fold-drop,
-.zen-fold-rail {
-  position: relative;
-  --zen-rail: color-mix(
-    in srgb,
-    var(--color-content) 14%,
-    var(--color-background-base)
-  );
-}
-
-/* Out of the chevron, down through the gap to the row below. */
-.zen-fold-drop::after {
-  content: "";
-  position: absolute;
-  left: 23px;
-  top: 22px;
-  bottom: -4px;
-  width: 1px;
-  background: var(--zen-rail);
-}
-
-/* The spine, carried by every row so it follows however tall they turn out. */
-.zen-fold-rail::before {
-  content: "";
-  position: absolute;
-  left: 23px;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--zen-rail);
-}
-
-/* The last row is where the spine ends, at its final branch. */
-.zen-fold-tail::before {
-  bottom: auto;
-  height: 7px;
-}
-
-/* Every row branches off the spine on the same curve as an activity step. */
-.zen-fold-rail::after {
-  content: "";
-  position: absolute;
-  left: 23px;
-  top: 6px;
-  width: 8px;
-  height: 8px;
-  border-left: 1px solid var(--zen-rail);
-  border-bottom: 1px solid var(--zen-rail);
-  border-bottom-left-radius: 8px;
-}
-
-/*
- * Prose the fold holds is the agent talking while it works — process, not
- * result. It stays readable at one notch quieter: muted ink, headings
- * demoted to bold lines, and tighter spacing, so a mid-run note never poses
- * as the answer it led to.
- */
-.zen-fold-prose .agent-markdown > :not(:last-child) {
-  margin-block-end: 0.5rem;
-}
-
-.zen-fold-prose .agent-markdown p,
-.zen-fold-prose .agent-markdown li {
-  color: color-mix(in srgb, var(--color-content) 65%, transparent);
-}
-
-.zen-fold-prose .agent-markdown p strong,
-.zen-fold-prose .agent-markdown p em,
-.zen-fold-prose .agent-markdown p [data-streamdown="strong"],
-.zen-fold-prose .agent-markdown li strong,
-.zen-fold-prose .agent-markdown li em,
-.zen-fold-prose .agent-markdown li [data-streamdown="strong"] {
-  color: color-mix(in srgb, var(--color-content) 80%, transparent) !important;
-}
-
-/* A heading in a work note is a bold line, not a display size. */
-.zen-fold-prose .agent-markdown [data-streamdown="heading-1"],
-.zen-fold-prose .agent-markdown [data-streamdown="heading-2"],
-.zen-fold-prose .agent-markdown [data-streamdown="heading-3"],
-.zen-fold-prose .agent-markdown [data-streamdown="heading-4"],
-.zen-fold-prose .agent-markdown [data-streamdown="heading-5"],
-.zen-fold-prose .agent-markdown [data-streamdown="heading-6"] {
-  margin-top: 0.75rem;
-  margin-bottom: 0.25rem;
-  font-size: 14px;
-  font-weight: 600;
-  color: color-mix(in srgb, var(--color-content) 80%, transparent);
-}
-
-.zen-fold-prose .agent-markdown [data-streamdown="blockquote"],
-.zen-fold-prose .agent-markdown .markdown-code-shell {
-  margin-block: 0.5rem;
-}
-
-.zen-fold-prose .agent-markdown [data-streamdown="code-block"],
-.zen-fold-prose .agent-markdown [data-streamdown="table-wrapper"] {
-  border-color: color-mix(in srgb, var(--color-content) 8%, transparent);
-  background: color-mix(in srgb, var(--color-content) 4%, transparent);
-}
-
-.zen-fold-prose .agent-markdown [data-streamdown="table-header-cell"],
-.zen-fold-prose .agent-markdown [data-streamdown="table-cell"] {
-  color: color-mix(in srgb, var(--color-content) 65%, transparent);
-}
-
-.zen-fold-prose .agent-markdown [data-streamdown="horizontal-rule"] {
-  margin-block: 0.75rem;
-}
-
 .zen-fold-item[data-fold-state="closed"] {
   display: grid;
   grid-template-rows: 0fr;
@@ -3772,6 +3700,28 @@ html.theme-light .btw-burst {
   .terminal-live-bar {
     animation: none;
     opacity: 0.7;
+  }
+}
+
+.sidebar-working-dot {
+  animation: sidebar-working-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes sidebar-working-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.65);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-working-dot {
+    animation: none;
   }
 }
 

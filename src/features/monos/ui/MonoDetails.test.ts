@@ -96,7 +96,7 @@ function trigger() {
 it("lets the user choose every permission mode from Details and reflects the saved choice", async () => {
   await render("auto");
   expect(container.querySelector("dl")?.textContent).toContain("Permissions");
-  expect(trigger().textContent).toBe("Auto");
+  expect(trigger().textContent).toBe("Approve for me");
 
   for (const mode of RUNTIME_MODES) {
     act(() => trigger().click());

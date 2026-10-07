@@ -3,7 +3,7 @@ import type { OmpAssistantText, OmpInterjectionAnchor } from "../../../platform/
 import { backfillOmpInterjections, ompStatusSplitTexts } from "./ompInterjections";
 import { newSession, type Block } from "./session";
 import { getSession } from "../data/sessionStore";
-import { foldableWork, foldedBlocks, groupTurnItems, groupTurns } from "./transcriptActivity";
+import { groupTurnItems, groupTurns } from "./transcriptActivity";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -30,19 +30,20 @@ function oldBlocks(): Block[] {
   ];
 }
 
-function foldedIds(blocks: Block[]) {
-  const items = groupTurnItems(groupTurns(blocks)[0]);
-  return foldedBlocks(items, foldableWork(items)!).map(block => block.id);
+function activityIds(blocks: Block[]) {
+  return groupTurnItems(groupTurns(blocks)[0]).flatMap(item =>
+    item.type === "block" ? [] : item.blocks.map(block => block.id),
+  );
 }
 
 describe("OMP persisted interjection repair", () => {
-  it("restores the complete answer outside the work fold without inventing a turn", () => {
+  it("restores the interjection after the complete answer without inventing a turn", () => {
     const before = oldBlocks();
-    expect(foldedIds(before)).toContain("a1");
+    expect(activityIds(before)).not.toContain("a1");
     const repaired = backfillOmpInterjections(before, [anchor]);
     expect(repaired[4]).toMatchObject({ id: "omp-interjection-review", role: "system", text: anchor.text, interjection: { customType: "advisor", severity: "concern" } });
     expect(groupTurns(repaired)).toHaveLength(1);
-    expect(foldedIds(repaired)).toEqual(["r2", "t2"]);
+    expect(activityIds(repaired)).toEqual(["r1", "t1", "r2", "t2"]);
     expect(before.map(block => block.id)).toEqual(["u", "r1", "t1", "a1", "r2", "t2", "a2"]);
   });
 
@@ -53,12 +54,12 @@ describe("OMP persisted interjection repair", () => {
     expect(repaired.map(block => block.id)).toEqual(["u", "r1", "t1", "a1", "r2", "t2", "a2", "omp-interjection-review"]);
   });
 
-  it("keeps unanchored progress prose folding and rejects approximate matches", () => {
+  it("keeps unanchored prose separate from tool groups and rejects approximate matches", () => {
     const blocks = oldBlocks();
     expect(backfillOmpInterjections(blocks, [])).toBe(blocks);
     expect(backfillOmpInterjections(blocks, [{ ...anchor, afterAssistantText: "The complete" }])).toBe(blocks);
     expect(backfillOmpInterjections(blocks, [{ ...anchor, afterAssistantText: ` ${anchor.afterAssistantText}` }])).toBe(blocks);
-    expect(foldedIds(blocks)).toContain("a1");
+    expect(activityIds(blocks)).not.toContain("a1");
   });
 
   it("does not duplicate repaired or already captured live boundaries", () => {
@@ -144,7 +145,7 @@ describe("OMP persisted interjection repair", () => {
     expect(repaired.filter(block => block.interjection).map(block => block.id)).toEqual([
       "omp-interjection-tool-note", "omp-interjection-review", "omp-interjection-chained-note",
     ]);
-    expect(foldedIds(repaired)).toEqual(["r2", "t2"]);
+    expect(activityIds(repaired)).toEqual(["r1", "t1", "r2", "t2"]);
     expect(repaired.filter(block => !block.interjection)).toEqual(oldBlocks());
     expect(backfillOmpInterjections(repaired, [earlier, anchor, later])).toBe(repaired);
   });
@@ -472,7 +473,7 @@ describe("persisted session loading", () => {
       throw new Error(command);
     });
     const first = await getSession(record.id);
-    expect(foldedIds(first!.blocks)).toEqual(["r2", "t2"]);
+    expect(activityIds(first!.blocks)).toEqual(["r1", "t1", "r2", "t2"]);
     const second = await getSession(record.id);
     expect(second!.blocks).toEqual(first!.blocks);
     expect(writes).toBe(1);
@@ -580,6 +581,6 @@ describe("persisted session loading", () => {
       if (command === "omp_session_interjections") return [anchor];
       throw new Error("Database unavailable");
     });
-    expect(foldedIds((await getSession(record.id))!.blocks)).toEqual(["r2", "t2"]);
+    expect(activityIds((await getSession(record.id))!.blocks)).toEqual(["r1", "t1", "r2", "t2"]);
   });
 });

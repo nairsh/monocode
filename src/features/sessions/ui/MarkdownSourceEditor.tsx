@@ -1,4 +1,4 @@
-import { Fragment, type Ref } from "react";
+import { Fragment, type ClipboardEventHandler, type Ref } from "react";
 import { MarkdownSourceHighlight } from "./AgentMarkdown";
 
 /** Editable markdown source with highlighting and an optional line-number gutter. */
@@ -10,6 +10,7 @@ export function MarkdownSourceEditor({
   label,
   placeholder = "Write markdown…",
   onBlur,
+  onPaste,
   lineNumbers = true,
   className = "min-h-[448px]",
 }: {
@@ -20,6 +21,7 @@ export function MarkdownSourceEditor({
   label?: string;
   placeholder?: string;
   onBlur?: () => void;
+  onPaste?: ClipboardEventHandler<HTMLTextAreaElement>;
   lineNumbers?: boolean;
   className?: string;
 }) {
@@ -65,6 +67,7 @@ export function MarkdownSourceEditor({
         autoFocus={autoFocus}
         onChange={(event) => onChange(event.target.value)}
         onBlur={onBlur}
+        onPaste={onPaste}
         spellCheck={false}
         placeholder={placeholder}
         className={`markdown-source-field absolute inset-0 h-full w-full resize-none overflow-hidden border-0 bg-transparent font-mono text-[13px] leading-5 whitespace-pre-wrap wrap-break-word outline-none ${lineNumbers ? "py-0 pr-0" : "py-3 pr-3"}`}

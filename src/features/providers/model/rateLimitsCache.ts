@@ -100,8 +100,18 @@ export function loadRateLimits(
           : provider === "codex"
             ? await fetchCodexRateLimits(accountId)
             : await fetchOpencodeGoRateLimits();
-      publish(key, result);
-      return result;
+      // A failed refresh (a blip, a 429, waking from sleep) keeps the last
+      // good windows instead of blanking the footer until the next poll.
+      const settled =
+        result.status === "error"
+          ? errorRateLimits(
+              provider,
+              result.error ?? "Usage unavailable",
+              cached,
+            )
+          : result;
+      publish(key, settled);
+      return settled;
     } catch (error) {
       const result = errorRateLimits(
         provider,

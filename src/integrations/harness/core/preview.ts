@@ -914,6 +914,12 @@ function findPathInUnknown(value: unknown, depth: number): string | undefined {
     "cwd",
     "workingDirectory",
     "working_directory",
+    // Executable code is not a file target, even if it contains a URL or
+    // a quoted path. Tool titles should describe the action instead.
+    "code",
+    "command",
+    "cmd",
+    "script",
   ]);
   for (const [key, nested] of Object.entries(rec)) {
     if (skip.has(key)) continue;
@@ -923,9 +929,14 @@ function findPathInUnknown(value: unknown, depth: number): string | undefined {
   return undefined;
 }
 
+/** Code arguments can contain paths, but the whole script is not a target. */
+export function looksLikeToolCode(value: string): boolean {
+  return /[\n\r]|\bawait\s+\w|(?:^|[;\s])(?:const|let|var)\s+\w|=>|\);\s*\S/.test(value);
+}
+
 function looksLikeToolPath(value: string): boolean {
   const text = value.trim();
-  if (!text || text.length > 400 || /[\n\r]/.test(text)) return false;
+  if (!text || text.length > 400 || looksLikeToolCode(text)) return false;
   if (isWeakToolTitle(text)) return false;
   if (/^(\/\/|\/\*|\*)/.test(text)) return false;
   if (/^https?:/i.test(text)) return false;

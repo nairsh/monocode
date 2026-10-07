@@ -14,11 +14,21 @@ import {
   Settings,
   Zap,
 } from "../../shared/ui/icons";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { useDragResize } from "../../shared/hooks/useDragResize";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../../features/source-control/hooks/useProjectDiffStats";
 import { useAnimatedReorder } from "../../shared/hooks/useAnimatedReorder";
+import { reorderMotion } from "../../shared/lib/motion";
 import { useTabGroupLogos } from "../../features/projects/hooks/useTabGroupLogos";
 import {
   loadProjectRailWidth,
@@ -75,6 +85,7 @@ import { SidebarUpdateFooter } from "./SidebarUpdate";
 import type { InstalledUpdate } from "../model/updateNotice";
 import { SettingsNav } from "./SettingsRail";
 import { Shimmer } from "../../shared/ui/Shimmer";
+import { NineDotSpinner } from "../../features/sessions/ui/NineDotSpinner";
 import type { SettingsSectionId } from "../../features/settings/model/settings";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
 import { notificationMuteStatus } from "../../features/notifications/ui/notificationMuteActions";
@@ -90,6 +101,77 @@ import {
 import { remoteProjectFor } from "../../features/connections/model/remoteProjects";
 import { useProjectMenu } from "./useProjectMenu";
 import { MonoRailSection, type MonoRailProps } from "./MonoRailSection";
+import {
+  listSessionsByProject,
+  type SessionSummary,
+} from "../../features/sessions/data/sessionStore";
+import { compareSessionSummaries } from "../../features/sessions/data/sessionHistory";
+import { sessionDisplayTitle } from "../../features/sessions/model/session";
+import { isMonoSession } from "../../features/monos/model/mono";
+import { isHabitRun } from "../../features/monos/model/monoHabits";
+import {
+  ExplorerMenu,
+  type ExplorerMenuItem,
+} from "../../features/files/ui/ExplorerMenu";
+
+/** Chats listed under each project on the rail. */
+export type ProjectThreads = {
+  /** The current project's chats, including live and unsaved ones. */
+  current: readonly SessionSummary[];
+  activeSessionId?: string;
+  busyIds: ReadonlySet<string>;
+  approvalIds: ReadonlySet<string>;
+  unseenIds: ReadonlySet<string>;
+  onSelect: (sessionId: string) => void;
+  /** Opens the project and starts a new chat in it. */
+  onNew: (projectPath: string) => void;
+  onArchive?: (session: SessionSummary, archived: boolean) => void;
+  onDelete?: (session: SessionSummary) => void;
+  onRename?: (session: SessionSummary, title: string) => void;
+};
+
+const ThreadsContext = createContext<
+  (ProjectThreads & { cwd: string }) | null
+>(null);
+
+const THREAD_PAGE = 5;
+const THREADS_EXPANDED_KEY = "monocode.projectThreadsExpanded";
+
+function loadThreadsExpanded(): Record<string, boolean> {
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(THREADS_EXPANDED_KEY) ?? "{}",
+    );
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, boolean>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveThreadsExpanded(key: string, expanded: boolean) {
+  try {
+    localStorage.setItem(
+      THREADS_EXPANDED_KEY,
+      JSON.stringify({ ...loadThreadsExpanded(), [key]: expanded }),
+    );
+  } catch {
+    // private mode / quota
+  }
+}
+
+/** Same rows the project's session list shows, minus archived ones. */
+function isListedThread(session: SessionSummary): boolean {
+  return (
+    !session.archived &&
+    !session.sidebarHidden &&
+    !session.orchestrationLeadId &&
+    !("ephemeral" in session && session.ephemeral) &&
+    !isMonoSession(session.id) &&
+    !isHabitRun(session.id)
+  );
+}
 
 type Props = {
   visible?: boolean;
@@ -128,6 +210,8 @@ type Props = {
   onDismissUpdate?: () => void;
   /** The Monos section above the projects; absent while Monos are off. */
   monos?: MonoRailProps;
+  /** Lists each project's chats under it; absent leaves projects as plain rows. */
+  threads?: ProjectThreads;
 };
 
 export function ProjectRail({
@@ -166,6 +250,7 @@ export function ProjectRail({
   onOpenWhatsNew,
   onDismissUpdate,
   monos,
+  threads,
 }: Props) {
   const resize = useDragResize({
     min: PROJECT_RAIL_WIDTH_MIN,
@@ -340,104 +425,179 @@ export function ProjectRail({
   const projectIds = groupedProjectSections.ungrouped.map((item) => item.path);
   const pinnedSortable = useAnimatedReorder(pinnedIds, onReorderPinned, "y");
   const projectSortable = useAnimatedReorder(projectIds, onReorderProjects, "y");
+  const threadsContext = useMemo(
+    () => (threads ? { ...threads, cwd } : null),
+    [threads, cwd],
+  );
   return (
-    <nav
-      ref={resize.setPaneRef}
-      aria-label="Projects"
-      className={`sidebar-glass relative shrink-0 flex-col border-r border-stroke ${visible ? "flex" : "hidden"}`}
-    >
-      <div
-        className="flex h-10 shrink-0 select-none items-center pr-1.5"
-        data-tauri-drag-region="deep"
+    <ThreadsContext.Provider value={threadsContext}>
+      <nav
+        ref={resize.setPaneRef}
+        aria-label="Projects"
+        className={`sidebar-glass relative shrink-0 flex-col border-r border-stroke ${visible ? "flex" : "hidden"}`}
       >
-        {IS_MAC ? <div className="w-[78px] shrink-0" /> : null}
-        <DevModeSlot />
-        <TabVisitNav
-          canGoBack={canGoBack}
-          canGoForward={canGoForward}
-          onGoBack={onGoBack}
-          onGoForward={onGoForward}
-          onTogglePanel={settingsOpen ? undefined : onTogglePanel}
-          panelActive
-        />
-      </div>
+        <div
+          className="flex h-10 shrink-0 select-none items-center pr-1.5"
+          data-tauri-drag-region="deep"
+        >
+          {IS_MAC ? <div className="w-[78px] shrink-0" /> : null}
+          <DevModeSlot />
+          <TabVisitNav
+            canGoBack={canGoBack}
+            canGoForward={canGoForward}
+            onGoBack={onGoBack}
+            onGoForward={onGoForward}
+            onTogglePanel={settingsOpen ? undefined : onTogglePanel}
+            panelActive
+          />
+        </div>
 
-      {settingsOpen ? (
-        <SettingsNav
-          section={settingsSection}
-          onSelect={(next) => onSelectSettingsSection?.(next)}
-          onClose={() => onCloseSettings?.()}
-        />
-      ) : (
-        <>
-          <div className="flex shrink-0 flex-col gap-px px-2 pb-2 pt-0.5">
-            <RailSearch
-              label="Search"
-              icon={Search}
-              onClick={onSearch}
-              active={searchActive}
-              shortcut={`${MOD}K`}
-              ariaLabel={`Search (${MOD}K)`}
-            />
-            <div className="mt-0.5" />
-            <RailAction
-              label="Inbox"
-              icon={Inbox}
-              onClick={onOpenInbox}
-              onOpenContextMenu={(x, y) => {
-                menuTrigger.current =
-                  document.activeElement instanceof HTMLElement
-                    ? document.activeElement
-                    : null;
-                projectMenu.close();
-                setInboxMenu({ x, y });
-              }}
-              active={inboxActive}
-              dot={inboxUnseen}
-              ariaLabel={inboxUnseen ? "Inbox, new items" : "Inbox"}
-            />
-            {notesEnabled ? (
+        {settingsOpen ? (
+          <SettingsNav
+            section={settingsSection}
+            onSelect={(next) => onSelectSettingsSection?.(next)}
+            onClose={() => onCloseSettings?.()}
+          />
+        ) : (
+          <>
+            <div className="flex shrink-0 flex-col gap-px px-2 pb-2 pt-0.5">
+              <RailSearch
+                label="Search"
+                icon={Search}
+                onClick={onSearch}
+                active={searchActive}
+                shortcut={`${MOD}K`}
+                ariaLabel={`Search (${MOD}K)`}
+              />
+              <div className="mt-0.5" />
               <RailAction
-                label="Notes"
-                icon={File}
-                onClick={onOpenNotes}
-                active={notesActive}
-                ariaLabel="Notes"
+                label="Inbox"
+                icon={Inbox}
+                onClick={onOpenInbox}
+                onOpenContextMenu={(x, y) => {
+                  menuTrigger.current =
+                    document.activeElement instanceof HTMLElement
+                      ? document.activeElement
+                      : null;
+                  projectMenu.close();
+                  setInboxMenu({ x, y });
+                }}
+                active={inboxActive}
+                dot={inboxUnseen}
+                ariaLabel={inboxUnseen ? "Inbox, new items" : "Inbox"}
               />
-            ) : null}
-            <RailAction
-              label="Automations"
-              icon={Zap}
-              onClick={onOpenAutomations}
-              active={automationsActive}
-              ariaLabel="Automations"
-            />
-          </div>
-
-          <div
-            ref={(el) => {
-              lockOverscroll(el);
-              scrollRef.current = el;
-            }}
-            className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none pb-2"
-          >
-            {monos ? (
-              <MonoRailSection
-                {...monos}
-                introAvailable={visible && !!monos.introAvailable}
+              {notesEnabled ? (
+                <RailAction
+                  label="Notes"
+                  icon={File}
+                  onClick={onOpenNotes}
+                  active={notesActive}
+                  ariaLabel="Notes"
+                />
+              ) : null}
+              <RailAction
+                label="Automations"
+                icon={Zap}
+                onClick={onOpenAutomations}
+                active={automationsActive}
+                ariaLabel="Automations"
               />
-            ) : null}
+            </div>
 
-            {sections.pinned.length > 0 ? (
+            <div
+              ref={(el) => {
+                lockOverscroll(el);
+                scrollRef.current = el;
+              }}
+              className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none pb-2"
+            >
+              {monos ? (
+                <MonoRailSection
+                  {...monos}
+                  introAvailable={visible && !!monos.introAvailable}
+                />
+              ) : null}
+
+              {sections.pinned.length > 0 ? (
+                <ProjectSection
+                  label="Pinned"
+                  items={sections.pinned}
+                  muteStatuses={muteStatuses}
+                  cwd={cwd}
+                  busy={busy}
+                  statsEnabled={visible}
+                  sortable={pinnedSortable}
+                  pinned
+                  searchActive={otherViewActive}
+                  onSelect={onSelectProject}
+                  onTogglePin={toggleProjectPin}
+                  onContextMenu={onProjectContextMenu}
+                  onOpenMenu={projectMenu.open}
+                  groupLabels={groupLabels}
+                  groupColors={groupColors}
+                  groupCustomColors={groupCustomColors}
+                  groupLogos={groupLogos}
+                  groupMascots={groupMascots}
+                />
+              ) : null}
+
+              {projectGroups.length > 0 ? (
+                <div className="mb-2 shrink-0">
+                  <ProjectSectionHeader
+                    label="Groups"
+                    onAddGroup={(x, y) => projectMenu.createGroup(x, y)}
+                  />
+                  <div className="flex flex-col gap-px px-2">
+                    {groupedProjectSections.grouped.map(({ group, items }) => (
+                      <ProjectGroupSection
+                        key={group.id}
+                        group={group}
+                        items={items}
+                        muteStatuses={muteStatuses}
+                        cwd={cwd}
+                        busy={busy}
+                        statsEnabled={visible}
+                        searchActive={otherViewActive}
+                        onSelect={onSelectProject}
+                        onTogglePin={toggleProjectPin}
+                        onContextMenu={onProjectContextMenu}
+                        onOpenMenu={projectMenu.open}
+                        onReorder={onReorderProjects}
+                        onToggleCollapsed={() =>
+                          updateProjectGroup(group.id, (current) => ({
+                            ...current,
+                            collapsed: !current.collapsed,
+                          }))
+                        }
+                        onOpenGroupMenu={(x, y) =>
+                          projectMenu.openGroupMenu(group.id, x, y)
+                        }
+                        groupLabels={groupLabels}
+                        groupColors={groupColors}
+                        groupCustomColors={groupCustomColors}
+                        groupLogos={groupLogos}
+                        groupMascots={groupMascots}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               <ProjectSection
-                label="Pinned"
-                items={sections.pinned}
+                label="Projects"
+                items={groupedProjectSections.ungrouped}
                 muteStatuses={muteStatuses}
+                emptyLabel={
+                  sections.projects.length === 0 && projectGroups.length === 0
+                    ? "No projects yet"
+                    : undefined
+                }
+                onAdd={onOpenProject}
                 cwd={cwd}
                 busy={busy}
                 statsEnabled={visible}
-                sortable={pinnedSortable}
-                pinned
+                sortable={projectSortable}
+                pinned={false}
                 searchActive={otherViewActive}
                 onSelect={onSelectProject}
                 onTogglePin={toggleProjectPin}
@@ -449,129 +609,60 @@ export function ProjectRail({
                 groupLogos={groupLogos}
                 groupMascots={groupMascots}
               />
-            ) : null}
-
-            {projectGroups.length > 0 ? (
-              <div className="mb-2 shrink-0">
-                <ProjectSectionHeader
-                  label="Groups"
-                  onAddGroup={(x, y) => projectMenu.createGroup(x, y)}
-                />
-                <div className="flex flex-col gap-px px-2">
-                  {groupedProjectSections.grouped.map(({ group, items }) => (
-                    <ProjectGroupSection
-                      key={group.id}
-                      group={group}
-                      items={items}
-                      muteStatuses={muteStatuses}
-                      cwd={cwd}
-                      busy={busy}
-                      statsEnabled={visible}
-                      searchActive={otherViewActive}
-                      onSelect={onSelectProject}
-                      onTogglePin={toggleProjectPin}
-                      onContextMenu={onProjectContextMenu}
-                      onOpenMenu={projectMenu.open}
-                      onReorder={onReorderProjects}
-                      onToggleCollapsed={() =>
-                        updateProjectGroup(group.id, (current) => ({
-                          ...current,
-                          collapsed: !current.collapsed,
-                        }))
-                      }
-                      onOpenGroupMenu={(x, y) =>
-                        projectMenu.openGroupMenu(group.id, x, y)
-                      }
-                      groupLabels={groupLabels}
-                      groupColors={groupColors}
-                      groupCustomColors={groupCustomColors}
-                      groupLogos={groupLogos}
-                      groupMascots={groupMascots}
-                    />
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <ProjectSection
-              label="Projects"
-              items={groupedProjectSections.ungrouped}
-              muteStatuses={muteStatuses}
-              emptyLabel={
-                sections.projects.length === 0 && projectGroups.length === 0
-                  ? "No projects yet"
-                  : undefined
-              }
-              onAdd={onOpenProject}
-              cwd={cwd}
-              busy={busy}
-              statsEnabled={visible}
-              sortable={projectSortable}
-              pinned={false}
-              searchActive={otherViewActive}
-              onSelect={onSelectProject}
-              onTogglePin={toggleProjectPin}
-              onContextMenu={onProjectContextMenu}
-              onOpenMenu={projectMenu.open}
+            </div>
+            <LiveAgentsPreview
+              agents={liveAgents}
+              activeSessionId={activeSessionId}
+              onSelect={onSelectAgent}
               groupLabels={groupLabels}
               groupColors={groupColors}
               groupCustomColors={groupCustomColors}
-              groupLogos={groupLogos}
               groupMascots={groupMascots}
             />
-          </div>
-          <LiveAgentsPreview
-            agents={liveAgents}
-            activeSessionId={activeSessionId}
-            onSelect={onSelectAgent}
-            groupLabels={groupLabels}
-            groupColors={groupColors}
-            groupCustomColors={groupCustomColors}
-            groupMascots={groupMascots}
-          />
-          <SidebarUpdateFooter
-            update={updateNotice}
-            onOpenWhatsNew={onOpenWhatsNew}
-            onDismissUpdate={onDismissUpdate}
-          />
-          <div className="flex shrink-0 flex-col gap-px p-2">
-            <GithubStarPrompt />
-            <RailAction
-              label="Settings"
-              icon={Settings}
-              onClick={onOpenSettings}
-              shortcut={`${MOD},`}
-              ariaLabel={`Settings (${MOD},)`}
+            <SidebarUpdateFooter
+              update={updateNotice}
+              onOpenWhatsNew={onOpenWhatsNew}
+              onDismissUpdate={onDismissUpdate}
             />
-          </div>
-        </>
-      )}
-      {visible ? projectMenu.element : null}
-      {visible && inboxMenu ? (
-        <InboxNotificationMenu
-          {...inboxMenu}
-          projectPaths={[...allProjects.keys()]}
-          onOpenSettings={onOpenNotificationSettings}
-          onClose={() => {
-            setInboxMenu(null);
-            menuTrigger.current?.focus();
-          }}
+            <div className="flex shrink-0 flex-col gap-px p-2">
+              <GithubStarPrompt />
+              <RailAction
+                label="Settings"
+                icon={Settings}
+                onClick={onOpenSettings}
+                shortcut={`${MOD},`}
+                ariaLabel={`Settings (${MOD},)`}
+              />
+            </div>
+          </>
+        )}
+        {visible ? projectMenu.element : null}
+        {visible && inboxMenu ? (
+          <InboxNotificationMenu
+            {...inboxMenu}
+            projectPaths={[...allProjects.keys()]}
+            onOpenSettings={onOpenNotificationSettings}
+            onClose={() => {
+              setInboxMenu(null);
+              menuTrigger.current?.focus();
+            }}
+          />
+        ) : null}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize project sidebar"
+          aria-valuenow={resize.width}
+          aria-valuemin={PROJECT_RAIL_WIDTH_MIN}
+          aria-valuemax={PROJECT_RAIL_WIDTH_MAX}
+          className={`absolute inset-y-0 -right-px z-10 w-1.5 cursor-col-resize touch-none ${
+            resize.dragging ? "bg-content/15" : "hover:bg-content/10"
+          }`}
+          onPointerDown={resize.onPointerDown}
+          onDoubleClick={resize.onDoubleClick}
         />
-      ) : null}
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize project sidebar"
-        aria-valuenow={resize.width}
-        aria-valuemin={PROJECT_RAIL_WIDTH_MIN}
-        aria-valuemax={PROJECT_RAIL_WIDTH_MAX}
-        className={`absolute inset-y-0 -right-px z-10 w-1.5 cursor-col-resize touch-none ${
-          resize.dragging ? "bg-content/15" : "hover:bg-content/10"
-        }`}
-        onPointerDown={resize.onPointerDown}
-        onDoubleClick={resize.onDoubleClick}
-      />
-    </nav>
+      </nav>
+    </ThreadsContext.Provider>
   );
 }
 
@@ -923,148 +1014,475 @@ function ProjectCard({
   const labelClassName = machine
     ? "min-w-0 max-w-[75%] shrink-0 truncate text-sm font-medium leading-tight"
     : nameClassName;
+  const threads = useContext(ThreadsContext);
+  const current = sameProjectPath(item.path, threads?.cwd ?? "");
+  const [expanded, setExpanded] = useState(
+    () => loadThreadsExpanded()[pathKey(item.path)] ?? current,
+  );
+  const toggleExpanded = () => {
+    saveThreadsExpanded(pathKey(item.path), !expanded);
+    setExpanded(!expanded);
+  };
+  const threadRows = useProjectThreadRows(
+    item.path,
+    !!threads && expanded,
+    current,
+    threads,
+  );
+  const [threadLimit, setThreadLimit] = useState(THREAD_PAGE);
+  const shownThreads = threadRows?.slice(0, threadLimit) ?? [];
+  const threadListRef = useThreadSlide();
+  // The open chat carries the highlight once it is listed beneath.
+  const headerSelected =
+    selected &&
+    !(
+      threads &&
+      expanded &&
+      shownThreads.some((row) => row.id === threads.activeSessionId)
+    );
 
   return (
     <div
       ref={(el) => sortable.setItemRef(item.path, el)}
-      data-selected={selected || undefined}
-      className={`reorder-item project-reorder-item group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
-        selected
-          ? "bg-selection-strong text-content"
-          : "opacity-65"
-      } cursor-default`}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
-          return;
-        }
-        sortable.onItemPointerDown(item.path, event);
-      }}
-      onClick={(event) => {
-        if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
-          return;
-        }
-        if (sortable.consumeClick()) return;
-        onSelect(item.path);
-      }}
-      onContextMenu={(event) => onContextMenu(item.path, event)}
-      onKeyDown={(event) => {
-        if (
-          event.key !== "ContextMenu" &&
-          !(event.shiftKey && event.key === "F10")
-        ) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const rect = event.currentTarget.getBoundingClientRect();
-        onOpenMenu(item.path, rect.left, rect.bottom);
-      }}
+      className="reorder-item flex flex-col"
     >
-      <button
-        type="button"
-        title={muteStatus ? `${cardTitle}\n${muteStatus}` : cardTitle}
-        aria-label={muteStatus ? `${cardAriaLabel}, ${muteStatus}` : cardAriaLabel}
-        aria-current={selected ? "true" : undefined}
-        className="flex min-w-0 flex-1 cursor-default items-center gap-2 text-left transition-[padding] duration-150 motion-reduce:transition-none group-hover:pr-6 group-has-[:focus-visible]:pr-6"
-      >
-        <div className="project-card-logo grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
-          {logoPath && !busy ? (
-            <ProjectLogoIcon
-              path={logoPath}
-              className="size-4 rounded-sm"
-              imageClassName="size-4"
-            />
-          ) : (
-            <ProjectMascot
-              project={seed}
-              color={color}
-              name={resolveTabGroupMascot(key, groupMascots)}
-              className="size-3"
-              active={busy}
-            />
-          )}
-        </div>
-        {busy ? (
-          <Shimmer as="span" duration={1.4} className={labelClassName}>
-            {name}
-          </Shimmer>
-        ) : (
-          <span className={labelClassName}>{name}</span>
-        )}
-        {machine ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] leading-tight text-content/45">
-            {machine.name}
-          </span>
-        ) : null}
-        {hasChanges ? (
-          <span className="project-card-stats shrink-0 group-hover:hidden group-has-[:focus-visible]:hidden">
-            <ProjectDiffStat additions={additions} deletions={deletions} />
-          </span>
-        ) : null}
-        {remote ? (
-          <span
-            role="img"
-            aria-label={connection}
-            className="relative grid size-4 shrink-0 place-items-center text-content/45"
-          >
-            <Internet className="size-3" strokeWidth={1.75} aria-hidden="true" />
-            <span
-              aria-hidden="true"
-              className={`absolute right-0 bottom-0 size-1.5 rounded-full ring-1 ring-background-base ${
-                online ? "bg-emerald-400" : "bg-content/35"
-              }`}
-            />
-          </span>
-        ) : null}
-        {muteStatus ? (
-          <span
-            role="img"
-            aria-label={muteStatus}
-            title={muteStatus}
-            className="grid size-4 shrink-0 place-items-center text-amber-400"
-          >
-            <BellOff className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
-          </span>
-        ) : null}
-      </button>
-      <button
-        type="button"
-        data-no-drag
-        title="Project options"
-        aria-label="Project options"
-        aria-haspopup="menu"
-        onPointerDown={(event) => event.stopPropagation()}
+      <div
+        data-selected={headerSelected || undefined}
+        aria-expanded={threads ? expanded : undefined}
+        className={`project-reorder-item group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
+          headerSelected
+            ? "bg-selection-strong text-content"
+            : "opacity-65"
+        } cursor-default`}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
+            return;
+          }
+          sortable.onItemPointerDown(item.path, event);
+        }}
         onClick={(event) => {
+          if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
+            return;
+          }
+          if (sortable.consumeClick()) return;
+          // Another machine's chats aren't listed here, so open it instead.
+          if (threads && !(remote && !current)) toggleExpanded();
+          else onSelect(item.path);
+        }}
+        onContextMenu={(event) => onContextMenu(item.path, event)}
+        onKeyDown={(event) => {
+          if (
+            event.key !== "ContextMenu" &&
+            !(event.shiftKey && event.key === "F10")
+          ) return;
+          event.preventDefault();
           event.stopPropagation();
           const rect = event.currentTarget.getBoundingClientRect();
-          onOpenMenu(
-            item.path,
-            event.detail === 0 ? rect.left : event.clientX,
-            event.detail === 0 ? rect.bottom : event.clientY,
-          );
+          onOpenMenu(item.path, rect.left, rect.bottom);
         }}
-        className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[:focus-visible]:grid"
       >
-        <MoreHorizontal className="size-4" strokeWidth={1.75} />
-      </button>
+        <button
+          type="button"
+          title={muteStatus ? `${cardTitle}\n${muteStatus}` : cardTitle}
+          aria-label={muteStatus ? `${cardAriaLabel}, ${muteStatus}` : cardAriaLabel}
+          aria-current={headerSelected ? "true" : undefined}
+          className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left transition-[padding] duration-150 motion-reduce:transition-none ${
+            threads
+              ? "group-hover:pr-12 group-has-[:focus-visible]:pr-12"
+              : "group-hover:pr-6 group-has-[:focus-visible]:pr-6"
+          }`}
+        >
+          <div className="project-card-logo grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
+            {logoPath && !busy ? (
+              <ProjectLogoIcon
+                path={logoPath}
+                className="size-4 rounded-sm"
+                imageClassName="size-4"
+              />
+            ) : (
+              <ProjectMascot
+                project={seed}
+                color={color}
+                name={resolveTabGroupMascot(key, groupMascots)}
+                className="size-3"
+                active={busy}
+              />
+            )}
+          </div>
+          <span className={labelClassName}>{name}</span>
+          {machine ? (
+            <span className="min-w-0 flex-1 truncate text-[11px] leading-tight text-content/45">
+              {machine.name}
+            </span>
+          ) : null}
+          {hasChanges ? (
+            <span className="project-card-stats shrink-0 group-hover:hidden group-has-[:focus-visible]:hidden">
+              <ProjectDiffStat additions={additions} deletions={deletions} />
+            </span>
+          ) : null}
+          {remote ? (
+            <span
+              role="img"
+              aria-label={connection}
+              className="relative grid size-4 shrink-0 place-items-center text-content/45"
+            >
+              <Internet className="size-3" strokeWidth={1.75} aria-hidden="true" />
+              <span
+                aria-hidden="true"
+                className={`absolute right-0 bottom-0 size-1.5 rounded-full ring-1 ring-background-base ${
+                  online ? "bg-emerald-400" : "bg-content/35"
+                }`}
+              />
+            </span>
+          ) : null}
+          {muteStatus ? (
+            <span
+              role="img"
+              aria-label={muteStatus}
+              title={muteStatus}
+              className="grid size-4 shrink-0 place-items-center text-amber-400"
+            >
+              <BellOff className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
+            </span>
+          ) : null}
+        </button>
+        <button
+          type="button"
+          data-no-drag
+          title="Project options"
+          aria-label="Project options"
+          aria-haspopup="menu"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            const rect = event.currentTarget.getBoundingClientRect();
+            onOpenMenu(
+              item.path,
+              event.detail === 0 ? rect.left : event.clientX,
+              event.detail === 0 ? rect.bottom : event.clientY,
+            );
+          }}
+          className={`absolute top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[:focus-visible]:grid ${
+            threads ? "right-7" : "right-1"
+          }`}
+        >
+          <MoreHorizontal className="size-4" strokeWidth={1.75} />
+        </button>
+        {threads ? (
+          <button
+            type="button"
+            data-no-drag
+            title="New chat"
+            aria-label={`New chat in ${name}`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              threads.onNew(item.path);
+            }}
+            className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[:focus-visible]:grid"
+          >
+            <Plus className="size-3.5" strokeWidth={1.75} />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          data-no-drag
+          title={pinned ? "Unpin project" : "Pin project"}
+          aria-label={pinned ? "Unpin project" : "Pin project"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onTogglePin(item.path);
+          }}
+          className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
+        >
+          {pinned ? (
+            <PinOff className="size-3.5" strokeWidth={1.75} />
+          ) : (
+            <Pin className="size-3.5" strokeWidth={1.75} />
+          )}
+        </button>
+      </div>
+      {threads ? (
+        <div
+          inert={!expanded}
+          className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${
+            expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+          }`}
+        >
+        <ul ref={threadListRef} aria-label={`${name} chats`} className="relative flex min-h-0 flex-col gap-px overflow-hidden py-px">
+          {threadRows?.length === 0 ? (
+            <li className="h-7 pl-8 text-[12px] leading-7 text-content/35">
+              No chats yet
+            </li>
+          ) : null}
+          {shownThreads.map((row) => (
+            <ThreadRow
+              key={row.id}
+              session={row}
+              active={selected && row.id === threads.activeSessionId}
+              busy={threads.busyIds.has(row.id)}
+              approval={threads.approvalIds.has(row.id)}
+              unseen={threads.unseenIds.has(row.id)}
+              onSelect={threads.onSelect}
+              onArchive={threads.onArchive}
+              onDelete={threads.onDelete}
+              onRename={threads.onRename}
+            />
+          ))}
+          {threadRows && threadRows.length > threadLimit ? (
+            <li>
+              <button
+                type="button"
+                onClick={() => setThreadLimit((limit) => limit + THREAD_PAGE)}
+                className="flex h-7 w-full items-center rounded-md pl-8 text-left text-[12px] text-content/40 hover:bg-content/5 hover:text-content/70"
+              >
+                Show more
+              </button>
+            </li>
+          ) : null}
+        </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The current project's chats come from the live list; any other project's
+ * are read from the store when expanded, and again after switching projects.
+ */
+function useProjectThreadRows(
+  path: string,
+  enabled: boolean,
+  current: boolean,
+  threads: ProjectThreads | null,
+): SessionSummary[] | null {
+  const [stored, setStored] = useState<SessionSummary[] | null>(null);
+  const currentRows = threads?.current;
+  const remote = !!remoteProjectFor(path);
+  useEffect(() => {
+    if (!enabled || current || remote) return;
+    let cancelled = false;
+    void listSessionsByProject(path)
+      .then((rows) => {
+        if (!cancelled) setStored(rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, current, remote, path, currentRows]);
+  // Unknown until loaded (and never listed for another machine's project).
+  const rows = current ? currentRows : stored;
+  const busyIds = threads?.busyIds;
+  const approvalIds = threads?.approvalIds;
+  const unseenIds = threads?.unseenIds;
+  return useMemo(
+    () => {
+      const needsAttention = (id: string) =>
+        busyIds?.has(id) || approvalIds?.has(id) || unseenIds?.has(id);
+      return rows
+        ? rows.filter(isListedThread).sort((a, b) =>
+            Number(!!needsAttention(b.id)) - Number(!!needsAttention(a.id)) ||
+            compareSessionSummaries(a, b),
+          )
+        : null;
+    },
+    [rows, busyIds, approvalIds, unseenIds],
+  );
+}
+
+/** Animate existing rows from their previous slots when attention changes. */
+function useThreadSlide() {
+  const list = useRef<HTMLUListElement>(null);
+  const positions = useRef(new Map<string, number>());
+  const animations = useRef(new Map<string, Animation>());
+  useLayoutEffect(() => {
+    const next = new Map<string, number>();
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const { duration, easing } = reorderMotion();
+    for (const row of list.current?.querySelectorAll<HTMLElement>("[data-thread-id]") ?? []) {
+      const id = row.dataset.threadId!;
+      const top = row.offsetTop;
+      next.set(id, top);
+      const previous = positions.current.get(id);
+      if (previous === undefined || previous === top) continue;
+      animations.current.get(id)?.cancel();
+      if (!reducedMotion && duration > 0 && typeof row.animate === "function") {
+        animations.current.set(id, row.animate([
+          { transform: `translateY(${previous - top}px)` },
+          { transform: "translateY(0)" },
+        ], { duration, easing }));
+      }
+    }
+    for (const [id, animation] of animations.current) {
+      if (!next.has(id) || reducedMotion) {
+        animation.cancel();
+        animations.current.delete(id);
+      }
+    }
+    positions.current = next;
+  });
+  useLayoutEffect(() => () => {
+    for (const animation of animations.current.values()) animation.cancel();
+    animations.current.clear();
+  }, []);
+  return list;
+}
+
+function ThreadRow({
+  session,
+  active,
+  busy,
+  approval,
+  unseen,
+  onSelect,
+  onArchive,
+  onDelete,
+  onRename,
+}: {
+  session: SessionSummary;
+  active: boolean;
+  busy: boolean;
+  approval: boolean;
+  unseen: boolean;
+  onSelect: (sessionId: string) => void;
+  onArchive?: ProjectThreads["onArchive"];
+  onDelete?: ProjectThreads["onDelete"];
+  onRename?: ProjectThreads["onRename"];
+}) {
+  const [menuAnchor, setMenuAnchor] = useState<HTMLButtonElement | null>(null);
+  const [renameValue, setRenameValue] = useState<string | null>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renameFinished = useRef(false);
+  const renaming = renameValue !== null;
+  useEffect(() => {
+    if (!renaming) return;
+    renameInput.current?.focus();
+    renameInput.current?.select();
+  }, [renaming]);
+  const finishRename = (save: boolean) => {
+    if (renameFinished.current) return;
+    renameFinished.current = true;
+    const title = renameValue?.trim();
+    setRenameValue(null);
+    if (save && title && title !== session.title) onRename?.(session, title);
+  };
+  const menuItems: ExplorerMenuItem[] = [
+    ...(onRename
+      ? [{ kind: "item" as const, id: "rename", label: "Rename", shortcut: "F2" }]
+      : []),
+    ...(onArchive
+      ? [{ kind: "item" as const, id: "archive", label: session.archived ? "Unarchive" : "Archive" }]
+      : []),
+    ...(onDelete
+      ? [{ kind: "item" as const, id: "delete", label: "Delete", danger: true }]
+      : []),
+  ];
+  const title = sessionDisplayTitle(session.title, session.harness);
+  const status = approval
+    ? "Needs approval"
+    : busy
+      ? "Working"
+      : unseen
+        ? "Finished"
+        : undefined;
+  return (
+    <li data-thread-id={session.id} className="group/thread relative">
+      {renaming ? (
+        <div className="flex h-7 items-center pl-8 pr-2">
+          <input
+            ref={renameInput}
+            aria-label="Rename thread"
+            value={renameValue}
+            onChange={(event) => setRenameValue(event.target.value)}
+            onBlur={() => finishRename(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                finishRename(event.key === "Enter");
+              }
+            }}
+            className="min-w-0 w-full rounded bg-content/10 px-1 text-[13px] text-content outline-none ring-1 ring-accent/40"
+          />
+        </div>
+      ) : (
       <button
         type="button"
-        data-no-drag
-        title={pinned ? "Unpin project" : "Pin project"}
-        aria-label={pinned ? "Unpin project" : "Pin project"}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          onTogglePin(item.path);
+        title={status ? `${title}\n${status}` : title}
+        aria-label={status ? `${title}, ${status}` : title}
+        aria-current={active ? "true" : undefined}
+        onClick={() => onSelect(session.id)}
+        onKeyDown={(event) => {
+          if (event.key === "F2" && onRename) {
+            event.preventDefault();
+            renameFinished.current = false;
+            setRenameValue(title);
+          }
         }}
-        className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
+        className={`flex h-7 w-full min-w-0 items-center gap-2 rounded-md pl-8 ${menuItems.length ? "pr-8" : "pr-2"} text-left text-[13px] ${
+          active
+            ? "bg-selection-strong text-content"
+            : "text-content/65 hover:bg-content/5 hover:text-content"
+        }`}
       >
-        {pinned ? (
-          <PinOff className="size-3.5" strokeWidth={1.75} />
+        {busy && !approval ? (
+          <NineDotSpinner className="text-accent" />
+        ) : null}
+        {busy ? (
+          <Shimmer as="span" duration={1.4} className="min-w-0 flex-1 truncate">
+            {title}
+          </Shimmer>
         ) : (
-          <Pin className="size-3.5" strokeWidth={1.75} />
+          <span className="min-w-0 flex-1 truncate">{title}</span>
         )}
+        {approval || unseen ? (
+          <span
+            aria-hidden="true"
+            className={`size-1.5 shrink-0 rounded-full ${
+              approval ? "bg-amber-400" : "bg-accent"
+            }`}
+          />
+        ) : null}
       </button>
-    </div>
+      )}
+      {!renaming && menuItems.length ? (
+        <button
+          type="button"
+          title="Thread actions"
+          aria-label={`Actions for ${title}`}
+          aria-haspopup="menu"
+          aria-expanded={!!menuAnchor}
+          onClick={(event) => {
+            event.stopPropagation();
+            setMenuAnchor(event.currentTarget);
+          }}
+          className={`absolute right-1 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${menuAnchor ? "" : "pointer-events-none opacity-0 group-hover/thread:pointer-events-auto group-hover/thread:opacity-100 group-focus-within/thread:pointer-events-auto group-focus-within/thread:opacity-100"}`}
+        >
+          <MoreHorizontal className="size-4" strokeWidth={1.75} aria-hidden />
+        </button>
+      ) : null}
+      {menuAnchor ? (
+        <ExplorerMenu
+          anchor={menuAnchor}
+          items={menuItems}
+          ariaLabel="Thread actions"
+          onClose={() => setMenuAnchor(null)}
+          onPick={(action) => {
+            setMenuAnchor(null);
+            if (action === "rename") {
+              renameFinished.current = false;
+              setRenameValue(title);
+            }
+            if (action === "archive") onArchive?.(session, !session.archived);
+            if (action === "delete") onDelete?.(session);
+          }}
+        />
+      ) : null}
+    </li>
   );
 }
 

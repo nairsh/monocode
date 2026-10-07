@@ -10,9 +10,16 @@ type Props = {
   onRemove?: () => void;
   /** A sent image shown large on its own, like a photo in a messaging app. */
   photo?: boolean;
+  /** A composer thumbnail big enough to read, instead of a tiny chip. */
+  large?: boolean;
 };
 
-export function AttachmentChip({ attachment, onRemove, photo = false }: Props) {
+export function AttachmentChip({
+  attachment,
+  onRemove,
+  photo = false,
+  large = false,
+}: Props) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const preview = attachmentPreviewSrc(attachment);
   const image = attachment.kind === "image" && preview;
@@ -34,7 +41,7 @@ export function AttachmentChip({ attachment, onRemove, photo = false }: Props) {
               event.stopPropagation();
               setPreviewOpen(true);
             }}
-            className={`${photo ? "min-w-0 rounded-2xl" : "shrink-0 rounded-lg"} cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
+            className={`${photo ? "min-w-0 rounded-2xl" : large ? "shrink-0 rounded-xl" : "shrink-0 rounded-lg"} cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
           >
             <img
               src={preview}
@@ -43,7 +50,9 @@ export function AttachmentChip({ attachment, onRemove, photo = false }: Props) {
               className={
                 photo
                   ? "block max-h-60 max-w-60 rounded-2xl object-cover"
-                  : "size-9 rounded-lg object-cover"
+                  : large
+                    ? "size-22 rounded-xl object-cover ring-1 ring-content/10"
+                    : "size-9 rounded-lg object-cover"
               }
             />
           </button>
@@ -72,7 +81,9 @@ export function AttachmentChip({ attachment, onRemove, photo = false }: Props) {
             }}
             className={`grid shrink-0 place-items-center rounded-full text-content/70 hover:bg-content/15 hover:text-content ${
               image
-                ? "absolute -right-1 -top-1 size-5 bg-content/20 opacity-100 shadow-sm backdrop-blur-sm"
+                ? large
+                  ? "absolute right-1.5 top-1.5 size-5 bg-black/55 text-white/90 opacity-0 shadow-sm backdrop-blur-sm group-hover:opacity-100 focus-visible:opacity-100"
+                  : "absolute -right-1 -top-1 size-5 bg-content/20 opacity-100 shadow-sm backdrop-blur-sm"
                 : "size-4 text-content/40"
             }`}
           >
