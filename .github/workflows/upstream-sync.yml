@@ -68,6 +68,11 @@ jobs:
   validate:
     needs: merge
     if: needs.merge.outputs.commit != ''
+    # The reusable workflow declares a publishing job, though its event guard
+    # skips that job for sync calls. GitHub still validates its permission ceiling.
+    # Its build job explicitly reduces the token to contents: read.
+    permissions:
+      contents: write
     uses: ./.github/workflows/fork-build.yml
     with:
       ref: ${{ needs.merge.outputs.commit }}

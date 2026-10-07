@@ -40,6 +40,7 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 - Rust: 586 tests passed, 1 ignored.
 - Both new workflows passed actionlint 1.7.12 and the patch passed whitespace validation.
 - Existing compiler warnings: unused macOS imports; CSS optimizer does not recognize the transcript search `::highlight` pseudo-element. Build succeeded.
-- The separately mentioned background audit could not be located through available chat tools or GitHub checks. These are independently run validations, not a claim that that audit approved the commit.
+- The restored app's “Review and commit monocode changes” chat confirms completion of the earlier review, fixes, tests, commit and push of `b9c3971`. No GitHub check was attached to that review. The counts above were independently rerun for this delivery.
+- Installed 0.9.0 at `/Applications/MonoCode.app` and visually verified project/chat restoration. Previous 0.7.0 moved to Trash. The old app ZIP and pre-launch application-data copy are in `~/Library/Application Support/MonoCode-fork-backups/2026-10-08/`.
 
 Runtime performance recommendations remain unimplemented; no comparative speed or energy improvement is claimed for this delivery change.

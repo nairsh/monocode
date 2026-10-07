@@ -16,6 +16,10 @@ Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCod
 
 ## Install
 
+**Personal fork:** download Apple Silicon builds from [this fork's releases](https://github.com/nairsh/monocode/releases). Use the latest `fork-*` prerelease. These builds preserve the custom interface, disable upstream automatic updates, and are ad-hoc signed rather than Apple-notarized. See [fork delivery and upstream updates](docs/fork-delivery.md). The original project's download links below install upstream MonoCode, not this fork.
+
+The [T3 Code performance comparison](docs/t3-performance-review.md) documents the next performance work without adding T3's product features.
+
 > Install and log in to at least one provider first:
 >
 > - [Claude Code](https://claude.com/product/claude-code) - `claude auth login`

@@ -17,6 +17,8 @@ permissions:
 jobs:
   macos:
     if: github.repository == 'nairsh/monocode'
+    permissions:
+      contents: read
     runs-on: macos-14
     timeout-minutes: 60
     steps:
