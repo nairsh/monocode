@@ -86,6 +86,8 @@ import { SidebarUpdateFooter } from "./SidebarUpdate";
 import type { InstalledUpdate } from "../model/updateNotice";
 import { SettingsNav } from "./SettingsRail";
 import { Shimmer } from "../../shared/ui/Shimmer";
+import { resolveModel } from "../../features/sessions/model/models";
+import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
 import { NineDotSpinner } from "../../features/sessions/ui/NineDotSpinner";
 import type { SettingsSectionId } from "../../features/settings/model/settings";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
@@ -1434,7 +1436,7 @@ const ThreadRow = memo(function ThreadRow({
             setRenameValue(title);
           }
         }}
-        className={`flex h-7 w-full min-w-0 items-center gap-2 rounded-md pl-8 ${menuItems.length ? "pr-8" : "pr-2"} text-left text-[13px] ${
+        className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md py-1 pl-8 ${menuItems.length ? "pr-8" : "pr-2"} text-left text-[13px] ${
           active
             ? "bg-selection-strong text-content"
             : "text-content/65 hover:bg-content/5 hover:text-content"
@@ -1443,13 +1445,19 @@ const ThreadRow = memo(function ThreadRow({
         {busy && !approval ? (
           <NineDotSpinner className="text-accent" />
         ) : null}
-        {busy ? (
-          <Shimmer as="span" duration={1.4} className="min-w-0 flex-1 truncate">
-            {title}
-          </Shimmer>
-        ) : (
-          <span className="min-w-0 flex-1 truncate">{title}</span>
-        )}
+        <div className="min-w-0 flex-1">
+          {busy ? (
+            <Shimmer as="span" duration={1.4} className="block truncate font-medium">
+              {title}
+            </Shimmer>
+          ) : (
+            <span className="block truncate font-medium">{title}</span>
+          )}
+          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] font-normal text-content/45">
+            <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
+            <span className="truncate">{resolveModel(session.harness, session.model).name}</span>
+          </span>
+        </div>
         {approval || unseen ? (
           <span
             aria-hidden="true"

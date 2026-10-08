@@ -11,7 +11,6 @@ const probes = vi.hoisted(() => ({
   transcript: vi.fn(),
   runs: [],
 }));
-vi.mock("./Composer", () => ({ Composer: () => null }));
 vi.mock("../hooks/useFileDrop", () => ({ useFileDrop: () => false }));
 vi.mock("../model/attachments", async (original) => ({
   ...(await original<typeof import("../model/attachments")>()),
@@ -182,12 +181,12 @@ it("keeps the same input, current draft and attachments when a question appears 
   const inputProps = Object.entries(input).find(([key]) =>
     key.startsWith("__reactProps"),
   )![1];
-  act(() => inputProps.onChange({ target: { value: "Fresh draft" } }));
-  await act(async () =>
-    container
-      .querySelector<HTMLButtonElement>('[aria-label="Attach files"]')!
-      .click(),
-  );
+  act(() => {
+    input.value = "Fresh draft";
+    inputProps.onInput({ currentTarget: input });
+  });
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Add files or choose a mode"]')!.click());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Upload file"))!.click());
   const questioned = {
     ...pane,
     session: {
@@ -218,7 +217,7 @@ it("keeps the same input, current draft and attachments when a question appears 
   );
   expect(pane.onSubmit).toHaveBeenCalledWith("chat", "Fresh draft", [
     expect.objectContaining({ id: "file" }),
-  ]);
+  ], expect.objectContaining({ intent: "default" }));
 });
 
 it("routes transcript quotes to the Mono draft", () => {

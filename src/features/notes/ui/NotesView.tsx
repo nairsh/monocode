@@ -1,5 +1,4 @@
 import {
-  ImagePlus,
   LoaderCircle,
   Plus,
   Search,
@@ -18,7 +17,6 @@ import {
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { useMarkdownMode } from "../../sessions/ui/MarkdownModeToggle";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import { SearchableProjectPicker } from "../../projects/ui/SearchableProjectPicker";
@@ -45,7 +43,6 @@ import {
 } from "../notes";
 import {
   insertNoteImagesMarkdown,
-  pickNoteImages,
   saveNoteImagesFromClipboard,
   saveNoteImagesFromFiles,
   saveNoteImagesFromPaths,
@@ -53,7 +50,10 @@ import {
 } from "../noteImages";
 import { projectKey, projectName } from "../../../shared/lib/paths";
 import { IS_MAC } from "../../../platform/tauri/platform";
-import { looksLikeProject, type RecentProject } from "../../projects/model/recents";
+import {
+  looksLikeProject,
+  type RecentProject,
+} from "../../projects/model/recents";
 import {
   loadTabGroupColors,
   loadTabGroupCustomColors,
@@ -62,8 +62,7 @@ import {
   resolveTabGroupLogo,
   resolveTabGroupMascot,
 } from "../../workspace/model/tabGroups";
-import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
-import { MarkdownSourceEditor } from "../../sessions/ui/MarkdownSourceEditor";
+import { NoteMarkdownEditor } from "./NoteMarkdownEditor";
 import { filesFromClipboard } from "../../sessions/model/attachments";
 
 const MIN_WIDTH = 240;
@@ -415,33 +414,6 @@ function NoteProjectMark({
   );
 }
 
-function NoteDetailTab({
-  label,
-  selected,
-  onSelect,
-}: {
-  label: string;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={selected}
-      onClick={onSelect}
-      className={`relative flex h-9 items-center text-[12px] leading-none ${
-        selected ? "text-content" : "text-content/50 hover:text-content"
-      }`}
-    >
-      {label}
-      {selected ? (
-        <span className="absolute inset-x-0 bottom-0 h-0.5 bg-content" />
-      ) : null}
-    </button>
-  );
-}
-
 function NoteCard({
   note,
   active,
@@ -572,8 +544,6 @@ function NoteEditor({
   onAddToChat: (note: Note) => void;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
-  const blank = !note.body.trim() && note.title === "Untitled";
-  const [mode, setMode] = useMarkdownMode(note.id);
   type Edits = Partial<Pick<Note, "title" | "body" | "tags">>;
   const [edits, setEdits] = useState<Edits>({});
   const title = edits.title ?? note.title;
@@ -594,6 +564,7 @@ function NoteEditor({
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const titleFieldRef = useRef<HTMLInputElement>(null);
   const sourceFieldRef = useRef<HTMLTextAreaElement>(null);
+  const selectionRef = useRef<{ start: number; end: number } | null>(null);
   const lastDropAt = useRef(0);
   const skipSave = useRef(false);
   const saveTimer = useRef<number | null>(null);
@@ -605,12 +576,6 @@ function NoteEditor({
   noteRef.current = note;
   onSavedRef.current = onSaved;
   const time = formatRelativeTime(new Date(note.updatedAt).toISOString());
-
-  useEffect(() => {
-    if (blank) setMode("source");
-    // New untitled notes open in source so typing isn't behind the preview.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const editNote = useCallback((change: Edits) => {
     const next = { ...editsRef.current, ...change };
@@ -703,15 +668,12 @@ function NoteEditor({
   }, [saveNow]);
 
   const insertionRange = useCallback(() => {
-    const field = sourceFieldRef.current;
-    if (!field) {
-      const end = bodyRef.current.length;
-      return { start: end, end };
-    }
-    return {
-      start: field.selectionStart,
-      end: field.selectionEnd,
-    };
+    return (
+      selectionRef.current ?? {
+        start: bodyRef.current.length,
+        end: bodyRef.current.length,
+      }
+    );
   }, []);
 
   const addDroppedImages = useCallback(
@@ -719,6 +681,7 @@ function NoteEditor({
       load: () => Promise<NoteImageAsset[]>,
       range: { start: number; end: number },
     ) => {
+      sourceFieldRef.current?.blur();
       setImageBusy(true);
       setImageDrag(false);
       try {
@@ -730,14 +693,9 @@ function NoteEditor({
           images,
         );
         editNote({ body: inserted.value });
+        selectionRef.current = { start: inserted.cursor, end: inserted.cursor };
         setSaveError(null);
         scheduleSave();
-        window.requestAnimationFrame(() => {
-          const field = sourceFieldRef.current;
-          if (!field) return;
-          field.focus();
-          field.setSelectionRange(inserted.cursor, inserted.cursor);
-        });
       } catch (err: unknown) {
         setSaveError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -935,38 +893,6 @@ function NoteEditor({
             </div>
           ) : null}
         </header>
-        <div className="flex h-9 items-stretch border-b border-stroke">
-          <div
-            role="tablist"
-            aria-label="Note sections"
-            className="flex items-stretch gap-4"
-          >
-            <NoteDetailTab
-              label="Preview"
-              selected={mode === "preview"}
-              onSelect={() => setMode("preview")}
-            />
-            <NoteDetailTab
-              label="Source"
-              selected={mode === "source"}
-              onSelect={() => setMode("source")}
-            />
-          </div>
-          <button
-            type="button"
-            aria-label="Add image"
-            title="Add image"
-            disabled={imageBusy}
-            onClick={() => {
-              const range = insertionRange();
-              void addDroppedImages(() => pickNoteImages(note.id), range);
-            }}
-            className="ml-auto flex items-center gap-1 text-[12px] text-content/50 hover:text-content disabled:opacity-50"
-          >
-            <ImagePlus className="size-3.5" />
-            Image
-          </button>
-        </div>
         <div
           ref={dropZoneRef}
           aria-busy={imageBusy}
@@ -1004,42 +930,37 @@ function NoteEditor({
               {imageBusy ? "Adding images…" : "Drop images here"}
             </div>
           ) : null}
-          {mode === "source" ? (
-            <MarkdownSourceEditor
-              textareaRef={sourceFieldRef}
-              autoFocus={blank}
-              value={body}
-              onPaste={(event: ReactClipboardEvent<HTMLTextAreaElement>) => {
-                const range = insertionRange();
-                const files = filesFromClipboard(event.clipboardData);
-                if (files.some((file) => file.type.startsWith("image/"))) {
-                  event.preventDefault();
-                  void addDroppedImages(
-                    () => saveNoteImagesFromFiles(note.id, files),
-                    range,
-                  );
-                  return;
-                }
-                // Text is the textarea's to insert. A paste with nothing the
-                // webview can see is a screenshot on the native clipboard.
-                if (files.length || event.clipboardData.getData("text/plain"))
-                  return;
+          <NoteMarkdownEditor
+            textareaRef={sourceFieldRef}
+            selectionRef={selectionRef}
+            cwd={sourceCwd}
+            value={body}
+            onPaste={(event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+              const range = insertionRange();
+              const files = filesFromClipboard(event.clipboardData);
+              if (files.some((file) => file.type.startsWith("image/"))) {
                 event.preventDefault();
                 void addDroppedImages(
-                  () => saveNoteImagesFromClipboard(note.id),
+                  () => saveNoteImagesFromFiles(note.id, files),
                   range,
                 );
-              }}
-              onChange={(next) => {
-                editNote({ body: next });
-                scheduleSave();
-              }}
-            />
-          ) : body.trim() ? (
-            <AgentMarkdown text={body} cwd={sourceCwd} hardBreaks />
-          ) : (
-            <p className="text-[13px] text-content/45">No description</p>
-          )}
+                return;
+              }
+              // Text is the textarea's to insert. A paste with nothing the
+              // webview can see is a screenshot on the native clipboard.
+              if (files.length || event.clipboardData.getData("text/plain"))
+                return;
+              event.preventDefault();
+              void addDroppedImages(
+                () => saveNoteImagesFromClipboard(note.id),
+                range,
+              );
+            }}
+            onChange={(next) => {
+              editNote({ body: next });
+              scheduleSave();
+            }}
+          />
         </div>
       </div>
     </div>

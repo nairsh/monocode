@@ -3089,8 +3089,25 @@ html.theme-light .mono-pill {
   }
 }
 
+.mono-details-panel {
+  overflow: clip;
+  transition: width 240ms cubic-bezier(0.22, 1, 0.36, 1), border-color 240ms;
+}
+
 .mono-details-panel[data-open="false"] {
-  display: none;
+  width: 0 !important;
+  border-left-color: transparent;
+  border-left-width: 0;
+}
+
+.is-resizing .mono-details-panel {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mono-details-panel {
+    transition: none;
+  }
 }
 
 /* A Mono's activity rolls through one clipped line without moving the chat. */

@@ -135,7 +135,7 @@ it("puts working, approval and unread threads ahead of read threads before pagin
   props.unseenFinishedIds = new Set(["c4"]);
   await act(async () => root.render(createElement(Sidebar, props)));
 
-  expect(chatButtons("project").map((button) => button.textContent)).toEqual([
+  expect(chatButtons("project").map((button) => button.querySelector(".font-medium")?.textContent)).toEqual([
     "Chat c4", "Chat c5", "Chat c6", "Chat c0", "Chat c1",
   ]);
 });
@@ -151,7 +151,7 @@ it("moves an opened unread thread below threads still needing attention", async 
   expect(props.onSelectSession).toHaveBeenCalledWith("c4");
   props.activeSessionId = "c4";
   await act(async () => root.render(createElement(Sidebar, props)));
-  expect(chatButtons("project").map((button) => button.textContent)).toEqual([
+  expect(chatButtons("project").map((button) => button.querySelector(".font-medium")?.textContent)).toEqual([
     "Chat c6", "Chat c0", "Chat c1", "Chat c2", "Chat c3",
   ]);
 
@@ -167,7 +167,7 @@ it("keeps an opened thread near the top while it is still working or awaiting ap
   props.activeSessionId = "c6";
   props.busySessionIds = new Set(["c6"]);
   await act(async () => root.render(createElement(Sidebar, props)));
-  expect(chatButtons("project")[0].textContent).toBe("Chat c6");
+  expect(chatButtons("project")[0].querySelector(".font-medium")?.textContent).toBe("Chat c6");
   expect(chatButtons("project")[0].getAttribute("aria-current")).toBe("true");
 
   props.busySessionIds = new Set();
@@ -184,13 +184,13 @@ it("prioritizes unread threads in another expanded project", async () => {
   props.unseenFinishedIds = new Set(["other-2"]);
   await act(async () => root.render(createElement(Sidebar, props)));
   await act(async () => header("other").click());
-  expect(chatButtons("other").map((button) => button.textContent)).toEqual([
+  expect(chatButtons("other").map((button) => button.querySelector(".font-medium")?.textContent)).toEqual([
     "Chat other-2", "Chat other-1",
   ]);
 
   props.unseenFinishedIds = new Set();
   await act(async () => root.render(createElement(Sidebar, props)));
-  expect(chatButtons("other").map((button) => button.textContent)).toEqual([
+  expect(chatButtons("other").map((button) => button.querySelector(".font-medium")?.textContent)).toEqual([
     "Chat other-1", "Chat other-2",
   ]);
 });
@@ -207,7 +207,7 @@ it("does not reload other projects or measure unchanged rows during live updates
     }
     expect(listSessionsByProject).not.toHaveBeenCalled();
     expect(offset).not.toHaveBeenCalled();
-    expect(chatButtons("other")[0].textContent).toBe("Chat other-1");
+    expect(chatButtons("other")[0].querySelector(".font-medium")?.textContent).toBe("Chat other-1");
   } finally {
     offset.mockRestore();
   }
@@ -287,7 +287,7 @@ it("collapses and expands a project's chats from its row", async () => {
   await act(async () => header("other").click());
   expect(collapsed("other")).toBe(false);
   expect(listSessionsByProject).toHaveBeenCalledWith("/work/other");
-  expect(chatButtons("other").map((button) => button.textContent)).toEqual([
+  expect(chatButtons("other").map((button) => button.querySelector(".font-medium")?.textContent)).toEqual([
     "Chat other-1",
   ]);
 });
@@ -382,4 +382,16 @@ it("docks the workspace panel on the right beside the rail and collapses it ther
   );
   expect(slot.firstElementChild?.hasAttribute("inert")).toBe(true);
   slot.remove();
+});
+
+
+it("shows the model used by each thread alongside its title", async () => {
+  props.sessions = props.sessions.map((session, index) => ({
+    ...session,
+    harness: index === 0 ? "codex" : "claude",
+    model: index === 0 ? "gpt-5.4" : "claude-opus-4-6",
+  }));
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatButtons("project")[0].textContent).toContain("GPT-5.4");
+  expect(chatButtons("project")[1].textContent).toContain("Opus");
 });

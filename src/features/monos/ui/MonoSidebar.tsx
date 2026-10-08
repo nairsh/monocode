@@ -69,7 +69,12 @@ export function MonoSidebar({
       {windowControls ? (
         <div className="absolute right-0 top-0 z-30 h-10">{windowControls}</div>
       ) : null}
-      {children}
+      <div
+        className="flex h-full min-h-0 shrink-0 flex-col"
+        style={{ width: resize.width }}
+      >
+        {children}
+      </div>
     </aside>
   );
 }

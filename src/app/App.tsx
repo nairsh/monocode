@@ -4544,6 +4544,8 @@ function Workspace({
   /** A Mono's conversation is a view over the existing workspace tabs. */
   const onOpenMono = useCallback(
     async (monoId: string) => {
+      setMonoDetailsOpen(false);
+      setMonoArtifact(null);
       setMonoActivity(null);
       setMonoSessions(null);
       workspaceNavigation.cancel();
@@ -4588,7 +4590,6 @@ function Workspace({
 
   /** A new Mono opens straight away, ready to be told what it works on. */
   const onCreateMono = useCallback(() => {
-    setMonoDetailsOpen(true);
     void onOpenMono(createMono().id);
   }, [onOpenMono]);
 

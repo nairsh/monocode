@@ -10,6 +10,7 @@ const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", async (original) => ({
   ...(await original<typeof import("@tauri-apps/api/core")>()),
   invoke,
+  convertFileSrc: (path: string) => `asset://${path}`,
 }));
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
@@ -142,8 +143,7 @@ it.each(["refocus", "unmount"] as const)(
     vi.useFakeTimers();
     stored = { ...stored, id: `note-title-body-save-${action}` };
     await render();
-    const source = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
-      .find((button) => button.textContent === "Source")!;
+    const source = container.querySelector<HTMLElement>('[aria-label="Edit note text"]')!;
     await act(async () => source.click());
     const body = container.querySelector<HTMLTextAreaElement>("textarea.markdown-source-field")!;
     const title = container.querySelector<HTMLInputElement>('[aria-label="Note title"]')!;
@@ -499,9 +499,7 @@ it.each(["title", "body", "tags"] as const)(
       });
     };
     const editBody = async (value: string) => {
-      const source = [
-        ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-      ].find((button) => button.textContent === "Source")!;
+      const source = container.querySelector<HTMLElement>('[aria-label="Edit note text"]')!;
       await act(async () => source.click());
       const input = container.querySelector<HTMLTextAreaElement>(
         "textarea.markdown-source-field",
@@ -546,11 +544,7 @@ it.each(["title", "body", "tags"] as const)(
       container.querySelector<HTMLInputElement>('[aria-label="Note title"]')
         ?.value,
     ).toBe(expected.title);
-    expect(
-      container.querySelector<HTMLTextAreaElement>(
-        "textarea.markdown-source-field",
-      )?.value,
-    ).toBe(expected.body);
+    expect(container.querySelector('[aria-label="Note body"]')?.textContent).toContain(expected.body);
     expect(
       [...container.querySelectorAll('[aria-label="Tags"] span')].map(
         (tag) => tag.textContent,
@@ -943,4 +937,48 @@ it.each([
 
   expect(stored).toMatchObject({ title: "Release notes", slug, slugPending: false });
   expect(upserts().some((note) => note.finalizeSlug)).toBe(false);
+});
+
+it("renders Markdown in one view and edits a block without changing the rest of the note", async () => {
+  stored.body = "# Heading\n\nFirst paragraph.\n\n**Second** paragraph.";
+  await render();
+  expect(container.querySelector('[role="tablist"][aria-label="Note sections"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Add image"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Note body"] h1')?.textContent).toBe("Heading");
+  expect(container.querySelector('[aria-label="Note body"] [data-streamdown="strong"]')?.textContent).toBe("Second");
+  const block = [...container.querySelectorAll<HTMLElement>('[aria-label="Edit note text"]')]
+    .find((item) => item.textContent?.includes("First paragraph"))!;
+  await act(async () => block.click());
+  const field = container.querySelector<HTMLTextAreaElement>('[aria-label="Note text"]')!;
+  await act(async () => typeInto(field, "Updated paragraph.\n\n"));
+  await act(async () => field.blur());
+  expect(container.querySelector('[aria-label="Note body"] [data-streamdown="strong"]')?.textContent).toBe("Second");
+  await act(async () => root.unmount());
+  expect(stored.body).toBe("# Heading\n\nUpdated paragraph.\n\n**Second** paragraph.");
+});
+
+it("saves a dropped image and renders it without switching note modes", async () => {
+  const asset = `/note-assets/${stored.id}/diagram.png`;
+  const save = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "write_attachment") return "/tmp/diagram.png";
+    if (command === "notes_save_image") return { name: "Diagram", markdownPath: asset };
+    if (command === "delete_path") return;
+    if (command === "notes_image_path") return "/data/diagram.png";
+    return save(command, args);
+  });
+  await render();
+  const zone = container.querySelector<HTMLElement>('[aria-busy]')!;
+  const event = new Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: { types: ["Files"], files: [new File(["image bytes"], "diagram.png", { type: "image/png" })] },
+  });
+  await act(async () => {
+    zone.dispatchEvent(event);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(event.defaultPrevented).toBe(true);
+  expect(container.querySelector(`img[data-note-image="${asset}"]`)?.getAttribute("alt")).toBe("Diagram");
+  await act(async () => root.unmount());
+  expect(stored.body).toContain(`![Diagram](${asset})`);
 });

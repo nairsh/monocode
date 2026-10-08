@@ -11,6 +11,8 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { MonoUsageLimitNotice } from "../../monos/ui/MonoUsageLimitNotice";
+import { MessageQueue } from "./MessageQueue";
 import { Composer } from "./Composer";
 import type { Worktree } from "../../source-control/model/worktrees";
 import {
@@ -67,14 +69,10 @@ import {
   subscribeMonos,
 } from "../../monos/model/mono";
 import { MonoHeader } from "../../monos/ui/MonoHeader";
-import { MonoComposer } from "../../monos/ui/MonoComposer";
-import { MonoUsageLimitNotice } from "../../monos/ui/MonoUsageLimitNotice";
-import { QuestionForm } from "./QuestionForm";
 import {
   monoMessageDeliveries,
   monoPendingTranscriptBlocks,
 } from "../../monos/model/monoMessaging";
-import { MessageQueue } from "./MessageQueue";
 import { useMonoTranscript } from "../../monos/hooks/useMonoTranscript";
 import { MONO_PAGE_TURNS } from "../data/sessionStore";
 import { useComposerDockMotion } from "./useComposerDockMotion";
@@ -273,7 +271,8 @@ type Props = SessionPaneProps & {
 };
 
 export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
-  const detail = useSessionDetail(props.session, props.visible) ?? props.session;
+  const detail =
+    useSessionDetail(props.session, props.visible) ?? props.session;
   // Sessions in a project on another machine render this same pane, backed by
   // the host instead of this computer's session runtime.
   if (isRemoteProjectPath(props.session.cwd))
@@ -541,11 +540,18 @@ const LocalSessionPane = memo(function LocalSessionPane({
       if (blockId && remoteHistory) {
         if (!(await remoteHistory.loadUntilBlock(blockId))) return false;
         if (onLoadBlockDetail) await onLoadBlockDetail(blockId);
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
       }
       if (navigateBlockRef.current?.(blockId, query)) return true;
       if (!blockId) return false;
-      if (!(remoteHistory ? await remoteHistory.loadUntilBlock(blockId) : await monoTranscript.reveal(blockId))) return false;
+      if (
+        !(remoteHistory
+          ? await remoteHistory.loadUntilBlock(blockId)
+          : await monoTranscript.reveal(blockId))
+      )
+        return false;
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => resolve()),
       );
@@ -741,7 +747,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       onStop={() => onStop(session.id)}
       onCompactContext={() => onCompactContext(session.id)}
       onPlaceInFolder={(target) => onPlaceSessionInFolder(session.id, target)}
-      queuedMessages={session.queuedMessages}
+      queuedMessages={agent ? [] : session.queuedMessages}
       queueStatus={session.queueStatus}
       onDeleteQueuedMessage={(messageId) =>
         onDeleteQueuedMessage(session.id, messageId)
@@ -756,7 +762,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
         onSteerQueuedMessage(session.id, messageId)
       }
       onResumeQueue={() => onResumeQueue(session.id)}
-      usageLimit={session.usageLimit}
+      usageLimit={agent ? undefined : session.usageLimit}
       onUsageLimitResume={() => onUsageLimitResume(session.id)}
       onUsageLimitResumeAtReset={(enabled) =>
         onUsageLimitResumeAtReset(session.id, enabled)
@@ -764,6 +770,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
       onUsageLimitDismiss={() => onUsageLimitDismiss(session.id)}
       onOpenFile={onOpenFile}
       busy={!!session.busy}
+      placeholder={agent ? `Message ${agent.name}` : undefined}
+      inputAriaLabel={agent ? `Message ${agent.name}` : undefined}
       editLastTurnSupported={editLastTurnSupported}
       lastTurnRecall={turnRecall}
       onRecallLastTurnReady={(recall) => {
@@ -932,10 +940,13 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     historicalBlockIds={monoTranscript.historicalBlockIds}
                     initialTurns={agent ? MONO_PAGE_TURNS : undefined}
                     pageSize={agent ? MONO_PAGE_TURNS : undefined}
-                    hasEarlier={remoteHistory?.hasEarlier ?? monoTranscript.hasEarlier}
+                    hasEarlier={
+                      remoteHistory?.hasEarlier ?? monoTranscript.hasEarlier
+                    }
                     loadEarlierOnScroll={!!agent || !!remoteHistory}
                     onLoadEarlier={
-                      remoteHistory?.loadEarlier ?? (agent ? monoTranscript.loadEarlier : undefined)
+                      remoteHistory?.loadEarlier ??
+                      (agent ? monoTranscript.loadEarlier : undefined)
                     }
                     onLoadBlockDetail={onLoadBlockDetail}
                     onReturnToLatest={
@@ -1133,15 +1144,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     onResume={() => onResumeQueue(session.id)}
                     variant="messages"
                   />
-                  {session.pendingQuestion ? (
-                    <QuestionForm
-                      prompt={session.pendingQuestion}
-                      onReply={replyQuestion}
-                      onInteraction={(id) =>
-                        onQuestionInteraction?.(session.id, id)
-                      }
-                    />
-                  ) : null}
                   {session.usageLimit ? (
                     <MonoUsageLimitNotice
                       session={session}
@@ -1160,30 +1162,9 @@ const LocalSessionPane = memo(function LocalSessionPane({
                       }
                     />
                   ) : null}
-                  <MonoComposer
-                    key={session.id}
-                    sessionId={session.id}
-                    name={agent.name}
-                    enabled={visible}
-                    quoteRequest={quoteRequest}
-                    onQuoteRequestConsumed={acknowledgeQuote}
-                    onDraftChange={(text) => {
-                      draftRef.current = text;
-                    }}
-                    focusToken={
-                      focused && composerFocused
-                        ? composerFocusToken
-                        : undefined
-                    }
-                    onFocus={() => onFocus(session.id)}
-                    onSubmit={(text, attachments) =>
-                      onSubmit(session.id, text, attachments)
-                    }
-                  />
                 </>
-              ) : (
-                composer
-              )}
+              ) : null}
+              {composer}
             </div>
           ) : null}
           <BtwSheet
