@@ -26,6 +26,10 @@ import {
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
+import { loadLocalIssues, localIssuePrompt, recoverLocalIssueRuns, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { gitHistory } from "../platform/tauri/fs";
+import { issueProofPaths, loadIssueImages, saveIssueImages, type IssueImage } from "../features/inbox/model/localIssueImages";
+import { attachmentsFromPaths } from "../features/sessions/model/attachments";
 import {
   submitAfterProjectSync,
   type SubmissionAcceptance,
@@ -830,6 +834,7 @@ type SubmitOptions = ComposerTurnOptions & {
   appRequestId?: string;
   monoSessionCompletion?: Block["monoSessionCompletion"];
   onSettled?: (outcome: ControlOutcome) => void;
+  onStarted?: () => void;
   /** Generate a fresh title even when this is not the session's first turn. */
   refreshTitle?: boolean;
   /** Internal guard for the retry after resolving a renamed project. */
@@ -7565,7 +7570,12 @@ function Workspace({
         };
 
         const pendingEditedEvents: HarnessEvent[] = [];
+        let startReported = false;
         const applyTurnEvent = (event: HarnessEvent) => {
+          if (!startReported && (event.type === "session.started" || event.type === "message.delta" || event.type.startsWith("tool."))) {
+            startReported = true;
+            options?.onStarted?.();
+          }
           orchestrator.observe(sessionId, event);
           if (options?.onSettled && event.type === "message.delta")
             controlText = (controlText + event.text).slice(-20_000);
@@ -8145,6 +8155,90 @@ function Workspace({
   const automationSessionReservations = useRef(new Set<string>());
   const automationRecoveryRef = useRef<Promise<void> | null>(null);
   const automationRecoveryCutoffRef = useRef(Date.now());
+
+  // A restart loses the settlement callback. Require review/retry rather than
+  // silently dispatching the same issue again or leaving it permanently locked.
+  const localIssueRecoveryDone = useRef(false);
+  useEffect(() => {
+    if (localIssueRecoveryDone.current) return;
+    localIssueRecoveryDone.current = true;
+    try {
+      recoverLocalIssueRuns(id => sessionsRef.current.some(session => session.id === id && session.busy));
+    } catch {
+      // The tracker reports unreadable storage; never overwrite it at startup.
+    }
+  }, []);
+
+  const onLaunchLocalIssue = useCallback(async (issue: LocalIssue) => {
+    const images = await loadIssueImages(issue.images);
+    let session = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
+    if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
+    if (session && issue.agent && session.harness !== issue.agent) session = null;
+    if (!session) {
+      const base = issue.agent
+        ? newSession(issue.agent, issue.projectPath, issue.model, sessionDefaults?.runtimeMode, issue.modelSettings)
+        : newDefaultSession(issue.projectPath, sessionDefaults?.runtimeMode);
+      session = { ...base, modelSettings: { ...base.modelSettings, ...issue.modelSettings }, title: `MC-${issue.number} ${issue.title}`, blocks: [{ id: crypto.randomUUID(), role: "user", text: localIssuePrompt(issue), attachments: images, draft: true }] };
+      // Persist the thread before linking or submitting, so a retry can reuse it.
+      if (!(await upsertSession(session))) throw new Error("The issue thread could not be saved.");
+      sessionsRef.current = [...sessionsRef.current, session];
+      setSessions(sessionsRef.current);
+      appendTab(newTab(session.id), issue.projectPath);
+    } else {
+      session = { ...session, model: issue.model || session.model, modelSettings: issue.modelSettings ?? session.modelSettings };
+      const updated = session;
+      sessionsRef.current = sessionsRef.current.map(entry => entry.id === updated.id ? updated : entry);
+      setSessions(sessionsRef.current);
+      await upsertSession(updated);
+    }
+    const sessionId = session.id;
+    const priorBlockIds = new Set(session.blocks.map(block => block.id));
+    const commitCwd = session.worktreeCwd || session.cwd;
+    const previousHead = issue.runKind === "commit" ? (await gitHistory(commitCwd, 1)).head : undefined;
+    const assigned = updateLocalIssue(issue.id, { sessionId, agent: session.harness, model: session.model, modelSettings: session.modelSettings }, `Started the issue thread with ${session.model}`);
+    let settled = false;
+    const prompt = issue.runKind === "commit"
+      ? `The user approved local issue MC-${issue.number}: ${issue.title}. Create a commit for this issue's changes only. Inspect the diff and preserve unrelated existing changes. Do not push. If a safe scoped commit is not possible, explain the blocker instead of claiming success. Return the commit hash and a summary.`
+      : issue.feedback
+        ? `Continue local issue MC-${issue.number}: ${issue.title} in this same thread.\n\nReview feedback:\n${issue.feedback}\n\n${localIssuePrompt(assigned)}`
+        : localIssuePrompt(assigned);
+    const accepted = await submitWithSettlement({
+      submit: onSettled => submitSession(sessionId, prompt, images, { managed: true, onSettled, onStarted: () => { if (!settled) updateLocalIssue(issue.id, { status: "in_progress", runState: "running" }, "Agent started working"); }, draftBlockId: sessionDraftBlock(session)?.id }),
+      rejectionMessage: "The selected agent could not start this issue.",
+      onSettled: async outcome => {
+        settled = true;
+        // Let the final transcript flush reach React before saving the review.
+        await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+        const completed = outcome.status === "completed";
+        const turnBlocks = sessionsRef.current.find(entry => entry.id === sessionId)?.blocks.filter(block => !priorBlockIds.has(block.id)) ?? [];
+        const replies = turnBlocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim());
+        const output = replies[replies.length - 1]?.text || outcome.text || "";
+        const committing = issue.runKind === "commit";
+        // A successful turn alone does not prove that the requested commit exists.
+        const history = committing && completed ? await gitHistory(commitCwd, 1).catch(() => null) : null;
+        const committed = verifiedIssueCommit(previousHead, history?.head, output);
+        let proofImages: IssueImage[] = [];
+        let evidenceError: string | undefined;
+        if (completed) {
+          try {
+            const paths = [...new Set([...issueProofPaths(output), ...turnBlocks.flatMap(block => block.image?.path ? [block.image.path] : [])])];
+            if (paths.length) proofImages = await saveIssueImages((await attachmentsFromPaths(paths)).filter(file => file.kind === "image"));
+          } catch (reason) {
+            evidenceError = `Evidence could not be copied: ${reason instanceof Error ? reason.message : String(reason)}`;
+          }
+        }
+        const current = loadLocalIssues().find(entry => entry.id === issue.id);
+        updateLocalIssue(issue.id, {
+          runState: completed ? "completed" : outcome.status === "cancelled" ? "cancelled" : "failed",
+          ...(completed ? { status: committed ? "done" as const : "in_review" as const, reviews: [...(current?.reviews ?? []), { id: crypto.randomUUID(), text: output || "The agent finished without a written summary. Open its thread for details.", at: new Date().toISOString(), kind: committing ? "commit" as const : "work" as const, images: proofImages, evidenceError }] } : {}),
+          runError: outcome.error,
+        }, committed ? "Committed approved changes; issue done" : completed ? "Agent finished; ready for review" : outcome.status === "cancelled" ? "Agent stopped" : "Agent needs attention");
+      },
+    });
+    if (!accepted) throw new Error("The selected agent could not start this issue. Open its thread for details, or retry.");
+  }, [appendTab, ensureOpenSession, sessionDefaults?.runtimeMode, submitSession]);
+
+  const onReadIssueSession = useCallback(async (id: string) => sessionsRef.current.find(session => session.id === id) ?? await getSession(id), []);
 
   const launchAutomation = useCallback(
     async (
@@ -12803,6 +12897,9 @@ function Workspace({
                   onClose={onLeaveInbox}
                   onToggleSidebar={onToggleSidebar}
                   onStart={onStartInboxItem}
+                  onLaunchLocalIssue={onLaunchLocalIssue}
+                  onReadIssueSession={onReadIssueSession}
+                  onIssueApproval={onApproval}
                   onAsk={onAskInboxItem}
                   onAskRestart={onRestartInboxAsk}
                   onAskMount={setInboxAskPortal}

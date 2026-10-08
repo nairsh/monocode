@@ -276,9 +276,10 @@ function WebPopover({
     };
   }, [place]);
 
+  const isPlaced = position !== null;
   useEffect(() => {
-    if (autoFocus) surface.current?.focus();
-  }, [autoFocus]);
+    if (autoFocus && isPlaced) surface.current?.focus();
+  }, [autoFocus, isPlaced]);
 
   useEffect(() => {
     if (!onDismiss) return;
@@ -332,6 +333,13 @@ function WebPopover({
   // stale backdrop when the same composited element is transformed and then
   // invalidated by a child hover. Only this unblurred content layer moves.
   const frameInset = bare ? 0 : 2;
+  const anchorNode = anchorElement(anchor);
+  const parentLayer = Number(anchorNode?.closest("[data-popover-layer]")?.getAttribute("data-popover-layer") ?? 0);
+  const displayedLayer = Math.max(
+    layer,
+    anchorNode?.closest('[role="dialog"]') ? LAYER.dialogPopover : 0,
+    layer === LAYER.submenu && parentLayer ? parentLayer + 1 : 0,
+  );
   const contentMaxHeight = constrainHeight
     ? position
       ? Math.max(0, position.maxHeight - frameInset)
@@ -344,7 +352,8 @@ function WebPopover({
     <div
       ref={frame}
       data-popover-side={position?.side ?? side}
-      style={{ ...placed, zIndex: layer }}
+      data-popover-layer={displayedLayer}
+      style={{ ...placed, zIndex: displayedLayer }}
       className={bare ? undefined : `${FRAME} ${rounded}`}
     >
       {bare ? null : <GlassBackdrop />}

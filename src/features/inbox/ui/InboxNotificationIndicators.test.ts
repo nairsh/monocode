@@ -3,7 +3,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { InboxView } from "./InboxView";
+// Notifications remain in the retained GitHub/deep-link detail surface.
+import { GithubInboxView as InboxView } from "./InboxView";
 import { inboxItemKey, type InboxItem } from "../model/githubTasks";
 import { isInboxEntryUnseen, seedInboxSeenIfNeeded } from "../model/inboxSeen";
 import { saveInboxConnections, saveInboxSource } from "../model/inboxFilters";

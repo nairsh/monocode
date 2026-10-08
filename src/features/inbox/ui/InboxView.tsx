@@ -203,6 +203,8 @@ import {
   type InboxSessionPortal,
 } from "./InboxDiscussionPanel";
 import { inboxAskKey } from "../model/inboxAsk";
+import { IssueTracker } from "./IssueTracker";
+import type { LocalIssue } from "../model/localIssues";
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 420;
@@ -380,6 +382,9 @@ type Props = {
   onClose?: () => void;
   onToggleSidebar?: () => void;
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
+  onLaunchLocalIssue?: (issue: LocalIssue) => Promise<void>;
+  onReadIssueSession?: (id: string) => Promise<import("../../sessions/model/session").Session | null | undefined>;
+  onIssueApproval?: (sessionId: string, requestId: number, decision: import("../../../integrations/harness").ApprovalDecision) => void;
   repairSessions?: CiRepairProps["repairSessions"];
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   sessions?: readonly SessionSummary[];
@@ -390,7 +395,20 @@ type Props = {
   onOpenIntegrations: (source: ConnectableInboxSource) => void;
 };
 
-export function InboxView({
+export function InboxView(props: Props) {
+  // Keep exact GitHub/PR deep links in the existing detail surface.
+  if (props.target) return <GithubInboxView {...props} />;
+  return <IssueTracker
+    cwd={props.cwd}
+    recents={props.recents}
+    onLaunch={props.onLaunchLocalIssue}
+    onReadSession={props.onReadIssueSession}
+    onApproval={props.onIssueApproval}
+    onOpenSession={props.onOpenSession}
+  />;
+}
+
+export function GithubInboxView({
   onAsk,
   onAskRestart,
   onAskMount,
