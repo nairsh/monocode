@@ -63,6 +63,8 @@ export type FilePaneTab = {
   projectCwd?: string;
   plan?: PlanTabSource;
   releaseNotes?: ReleaseNotesTabSource;
+  /** Notes, Inbox or Automations, opened as their own tab. */
+  section?: SectionKind;
   review?: boolean;
   /** Single working-tree review of every changed file (unified diff). */
   changes?: boolean;
@@ -88,6 +90,14 @@ export type EditorPane = {
 };
 
 export type SurfaceKind = "editor" | "terminal";
+
+export type SectionKind = "notes" | "inbox" | "automations";
+
+export const SECTION_TITLE: Record<SectionKind, string> = {
+  notes: "Notes",
+  inbox: "Inbox",
+  automations: "Automations",
+};
 
 export type WorkspaceTab = {
   kind: "session";
@@ -231,6 +241,27 @@ export function newReleaseNotesWorkspaceTab(
     editorPanes: [pane],
     terminalPanes: [],
   };
+}
+
+/** A top-level tab holding one section, scoped to the project it opened in. */
+export function newSectionWorkspaceTab(
+  section: SectionKind,
+  cwd: string,
+): WorkspaceTab {
+  return newEditorWorkspaceTab({
+    id: crypto.randomUUID(),
+    path: `section:${section}`,
+    cwd,
+    section,
+  });
+}
+
+/** The section shown by the tab's focused pane, if any. */
+export function workspaceTabSection(
+  tab: WorkspaceTab | undefined,
+): SectionKind | undefined {
+  const pane = tab?.editorPanes.find((entry) => entry.id === tab.focusedId);
+  return pane?.files.find((file) => file.id === pane.activeFileId)?.section;
 }
 
 /** Create a top-level workspace tab whose first and only pane is this file. */
@@ -430,8 +461,15 @@ export function isAgentTab(
   return !!file.agent;
 }
 
+export function isSectionTab(
+  file: FilePaneTab,
+): file is FilePaneTab & { section: SectionKind } {
+  return !!file.section;
+}
+
 export function isVirtualDocumentTab(file: FilePaneTab): boolean {
   return (
+    isSectionTab(file) ||
     isPlanTab(file) ||
     isReleaseNotesTab(file) ||
     isCommitTab(file) ||
@@ -516,6 +554,7 @@ export function editorTabKey(file: FilePaneTab): string {
   if (file.agent) return `agent:${file.agent.sessionId}`;
   if (file.plan) return `plan:${file.plan.blockId}`;
   if (file.releaseNotes) return `release-notes:${file.releaseNotes.version}`;
+  if (file.section) return `section:${file.cwd}:${file.section}`;
   if (file.commit) return `commit:${file.cwd}:${file.commit.sha}`;
   if (file.sessionChanges)
     return `session-changes:${file.cwd}:${file.sessionChanges.sessionId}`;
@@ -545,6 +584,7 @@ export function isPreviewableTab(file: FilePaneTab): boolean {
     !file.agent &&
     !file.plan &&
     !file.releaseNotes &&
+    !file.section &&
     !file.changes
   );
 }

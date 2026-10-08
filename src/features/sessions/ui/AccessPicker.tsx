@@ -18,7 +18,13 @@ import {
   RUNTIME_MODES,
   type RuntimeMode,
 } from "../model/session";
-import { Popover } from "../../../shared/ui/Popover";
+import {
+  MENU_CHECK,
+  MENU_ICON,
+  MENU_ROW,
+  MENU_WIDTH,
+  Popover,
+} from "../../../shared/ui/Popover";
 
 type Props = {
   value: RuntimeMode;
@@ -29,9 +35,6 @@ type Props = {
   /** `ghost`: just the mode's icon, for the composer row. */
   variant?: "pill" | "plain" | "ghost";
 };
-
-/** Same width as the model menu beside it. */
-const MENU_WIDTH = 250;
 
 const ICONS: Record<RuntimeMode, typeof Lock | typeof ShieldCode> = {
   supervised: Lock,
@@ -148,6 +151,7 @@ export function AccessPicker({
           anchor={root}
           side={side}
           width={MENU_WIDTH}
+          rounded="rounded-2xl"
           autoFocus
           onDismiss={(reason) => dismiss(reason === "escape")}
           role="listbox"
@@ -155,7 +159,7 @@ export function AccessPicker({
           data-access-picker
           tabIndex={-1}
           onKeyDown={onMenuKey}
-          className="p-1 font-sans"
+          className="p-1.5 font-sans"
         >
           {RUNTIME_MODES.map((mode, index) => {
             const ModeIcon = ICONS[mode];
@@ -171,30 +175,27 @@ export function AccessPicker({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(mode)}
                 title={RUNTIME_MODE_HINT[mode]}
-                className={`flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${
-                  highlighted
-                    ? "bg-selection text-content"
-                    : "text-content hover:bg-content/5"
-                }`}
+                className={`${MENU_ROW} ${highlighted ? "bg-content/6" : ""}`}
               >
                 <ModeIcon
-                  className={`size-3.5 shrink-0 ${mode === "full-access" ? "text-amber-400/90" : "text-content/70"}`}
-                  strokeWidth={1.75}
+                  className={
+                    mode === "full-access"
+                      ? "size-4 shrink-0 text-amber-400/90"
+                      : MENU_ICON
+                  }
+                  strokeWidth={1.5}
                 />
                 <span className="min-w-0 flex-1 truncate">
                   {RUNTIME_MODE_LABEL[mode]}
                 </span>
                 {selected ? (
-                  <Check
-                    className="size-3.5 shrink-0 text-content/70"
-                    strokeWidth={1.75}
-                  />
+                  <Check className={MENU_CHECK} strokeWidth={1.75} />
                 ) : null}
               </button>
             );
           })}
           {busy ? (
-            <p className="px-2 py-1.5 text-[11px] leading-4 text-content/50">
+            <p className="px-2.5 py-1.5 text-[11px] leading-4 text-content/50">
               Access changes apply to the next turn. Stop and resend to apply
               them now.
             </p>

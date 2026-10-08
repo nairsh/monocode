@@ -31,7 +31,6 @@ import {
   Terminal,
   Trash2,
   X,
-  Zap,
 } from "../../../shared/ui/icons";
 import { InboxProviderMark } from "../../inbox/ui/InboxProviderMark";
 import { ModelControlPills, ModelPicker } from "../../sessions/ui/ModelPicker";
@@ -41,8 +40,6 @@ import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import { SearchableProjectPicker } from "../../projects/ui/SearchableProjectPicker";
 import { SearchableSelect } from "../../../shared/ui/SearchableSelect";
 import { SkillPromptField } from "../../skills/ui/SkillPromptField";
-import { OverlayNav } from "../../../app/shell/TitleBar";
-import { WindowControls } from "../../../app/shell/WindowControls";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../../projects/hooks/useTabGroupLogos";
 import {
@@ -92,7 +89,6 @@ import { LINEAR_CHANGE_EVENT, linearConnected } from "../../inbox/model/linear";
 import { JIRA_CHANGE_EVENT, jiraConnected } from "../../inbox/model/jira";
 import { defaultSessionChoice, firstEnabledHarness, modelsFor, preferredModelId, resolveModel } from "../../sessions/model/models";
 import { projectKey, projectName } from "../../../shared/lib/paths";
-import { IS_MAC } from "../../../platform/tauri/platform";
 import { looksLikeProject, type RecentProject } from "../../projects/model/recents";
 import {
   loadSessionFolders,
@@ -111,12 +107,8 @@ import {
 } from "../../workspace/model/tabGroups";
 
 type Props = {
-  besideRail?: boolean;
-  compactRail?: boolean;
   cwd?: string;
   recents: RecentProject[];
-  onClose: () => void;
-  onToggleSidebar?: () => void;
   onLaunch: (
     automation: Automation,
     run: AutomationRun,
@@ -132,12 +124,8 @@ const ACTION_OUTLINE = `${ACTION} h-7 border border-content/15 text-content/80 h
 let rememberedAutomationId: string | null = null;
 
 export function AutomationsView({
-  besideRail = false,
-  compactRail = false,
   cwd,
   recents,
-  onClose,
-  onToggleSidebar,
   onLaunch,
   onOpenSession,
 }: Props) {
@@ -148,24 +136,6 @@ export function AutomationsView({
       data-app-automations
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
-      <div
-        className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
-        data-tauri-drag-region="deep"
-      >
-        {IS_MAC && compactRail ? <div className="w-4 shrink-0" /> : null}
-        {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
-        {besideRail ? null : (
-          <OverlayNav onBack={onClose} onToggleSidebar={onToggleSidebar} />
-        )}
-        <div className="flex min-w-0 flex-1 items-center gap-2 px-3 text-[13px]">
-          <Zap
-            className="size-3.5 shrink-0 text-content/45"
-            strokeWidth={1.75}
-          />
-          <span className="min-w-0 truncate text-content">Automations</span>
-        </div>
-        {IS_MAC ? null : <WindowControls />}
-      </div>
       <AutomationsContent
         cwd={cwd}
         recents={recents}

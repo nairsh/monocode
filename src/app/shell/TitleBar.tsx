@@ -1,15 +1,18 @@
 import {
   CheckCircle,
   ChevronLeft,
+  File,
   ChevronRight,
   DashboardSquare,
   Inbox,
   PanelLeft,
   PanelRightToggle,
+  Plus,
   Settings,
   StickyNote,
   Terminal,
   X,
+  Zap,
 } from "../../shared/ui/icons";
 import {
   memo,
@@ -56,7 +59,10 @@ import {
   setExternalPaneDrop,
   useExternalTitleTabDrop,
 } from "../../features/workspace/model/paneDrop";
-import type { PaneEdge } from "../../features/workspace/model/layout";
+import type {
+  PaneEdge,
+  SectionKind,
+} from "../../features/workspace/model/layout";
 
 export type Tab = {
   id: string;
@@ -86,7 +92,11 @@ export type Tab = {
   terminal?: boolean;
   /** File id when the whole tab is one preview file; double-click pins it. */
   previewFileId?: string;
+  /** Notes, Inbox or Automations shown in place of a conversation. */
+  section?: SectionKind;
 };
+
+const SECTION_ICON = { notes: File, inbox: Inbox, automations: Zap };
 
 type Props = {
   tabs: Tab[];
@@ -110,6 +120,8 @@ type Props = {
   onToggleSidebar: () => void;
   onToggleSessionSidebar?: () => void;
   onSelect: (id: string) => void;
+  /** Opens a blank chat tab; shown after the last tab. */
+  onNew?: () => void;
   onNewTerminal?: () => void;
   onOpenSettings?: () => void;
   onOpenInbox?: () => void;
@@ -298,6 +310,7 @@ function TitleTabItem({
 }) {
   const { headline, meta, tooltip } = tabCopy(tab);
   const fileIcon = tab.files[0];
+  const SectionIcon = tab.section ? SECTION_ICON[tab.section] : undefined;
   const accessibleTooltip =
     (tab.doneHarnesses?.length ?? 0) > 0
       ? `${tooltip} · Response complete`
@@ -359,6 +372,13 @@ function TitleTabItem({
             busyHarnesses={tab.busyHarnesses}
             doneHarnesses={tab.doneHarnesses ?? []}
             dimmed={!active}
+          />
+        ) : SectionIcon ? (
+          <SectionIcon
+            className={`size-3.5 shrink-0 ${
+              active ? "text-content" : "text-content/55"
+            }`}
+            strokeWidth={1.75}
           />
         ) : tab.terminal || !fileIcon ? (
           <Terminal
@@ -630,6 +650,7 @@ function TitleBarComponent({
   onToggleSidebar,
   onToggleSessionSidebar,
   onSelect,
+  onNew,
   onNewTerminal,
   onOpenSettings,
   onOpenInbox,
@@ -877,7 +898,7 @@ function TitleBarComponent({
     (mono && onShowMonoDetails) ||
     sidebarOnRight ||
     (!IS_MAC && !hideWindowControls) ? (
-      <div className="flex h-full shrink-0 items-stretch">
+      <div className="ml-auto flex h-full shrink-0 items-stretch">
         {sidebarOnRight ? (
           <div className="flex items-center px-1.5">
             <IconButton
@@ -994,8 +1015,9 @@ function TitleBarComponent({
         {mono ? (
           <MonoTitle look={mono.look} state={mono.state} />
         ) : (
+          <>
           <div
-            className="relative h-full min-w-0 flex-1 overflow-hidden"
+            className={`relative h-full min-w-0 overflow-hidden ${onNew ? "shrink" : "flex-1"}`}
             onWheel={(event) => {
               const el = tabStripRef.current;
               if (!el || el.scrollWidth <= el.clientWidth) return;
@@ -1089,6 +1111,17 @@ function TitleBarComponent({
               })}
             </div>
           </div>
+          {onNew ? (
+            <div
+              className="flex shrink-0 items-center pr-2"
+              data-tauri-drag-region="false"
+            >
+              <IconButton label={`New tab (${MOD}T)`} onClick={onNew}>
+                <Plus className="size-3.5" strokeWidth={1.75} />
+              </IconButton>
+            </div>
+          ) : null}
+          </>
         )}
 
         {!IS_MAC && !IS_WIN ? (

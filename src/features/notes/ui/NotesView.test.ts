@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import type { Editor } from "@tiptap/react";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -25,7 +26,6 @@ vi.mock("@tauri-apps/api/window", () => ({
 let root: Root;
 let container: HTMLDivElement;
 let stored: Note;
-let onClose: ReturnType<typeof vi.fn>;
 const recents = [
   { path: "/work/Edefyn", openedAt: 2 },
   { path: "/work/portognjeeen", openedAt: 1 },
@@ -63,7 +63,6 @@ beforeEach(() => {
       throw new Error(`Unexpected command: ${command}`);
     },
   );
-  onClose = vi.fn();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -82,10 +81,13 @@ async function render(projects = recents, cwd = "/work/Edefyn") {
       createElement(NotesView, {
         cwd,
         recents: projects,
-        onClose,
       }),
     ),
   );
+}
+
+function noteEditor(): Editor {
+  return (container.querySelector(".note-editor") as HTMLElement & { editor: Editor }).editor;
 }
 
 function typeInto(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -143,9 +145,6 @@ it.each(["refocus", "unmount"] as const)(
     vi.useFakeTimers();
     stored = { ...stored, id: `note-title-body-save-${action}` };
     await render();
-    const source = container.querySelector<HTMLElement>('[aria-label="Edit note text"]')!;
-    await act(async () => source.click());
-    const body = container.querySelector<HTMLTextAreaElement>("textarea.markdown-source-field")!;
     const title = container.querySelector<HTMLInputElement>('[aria-label="Note title"]')!;
     const save = invoke.getMockImplementation()!;
     let finishSave!: () => void;
@@ -159,7 +158,7 @@ it.each(["refocus", "unmount"] as const)(
       return save(command, args);
     });
     act(() => {
-      typeInto(body, "Updated body.");
+      noteEditor().commands.setContent("Updated body.", { contentType: "markdown" });
       title.focus();
       typeInto(title, "");
     });
@@ -236,10 +235,12 @@ it("keeps a note's consecutive lines on their own lines", async () => {
   stored = { ...stored, body: "> first line\n> second line\n> third line" };
   await render();
 
-  const preview = container.querySelector<HTMLElement>('[data-streamdown="blockquote"]')!;
-  expect(preview.querySelector("p")?.innerHTML).toBe(
-    "first line<br>second line<br>third line",
+  // The editor shows newlines as typed (pre-wrap) and saves them back unchanged.
+  const quote = container.querySelector<HTMLElement>(".note-editor blockquote")!;
+  expect(quote.querySelector("p")?.textContent).toBe(
+    "first line\nsecond line\nthird line",
   );
+  expect(noteEditor().getMarkdown()).toBe(stored.body);
 });
 
 it("uses the searchable rail project picker when moving a note", async () => {
@@ -335,7 +336,6 @@ it("moves the existing note and keeps its content when reopened", async () => {
   expect(
     container.querySelector('li [aria-current="true"]')?.textContent,
   ).toContain("portognjeeen");
-  expect(onClose).not.toHaveBeenCalled();
   await act(async () => root.unmount());
   root = createRoot(container);
   await render();
@@ -358,7 +358,6 @@ it("closes the project menu with Escape without leaving Notes", async () => {
     ),
   );
   expect(document.querySelector('[aria-label="Project picker"]')).toBeNull();
-  expect(onClose).not.toHaveBeenCalled();
 });
 
 it("serializes title edits behind an in-flight project change", async () => {
@@ -499,17 +498,8 @@ it.each(["title", "body", "tags"] as const)(
       });
     };
     const editBody = async (value: string) => {
-      const source = container.querySelector<HTMLElement>('[aria-label="Edit note text"]')!;
-      await act(async () => source.click());
-      const input = container.querySelector<HTMLTextAreaElement>(
-        "textarea.markdown-source-field",
-      )!;
       await act(async () => {
-        Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          "value",
-        )!.set!.call(input, value);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        noteEditor().commands.setContent(value, { contentType: "markdown" });
       });
     };
 
@@ -939,22 +929,35 @@ it.each([
   expect(upserts().some((note) => note.finalizeSlug)).toBe(false);
 });
 
-it("renders Markdown in one view and edits a block without changing the rest of the note", async () => {
+it("edits Markdown as rich text without changing the rest of the note", async () => {
   stored.body = "# Heading\n\nFirst paragraph.\n\n**Second** paragraph.";
   await render();
   expect(container.querySelector('[role="tablist"][aria-label="Note sections"]')).toBeNull();
   expect(container.querySelector('[aria-label="Add image"]')).toBeNull();
   expect(container.querySelector('[aria-label="Note body"] h1')?.textContent).toBe("Heading");
-  expect(container.querySelector('[aria-label="Note body"] [data-streamdown="strong"]')?.textContent).toBe("Second");
-  const block = [...container.querySelectorAll<HTMLElement>('[aria-label="Edit note text"]')]
-    .find((item) => item.textContent?.includes("First paragraph"))!;
-  await act(async () => block.click());
-  const field = container.querySelector<HTMLTextAreaElement>('[aria-label="Note text"]')!;
-  await act(async () => typeInto(field, "Updated paragraph.\n\n"));
-  await act(async () => field.blur());
-  expect(container.querySelector('[aria-label="Note body"] [data-streamdown="strong"]')?.textContent).toBe("Second");
+  expect(container.querySelector('[aria-label="Note body"] strong')?.textContent).toBe("Second");
+  const editor = noteEditor();
+  let range = { from: 0, to: 0 };
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name === "paragraph" && node.textContent === "First paragraph.") range = { from: pos + 1, to: pos + node.nodeSize - 1 };
+  });
+  await act(async () => editor.chain().insertContentAt(range, "Updated paragraph.").run());
   await act(async () => root.unmount());
   expect(stored.body).toBe("# Heading\n\nUpdated paragraph.\n\n**Second** paragraph.");
+});
+
+it("edits notes with raw HTML as Markdown source so nothing is dropped", async () => {
+  stored.body = "<details>\n\nhidden\n\n</details>";
+  await render();
+  expect(container.querySelector(".note-editor")).toBeNull();
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Note text"]')?.value).toBe(stored.body);
+});
+
+it("leaves the stored Markdown alone when a note is only viewed", async () => {
+  stored.body = "* one\n* two\n\nline one\nline two _soft_";
+  await render();
+  await act(async () => root.unmount());
+  expect(invoke).not.toHaveBeenCalledWith("notes_upsert", expect.anything());
 });
 
 it("saves a dropped image and renders it without switching note modes", async () => {

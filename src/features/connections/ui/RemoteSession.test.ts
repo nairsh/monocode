@@ -636,7 +636,7 @@ async function saveDraft(text: string) {
   const draft = [
     ...document.body.querySelectorAll<HTMLButtonElement>("button"),
   ].find((button) =>
-    button.textContent?.includes("Save this message without starting"),
+    button.title.includes("Save this message without starting"),
   )!;
   await act(async () => draft.click());
   await type(text);

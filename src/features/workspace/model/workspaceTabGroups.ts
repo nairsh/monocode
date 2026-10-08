@@ -10,6 +10,7 @@ import {
   replaceLeafId,
   splitPane,
   type PaneEdge,
+  type SectionKind,
   type WorkspaceTab,
 } from "./layout";
 import { projectName } from "../../../shared/lib/paths";
@@ -169,6 +170,22 @@ export function openAddToChatSessionPane({
     focusedId: sessionId,
     diffFocused: false,
   };
+}
+
+/** Where this project's tab for a section is open, so a reopen focuses it. */
+export function findSectionTab(
+  tabs: readonly WorkspaceTab[],
+  section: SectionKind,
+  cwd: string,
+): { tabId: string; paneId: string; fileId: string } | undefined {
+  for (const tab of tabs) {
+    for (const pane of tab.editorPanes) {
+      const file = pane.files.find(
+        (entry) => entry.section === section && sameProjectPath(entry.cwd, cwd),
+      );
+      if (file) return { tabId: tab.id, paneId: pane.id, fileId: file.id };
+    }
+  }
 }
 
 export function filterTabsForProject(

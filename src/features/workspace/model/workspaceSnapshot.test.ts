@@ -14,6 +14,8 @@ import {
   newFileTab,
   newEditorWorkspaceTab,
   newReleaseNotesWorkspaceTab,
+  newSectionWorkspaceTab,
+  workspaceTabSection,
   newSessionChangesTab,
   newTab,
   newTerminalFile,
@@ -400,6 +402,21 @@ describe("collectWorkspaceSnapshot", () => {
     expect(workspace?.sessions).toEqual([]);
   });
 
+  it("round-trips a section tab", () => {
+    const tab = newSectionWorkspaceTab("notes", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      tab.id,
+      "/tmp/a",
+      new Map(),
+    );
+    const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
+    const restored = workspace?.tabs[0];
+    expect(restored?.editorPanes[0]?.files[0]?.section).toBe("notes");
+    expect(workspaceTabSection(restored)).toBe("notes");
+  });
+
   it("stores the project terminal dock", () => {
     const term = newTerminalFile("/tmp/a", "zsh");
     const dock = createProjectTerminal("/tmp/a", term);
@@ -492,6 +509,8 @@ describe("parseWorkspaceSnapshot", () => {
   });
 
   it.each([
+    { section: "settings" },
+    { section: "notes", terminal: true },
     { releaseNotes: { version: "" } },
     { releaseNotes: { version: 123 } },
     {

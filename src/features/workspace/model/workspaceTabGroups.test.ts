@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   leafIds,
   newFileTab,
+  newSectionWorkspaceTab,
   newTerminalFile,
   newTab,
   splitPane,
@@ -15,6 +16,7 @@ import {
   applyPlaceSessionOnPane,
   filterTabsForProject,
   findOpenSessionTab,
+  findSectionTab,
   findTabForProject,
   openAddToChatSessionPane,
   planWorkspaceTabClose,
@@ -698,5 +700,21 @@ describe("workspaceTabWorktree", () => {
         worktreeOf,
       }),
     ).toEqual({ action: "keep" });
+  });
+});
+
+describe("findSectionTab", () => {
+  it("finds the project's open section tab and ignores other projects", () => {
+    const other = newSectionWorkspaceTab("notes", "/tmp/b");
+    const notes = newSectionWorkspaceTab("notes", "/tmp/a");
+    const inbox = newSectionWorkspaceTab("inbox", "/tmp/a");
+    const tabs = [other, inbox, notes];
+    expect(findSectionTab(tabs, "notes", "/tmp/a")).toEqual({
+      tabId: notes.id,
+      paneId: notes.editorPanes[0].id,
+      fileId: notes.editorPanes[0].files[0].id,
+    });
+    expect(findSectionTab(tabs, "automations", "/tmp/a")).toBeUndefined();
+    expect(findSectionTab([other], "notes", "/tmp/a")).toBeUndefined();
   });
 });

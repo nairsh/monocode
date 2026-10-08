@@ -90,6 +90,7 @@ import { resolveModel } from "../../features/sessions/model/models";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
 import { NineDotSpinner } from "../../features/sessions/ui/NineDotSpinner";
 import type { SettingsSectionId } from "../../features/settings/model/settings";
+import { shortAgo, useMinuteClock } from "../../shared/lib/relativeTime";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
 import { notificationMuteStatus } from "../../features/notifications/ui/notificationMuteActions";
 import { useProjectNotificationPreferences } from "../../features/notifications/hooks/useProjectNotificationPreferences";
@@ -1218,7 +1219,7 @@ function ProjectCard({
         >
         <ul ref={threadListRef} aria-label={`${name} chats`} className="relative flex min-h-0 flex-col gap-px overflow-hidden py-px">
           {threadRows?.length === 0 ? (
-            <li className="h-7 pl-8 text-[12px] leading-7 text-content/35">
+            <li className="h-7 pl-6 text-[12px] leading-7 text-content/35">
               No chats yet
             </li>
           ) : null}
@@ -1241,7 +1242,7 @@ function ProjectCard({
               <button
                 type="button"
                 onClick={() => setThreadLimit((limit) => limit + THREAD_PAGE)}
-                className="flex h-7 w-full items-center rounded-md pl-8 text-left text-[12px] text-content/40 hover:bg-content/5 hover:text-content/70"
+                className="flex h-7 w-full items-center rounded-md pl-6 text-left text-[12px] text-content/40 hover:bg-content/5 hover:text-content/70"
               >
                 Show more
               </button>
@@ -1366,6 +1367,7 @@ const ThreadRow = memo(function ThreadRow({
   onDelete?: ProjectThreads["onDelete"];
   onRename?: ProjectThreads["onRename"];
 }) {
+  const now = useMinuteClock();
   const [menuAnchor, setMenuAnchor] = useState<HTMLButtonElement | null>(null);
   const [renameValue, setRenameValue] = useState<string | null>(null);
   const renameInput = useRef<HTMLInputElement>(null);
@@ -1405,7 +1407,7 @@ const ThreadRow = memo(function ThreadRow({
   return (
     <li data-thread-id={session.id} className="group/thread relative">
       {renaming ? (
-        <div className="flex h-7 items-center pl-8 pr-2">
+        <div className="flex h-7 items-center pl-8 pr-3">
           <input
             ref={renameInput}
             aria-label="Rename thread"
@@ -1436,24 +1438,32 @@ const ThreadRow = memo(function ThreadRow({
             setRenameValue(title);
           }
         }}
-        className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md py-1 pl-8 ${menuItems.length ? "pr-8" : "pr-2"} text-left text-[13px] ${
+        className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md py-1 ${busy ? "pl-10" : "pl-8"} pr-3 text-left text-[13px] ${
           active
             ? "bg-selection-strong text-content"
             : "text-content/65 hover:bg-content/5 hover:text-content"
         }`}
       >
         {busy && !approval ? (
-          <NineDotSpinner className="text-accent" />
+          <NineDotSpinner className="absolute left-2.5 text-accent" />
         ) : null}
         <div className="min-w-0 flex-1">
-          {busy ? (
-            <Shimmer as="span" duration={1.4} className="block truncate font-medium">
-              {title}
-            </Shimmer>
-          ) : (
-            <span className="block truncate font-medium">{title}</span>
-          )}
-          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] font-normal text-content/45">
+          <span className="flex min-w-0 items-baseline gap-3">
+            {busy ? (
+              <Shimmer as="span" duration={1.4} className="min-w-0 flex-1 truncate font-medium">
+                {title}
+              </Shimmer>
+            ) : (
+              <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
+            )}
+            <time
+              title={new Date(session.updatedAt).toLocaleString()}
+              className={`shrink-0 text-[11px] font-normal tabular-nums text-content/40 ${menuItems.length ? "group-hover/thread:invisible group-focus-within/thread:invisible" : ""}`}
+            >
+              {shortAgo(session.updatedAt, now)}
+            </time>
+          </span>
+          <span className={`mt-0.5 flex min-w-0 items-center gap-1 text-[11px] font-normal text-content/45 ${menuItems.length ? "group-hover/thread:pr-6 group-focus-within/thread:pr-6" : ""}`}>
             <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
             <span className="truncate">{resolveModel(session.harness, session.model).name}</span>
           </span>

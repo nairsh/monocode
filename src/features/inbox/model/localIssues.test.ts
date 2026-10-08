@@ -1,13 +1,19 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  capReviewText,
   createLocalIssue,
+  ISSUE_WINDOW_ID,
+  issueRunFailurePatch,
   loadLocalIssues,
   LOCAL_ISSUES_KEY,
+  localIssueFeedbackPrompt,
   localIssuePrompt,
   moveLocalIssue,
   recoverLocalIssueRuns,
+  staleIssueRuns,
   startLocalIssue,
+  touchIssueRunLeases,
   updateLocalIssue,
   verifiedIssueCommit,
   type IssueDraft,
@@ -27,19 +33,12 @@ const draft: IssueDraft = {
 
 describe("local issue workflow", () => {
   beforeEach(() => localStorage.clear());
-  it("requires a new actual HEAD reported by the agent before marking a commit complete", () => {
-    expect(
-      verifiedIssueCommit("aaa1111", "bbb2222ccc", "Committed bbb2222"),
-    ).toBe(true);
-    expect(verifiedIssueCommit("aaa1111", "aaa1111", "Committed aaa1111")).toBe(
-      false,
-    );
-    expect(
-      verifiedIssueCommit("aaa1111", "bbb2222ccc", "Unable to commit"),
-    ).toBe(false);
-    expect(verifiedIssueCommit("aaa1111", null, "Committed bbb2222")).toBe(
-      false,
-    );
+  it("treats a commit as real only when git HEAD moved, whatever the agent says", () => {
+    expect(verifiedIssueCommit("aaa1111", "bbb2222ccc")).toBe(true);
+    expect(verifiedIssueCommit(null, "bbb2222ccc")).toBe(true);
+    expect(verifiedIssueCommit("aaa1111", "aaa1111")).toBe(false);
+    expect(verifiedIssueCommit("aaa1111", null)).toBe(false);
+    expect(verifiedIssueCommit(undefined, undefined)).toBe(false);
   });
   it("extracts distinct absolute evidence image paths, ignoring external URLs", () => {
     expect(
@@ -102,7 +101,7 @@ describe("local issue workflow", () => {
     expect(loadLocalIssues()[0]).toMatchObject({
       runState: "failed",
       sessionId: "stopped-thread",
-      status: "in_progress",
+      status: "todo",
     });
     expect(loadLocalIssues()[1]).toMatchObject({
       runState: "running",
@@ -200,6 +199,9 @@ describe("local issue workflow", () => {
     const launch = vi.fn(async () => {});
     await moveLocalIssue(issue.id, "done", launch);
     expect(launch).not.toHaveBeenCalled();
+    expect(loadLocalIssues()[0].activity.at(-1)?.text).toBe(
+      "Marked done without a commit",
+    );
     updateLocalIssue(issue.id, { status: "in_progress", runState: "running" });
     await expect(moveLocalIssue(issue.id, "backlog", launch)).rejects.toThrow(
       "agent is working",
@@ -218,14 +220,19 @@ describe("local issue workflow", () => {
     localStorage.clear();
     const issue = createLocalIssue(draft);
     const launch = vi.fn(async () => {});
-    const storage = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
-      throw new Error("Disk quota");
+    // Replace the whole store: spying on setItem differs between Node's and happy-dom's Storage.
+    const real = localStorage;
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => real.getItem(key),
+      setItem: () => {
+        throw new Error("Disk quota");
+      },
     });
     await expect(startLocalIssue(issue.id, launch)).rejects.toThrow(
       "Disk quota",
     );
     expect(launch).not.toHaveBeenCalled();
-    storage.mockRestore();
+    vi.unstubAllGlobals();
     expect(loadLocalIssues()[0].status).toBe("backlog");
   });
 
@@ -264,6 +271,304 @@ describe("local issue workflow", () => {
       sessionId: "thread",
       feedback: "Needs more evidence",
       reviews: [{ text: "Proof" }],
+    });
+  });
+
+  describe("run leases", () => {
+    const now = Date.parse("2026-01-01T00:10:00.000Z");
+    const ago = (seconds: number) =>
+      new Date(now - seconds * 1000).toISOString();
+    const running = (patch: Partial<LocalIssue>): LocalIssue => ({
+      ...createLocalIssue(draft),
+      status: "in_progress",
+      runState: "running",
+      sessionId: "thread",
+      ...patch,
+    });
+    const stale = (issues: LocalIssue[], busy: string[] = []) =>
+      staleIssueRuns(issues, now, "me", (id) => !!id && busy.includes(id)).map(
+        (entry) => entry.issue.id,
+      );
+
+    it("leaves another window's run alone while its heartbeat is fresh", () => {
+      const fresh = running({ runOwner: "other", runHeartbeatAt: ago(30) });
+      const old = running({ runOwner: "other", runHeartbeatAt: ago(46) });
+      const legacy = running({});
+      const garbled = running({
+        runOwner: "other",
+        runHeartbeatAt: "yesterday",
+      });
+      expect(stale([fresh, old, legacy, garbled])).toEqual([
+        old.id,
+        legacy.id,
+        garbled.id,
+      ]);
+    });
+
+    it("never fails a run whose session is busy in this window", () => {
+      const legacy = running({});
+      const own = running({ runOwner: "me", runHeartbeatAt: ago(1) });
+      expect(stale([legacy, own], ["thread"])).toEqual([]);
+    });
+
+    it("fails this window's run when its session stopped without settling", () => {
+      const own = running({ runOwner: "me", runHeartbeatAt: ago(1) });
+      expect(stale([own])).toEqual([own.id]);
+    });
+
+    it("gives this window's launch two minutes before calling it never started", () => {
+      const launching = running({
+        runState: "starting",
+        sessionId: undefined,
+        runOwner: "me",
+        updatedAt: ago(60),
+      });
+      const stuck = running({
+        runState: "starting",
+        sessionId: undefined,
+        runOwner: "me",
+        updatedAt: ago(121),
+      });
+      const result = staleIssueRuns([launching, stuck], now, "me", () => false);
+      expect(result.map((entry) => entry.issue.id)).toEqual([stuck.id]);
+      expect(result[0].error).toBe("The agent never started.");
+    });
+
+    it("refreshes only this window's heartbeat, without activity or edits", () => {
+      const own = createLocalIssue(draft);
+      const other = createLocalIssue(draft);
+      for (const [issue, owner] of [
+        [own, ISSUE_WINDOW_ID],
+        [other, "another-window"],
+      ] as const)
+        updateLocalIssue(issue.id, {
+          runState: "running",
+          runOwner: owner,
+          runHeartbeatAt: ago(30),
+        });
+      const before = loadLocalIssues();
+      expect(touchIssueRunLeases(ISSUE_WINDOW_ID, now)).toBe(true);
+      const [mine, theirs] = loadLocalIssues();
+      expect(mine.runHeartbeatAt).toBe(new Date(now).toISOString());
+      expect(mine.activity).toEqual(before[0].activity);
+      expect(mine.updatedAt).toBe(before[0].updatedAt);
+      expect(theirs).toEqual(before[1]);
+      expect(touchIssueRunLeases("nobody", now)).toBe(false);
+    });
+
+    it("reserves a run for this window and recovery returns reviewed work to review", async () => {
+      const issue = createLocalIssue(draft);
+      updateLocalIssue(issue.id, {
+        status: "in_review",
+        sessionId: "thread",
+        reviews: [{ id: "r", text: "Proof", at: "today", kind: "work" }],
+      });
+      await startLocalIssue(issue.id, async () => {}, { feedback: "More" });
+      expect(loadLocalIssues()[0]).toMatchObject({
+        runOwner: ISSUE_WINDOW_ID,
+        status: "in_progress",
+      });
+      expect(
+        Date.now() - Date.parse(loadLocalIssues()[0].runHeartbeatAt!),
+      ).toBeLessThan(5000);
+      recoverLocalIssueRuns(
+        () => false,
+        Date.now() + 3 * 60_000,
+        "a-later-window",
+      );
+      expect(loadLocalIssues()[0]).toMatchObject({
+        runState: "failed",
+        status: "in_review",
+      });
+      expect(loadLocalIssues()[0].runOwner).toBeUndefined();
+      expect(loadLocalIssues()[0].runHeartbeatAt).toBeUndefined();
+    });
+
+    it("rejects malformed lease fields instead of overwriting the store", () => {
+      const issue = createLocalIssue(draft);
+      localStorage.setItem(
+        LOCAL_ISSUES_KEY,
+        JSON.stringify([{ ...issue, runOwner: 5 }]),
+      );
+      expect(() => loadLocalIssues()).toThrow("saved data has been preserved");
+    });
+  });
+
+  describe("approval and commit", () => {
+    const reviewed = () => {
+      const issue = createLocalIssue(draft);
+      updateLocalIssue(issue.id, {
+        status: "in_review",
+        sessionId: "thread",
+        runState: "completed",
+        reviews: [{ id: "r", text: "Proof", at: "today", kind: "work" }],
+      });
+      return issue;
+    };
+
+    it("moves to Done immediately, once, while the commit run starts", async () => {
+      const issue = reviewed();
+      let finish!: () => void;
+      const launch = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const first = startLocalIssue(issue.id, launch, { kind: "commit" });
+      await startLocalIssue(issue.id, launch, { kind: "commit" });
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(loadLocalIssues()[0]).toMatchObject({
+        status: "done",
+        runKind: "commit",
+        runState: "starting",
+        sessionId: "thread",
+      });
+      finish();
+      await first;
+    });
+
+    it("returns the issue to In Review when the commit cannot start", async () => {
+      const issue = reviewed();
+      await expect(
+        startLocalIssue(
+          issue.id,
+          async () => {
+            throw new Error("Git is locked");
+          },
+          { kind: "commit" },
+        ),
+      ).rejects.toThrow("Git is locked");
+      expect(loadLocalIssues()[0]).toMatchObject({
+        status: "in_review",
+        runState: "failed",
+        runError: "Git is locked",
+      });
+      expect(loadLocalIssues()[0].runOwner).toBeUndefined();
+    });
+
+    it("returns failed or cancelled commit and feedback runs to In Review", () => {
+      const issue = reviewed();
+      const started = (patch: Partial<LocalIssue>) =>
+        updateLocalIssue(issue.id, { runState: "running", ...patch });
+      for (const patch of [
+        { runKind: "commit" as const, status: "done" as const },
+        { runKind: "work" as const, status: "in_progress" as const },
+      ])
+        for (const state of ["failed", "cancelled"] as const) {
+          const current = started(patch);
+          updateLocalIssue(
+            issue.id,
+            issueRunFailurePatch(current, state, "Stopped"),
+          );
+          expect(loadLocalIssues()[0]).toMatchObject({
+            status: "in_review",
+            runState: state,
+            runError: "Stopped",
+          });
+        }
+    });
+
+    it("keeps a failed first run in To Do and retryable", async () => {
+      const issue = createLocalIssue(draft);
+      await expect(
+        startLocalIssue(issue.id, async () => {
+          throw new Error("Offline");
+        }),
+      ).rejects.toThrow("Offline");
+      expect(loadLocalIssues()[0]).toMatchObject({
+        status: "todo",
+        runState: "failed",
+      });
+    });
+  });
+
+  describe("manual status moves", () => {
+    it("blocks moving into In Progress, which only an agent run sets", async () => {
+      const issue = createLocalIssue(draft);
+      await expect(
+        moveLocalIssue(
+          issue.id,
+          "in_progress",
+          vi.fn(async () => {}),
+        ),
+      ).rejects.toThrow("In Progress is set when an agent starts");
+      expect(loadLocalIssues()[0].status).toBe("backlog");
+    });
+
+    it("dispatches the agent from any idle status and reuses the thread", async () => {
+      for (const from of ["in_review", "done"] as const) {
+        localStorage.clear();
+        const issue = createLocalIssue(draft);
+        updateLocalIssue(issue.id, { status: from, sessionId: "thread" });
+        const launch = vi.fn(async (_issue: LocalIssue) => {});
+        await moveLocalIssue(issue.id, "todo", launch);
+        expect(launch).toHaveBeenCalledTimes(1);
+        expect(launch.mock.calls[0][0]).toMatchObject({
+          status: "todo",
+          sessionId: "thread",
+          runKind: "work",
+        });
+      }
+    });
+
+    it("does not dispatch for a no-op move or a move out to Backlog or In Review", async () => {
+      const issue = createLocalIssue(draft);
+      const launch = vi.fn(async () => {});
+      await moveLocalIssue(issue.id, "backlog", launch);
+      await moveLocalIssue(issue.id, "in_review", launch);
+      await moveLocalIssue(issue.id, "backlog", launch);
+      expect(launch).not.toHaveBeenCalled();
+      expect(loadLocalIssues()[0].status).toBe("backlog");
+    });
+
+    it("explains when dispatch is unavailable from a later status", async () => {
+      const issue = createLocalIssue(draft);
+      updateLocalIssue(issue.id, { status: "done" });
+      await expect(moveLocalIssue(issue.id, "todo")).rejects.toThrow(
+        "dispatch is unavailable. The issue is still in Done",
+      );
+    });
+  });
+
+  describe("stored data limits and prompts", () => {
+    it("keeps the feedback prompt to the feedback, not the whole issue", () => {
+      const issue = createLocalIssue(draft);
+      const prompt = localIssueFeedbackPrompt(issue, "Tighten the spacing");
+      expect(prompt).toContain(`Continue local issue MC-${issue.number}`);
+      expect(prompt).toContain("in this same thread");
+      expect(prompt).toContain("Review feedback:\nTighten the spacing");
+      expect(prompt).toContain("Do not commit yet");
+      expect(prompt).toContain("Markdown image links to absolute");
+      expect(prompt).not.toContain(draft.description);
+      expect(prompt).not.toContain("Priority:");
+    });
+
+    it("caps stored activity at 200 entries and the prompt at the latest 20", () => {
+      const issue = createLocalIssue(draft);
+      for (let index = 0; index < 250; index++)
+        updateLocalIssue(issue.id, {}, `Event ${index}`);
+      const stored = loadLocalIssues()[0];
+      expect(stored.activity).toHaveLength(200);
+      expect(stored.activity.at(-1)?.text).toBe("Event 249");
+      expect(stored.activity[0].text).toBe("Event 50");
+      const prompt = localIssuePrompt(stored);
+      expect(prompt).toContain("Event 249");
+      expect(prompt).toContain("Event 230");
+      expect(prompt).not.toContain("Event 229");
+    });
+
+    it("truncates oversized review text with a pointer to the thread", () => {
+      const issue = createLocalIssue(draft);
+      updateLocalIssue(issue.id, {
+        reviews: [
+          { id: "r", text: "x".repeat(50_000), at: "today", kind: "work" },
+        ],
+      });
+      const text = loadLocalIssues()[0].reviews![0].text;
+      expect(text.length).toBeLessThan(20_100);
+      expect(text).toContain("truncated; open the thread for the full reply");
+      expect(capReviewText("short")).toBe("short");
     });
   });
 });

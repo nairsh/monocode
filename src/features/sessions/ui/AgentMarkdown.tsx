@@ -460,7 +460,7 @@ function NoteAssetImage({
   );
 }
 
-function MarkdownImage({
+export function MarkdownImage({
   src,
   alt,
   node: _node,

@@ -63,4 +63,25 @@ describe("resizeComposer", () => {
     expect(el.style.height).toBe("88px");
     expect(wrapper.style.minHeight).toBe("20px");
   });
+
+  it("keeps the field's own scroll offset through the collapsed measurement", () => {
+    const style = { height: "160px" };
+    let scrollTop = 120;
+    const el = {
+      style,
+      get scrollTop() {
+        return scrollTop;
+      },
+      set scrollTop(value: number) {
+        scrollTop = value;
+      },
+      get scrollHeight() {
+        // Collapsing to one row lets the browser move the offset.
+        if (style.height === "auto") scrollTop = 400;
+        return 600;
+      },
+    };
+    resizeComposer(el);
+    expect(scrollTop).toBe(120);
+  });
 });

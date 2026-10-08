@@ -8,11 +8,13 @@ import {
   isTerminalTab,
   leafIds,
   newTab,
+  SECTION_TITLE,
   type CommitTabSource,
   type EditorPane,
   type FilePaneTab,
   type LayoutNode,
   type PlanTabSource,
+  type SectionKind,
   type SessionChangesSource,
   type WorkspaceTab,
 } from "./layout";
@@ -569,6 +571,24 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   const hasRemoteFile = "remoteFile" in value;
   const remoteFile = sanitizeRemoteFile(value.remoteFile);
   if (hasReleaseNotes && !releaseNotes) return null;
+  const section =
+    typeof value.section === "string" &&
+    Object.keys(SECTION_TITLE).includes(value.section)
+      ? (value.section as SectionKind)
+      : undefined;
+  if ("section" in value && !section) return null;
+  if (
+    section &&
+    (value.plan != null ||
+      releaseNotes ||
+      commit ||
+      sessionChanges ||
+      remoteFile ||
+      value.review === true ||
+      value.changes === true ||
+      value.terminal === true)
+  )
+    return null;
   if (hasCommit && !commit) return null;
   if (hasSessionChanges && !sessionChanges) return null;
   if (hasRemoteFile && !remoteFile) return null;
@@ -626,6 +646,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
       : {}),
     ...(plan ? { plan } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
+    ...(section ? { section } : {}),
     ...(commit ? { commit } : {}),
     ...(sessionChanges ? { sessionChanges, review: true } : {}),
     ...(value.review === true ? { review: true } : {}),

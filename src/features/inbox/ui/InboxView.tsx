@@ -3,6 +3,7 @@ import { summarizePrChecks } from "../model/githubPrChecks";
 import type { CiRepairRequest } from "../model/ciRepair";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  ArrowLeft,
   Check,
   CheckCheck,
   CheckCircle,
@@ -41,8 +42,7 @@ import { InboxProviderMark } from "./InboxProviderMark";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import { Popover } from "../../../shared/ui/Popover";
-import { IconButton, OverlayNav } from "../../../app/shell/TitleBar";
-import { WindowControls } from "../../../app/shell/WindowControls";
+import { IconButton } from "../../../app/shell/TitleBar";
 import { useDragResize } from "../../../shared/hooks/useDragResize";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../../projects/hooks/useTabGroupLogos";
@@ -102,7 +102,6 @@ import {
 } from "../model/inboxFilters";
 import { copyText } from "../../../platform/tauri/clipboard";
 import { projectKey, projectName } from "../../../shared/lib/paths";
-import { IS_MAC } from "../../../platform/tauri/platform";
 import { playCue } from "../../settings/model/sounds";
 import {
   sameProjectPath,
@@ -377,14 +376,18 @@ type Props = {
   onAskMount: (portal: InboxSessionPortal | null) => void;
   cwd: string;
   recents: RecentProject[];
-  besideRail?: boolean;
-  compactRail?: boolean;
-  onClose?: () => void;
-  onToggleSidebar?: () => void;
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
   onLaunchLocalIssue?: (issue: LocalIssue) => Promise<void>;
-  onReadIssueSession?: (id: string) => Promise<import("../../sessions/model/session").Session | null | undefined>;
-  onIssueApproval?: (sessionId: string, requestId: number, decision: import("../../../integrations/harness").ApprovalDecision) => void;
+  onReadIssueSession?: (
+    id: string,
+  ) => Promise<
+    import("../../sessions/model/session").Session | null | undefined
+  >;
+  onIssueApproval?: (
+    sessionId: string,
+    requestId: number,
+    decision: import("../../../integrations/harness").ApprovalDecision,
+  ) => void;
   repairSessions?: CiRepairProps["repairSessions"];
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   sessions?: readonly SessionSummary[];
@@ -396,16 +399,37 @@ type Props = {
 };
 
 export function InboxView(props: Props) {
-  // Keep exact GitHub/PR deep links in the existing detail surface.
-  if (props.target) return <GithubInboxView {...props} />;
-  return <IssueTracker
-    cwd={props.cwd}
-    recents={props.recents}
-    onLaunch={props.onLaunchLocalIssue}
-    onReadSession={props.onReadIssueSession}
-    onApproval={props.onIssueApproval}
-    onOpenSession={props.onOpenSession}
-  />;
+  const [mode, setMode] = useState<"issues" | "github">("issues");
+  // Exact GitHub/PR deep links stay in the existing detail surface.
+  if (props.target || mode === "github")
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {props.target ? null : (
+          <div className="flex h-9 shrink-0 items-center border-b border-stroke px-3">
+            <button
+              type="button"
+              className="flex items-center gap-1.5 text-[12px] text-content/60 hover:text-content"
+              onClick={() => setMode("issues")}
+            >
+              <ArrowLeft className="size-3.5" strokeWidth={1.75} />
+              Issues
+            </button>
+          </div>
+        )}
+        <GithubInboxView {...props} />
+      </div>
+    );
+  return (
+    <IssueTracker
+      cwd={props.cwd}
+      recents={props.recents}
+      onLaunch={props.onLaunchLocalIssue}
+      onOpenGithub={() => setMode("github")}
+      onReadSession={props.onReadIssueSession}
+      onApproval={props.onIssueApproval}
+      onOpenSession={props.onOpenSession}
+    />
+  );
 }
 
 export function GithubInboxView({
@@ -414,10 +438,6 @@ export function GithubInboxView({
   onAskMount,
   cwd,
   recents,
-  besideRail = false,
-  compactRail = false,
-  onClose,
-  onToggleSidebar,
   onStart,
   repairSessions,
   onRepairChecks,
@@ -438,8 +458,6 @@ export function GithubInboxView({
     },
     [listLock],
   );
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
   const logos = useTabGroupLogos();
   const [groupMascots] = useState(loadTabGroupMascots);
   const [groupColors] = useState(loadTabGroupColors);
@@ -540,19 +558,13 @@ export function GithubInboxView({
   }, [target]);
 
   useEffect(() => {
+    if (!filterMenu && !connectMenuOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      if (filterMenu) {
-        setFilterMenu(null);
-        return;
-      }
-      if (connectMenuOpen) {
-        setConnectMenuOpen(false);
-        return;
-      }
-      onCloseRef.current?.();
+      if (filterMenu) setFilterMenu(null);
+      else setConnectMenuOpen(false);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -1159,25 +1171,6 @@ export function GithubInboxView({
       data-app-inbox
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
-      <div
-        className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
-        data-tauri-drag-region="deep"
-      >
-        {IS_MAC && compactRail ? <div className="w-4 shrink-0" /> : null}
-        {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
-        {besideRail ? null : (
-          <OverlayNav onBack={onClose} onToggleSidebar={onToggleSidebar} />
-        )}
-        <div className="flex min-w-0 flex-1 items-center gap-2 px-3 text-[13px]">
-          <Inbox
-            className="size-3.5 shrink-0 text-content/45"
-            strokeWidth={1.75}
-          />
-          <span className="min-w-0 truncate text-content">Inbox</span>
-        </div>
-        {IS_MAC ? null : <WindowControls />}
-      </div>
-
       <div className="flex min-h-0 min-w-0 flex-1">
         {list}
         <div className="relative flex min-h-0 min-w-0 flex-1">

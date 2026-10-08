@@ -8,6 +8,7 @@ export const ISSUE_STATUSES = [
   "done",
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+const RETIRED_STATUSES = ["canceled", "duplicate"];
 export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
   backlog: "Backlog",
   todo: "To Do",
@@ -42,6 +43,9 @@ export type LocalIssue = {
   runState?: "starting" | "running" | "completed" | "failed" | "cancelled";
   runError?: string;
   runKind?: "work" | "commit";
+  /** Window that owns the active run; other windows leave it alone while its heartbeat is fresh. */
+  runOwner?: string;
+  runHeartbeatAt?: string;
   feedback?: string;
   reviews?: {
     id: string;
@@ -67,15 +71,26 @@ export type IssueDraft = Pick<
   | "images"
 >;
 export const LOCAL_ISSUES_KEY = "monocode.localIssues.v1";
+/** Identifies this window's runs; every window shares the same localStorage. */
+export const ISSUE_WINDOW_ID = crypto.randomUUID();
+export const ISSUE_HEARTBEAT_MS = 10_000;
+export const ISSUE_RECOVERY_MS = 30_000;
+const STALE_HEARTBEAT_MS = 45_000;
+const STARTING_TIMEOUT_MS = 120_000;
+const MAX_ACTIVITY = 200;
+const PROMPT_ACTIVITY = 20;
+const MAX_REVIEW_CHARS = 20_000;
+/** A commit exists when git HEAD moved; the agent's wording is not proof. */
 export function verifiedIssueCommit(
   previousHead: string | null | undefined,
   head: string | null | undefined,
-  output: string,
 ): boolean {
-  return Boolean(
-    head && head !== previousHead && output.includes(head.slice(0, 7)),
-  );
+  return Boolean(head && head !== previousHead);
 }
+export const capReviewText = (text: string) =>
+  text.length > MAX_REVIEW_CHARS
+    ? `${text.slice(0, MAX_REVIEW_CHARS)}\n\n… truncated; open the thread for the full reply`
+    : text;
 const CHANGE_EVENT = "monocode:local-issues-changed";
 
 export function loadLocalIssues(): LocalIssue[] {
@@ -89,11 +104,29 @@ export function loadLocalIssues(): LocalIssue[] {
   }
   // Retired columns remain recoverable in the archive.
   return parsed.map((issue) =>
-    ["canceled", "duplicate"].includes(issue.status as string)
+    RETIRED_STATUSES.includes(issue.status as string)
       ? { ...issue, status: "backlog" as const, archived: true }
       : issue,
   );
 }
+
+const validImages = (value: unknown) =>
+  Array.isArray(value) &&
+  value.every(
+    (image) =>
+      image &&
+      typeof image.id === "string" &&
+      typeof image.name === "string" &&
+      typeof image.mimeType === "string" &&
+      typeof image.size === "number",
+  );
+
+export const isIssueRunning = (issue: Pick<LocalIssue, "runState">) =>
+  issue.runState === "starting" || issue.runState === "running";
+
+const cleanLabels = (labels: string[]) => [
+  ...new Set(labels.map((label) => label.trim()).filter(Boolean)),
+];
 
 function validIssue(value: unknown): value is LocalIssue {
   if (!value || typeof value !== "object") return false;
@@ -110,13 +143,16 @@ function validIssue(value: unknown): value is LocalIssue {
       issue.updatedAt,
     ].every((value) => typeof value === "string") &&
     (ISSUE_STATUSES.includes(issue.status) ||
-      ["canceled", "duplicate"].includes(issue.status as string)) &&
+      RETIRED_STATUSES.includes(issue.status as string)) &&
     Number.isInteger(issue.priority) &&
     issue.priority >= 0 &&
     issue.priority <= 4 &&
     (issue.agent === "" || HARNESSES.includes(issue.agent)) &&
     (issue.model === undefined || typeof issue.model === "string") &&
     (issue.feedback === undefined || typeof issue.feedback === "string") &&
+    (issue.runOwner === undefined || typeof issue.runOwner === "string") &&
+    (issue.runHeartbeatAt === undefined ||
+      typeof issue.runHeartbeatAt === "string") &&
     (issue.runKind === undefined ||
       ["work", "commit"].includes(issue.runKind)) &&
     (issue.reviews === undefined ||
@@ -128,16 +164,7 @@ function validIssue(value: unknown): value is LocalIssue {
             typeof review.text === "string" &&
             typeof review.at === "string" &&
             ["work", "commit"].includes(review.kind) &&
-            (review.images === undefined ||
-              (Array.isArray(review.images) &&
-                review.images.every(
-                  (image) =>
-                    image &&
-                    typeof image.id === "string" &&
-                    typeof image.name === "string" &&
-                    typeof image.mimeType === "string" &&
-                    typeof image.size === "number",
-                ))),
+            (review.images === undefined || validImages(review.images)),
         ))) &&
     (issue.modelSettings === undefined ||
       (typeof issue.modelSettings === "object" &&
@@ -145,16 +172,7 @@ function validIssue(value: unknown): value is LocalIssue {
         Object.values(issue.modelSettings).every(
           (value) => typeof value === "string",
         ))) &&
-    (issue.images === undefined ||
-      (Array.isArray(issue.images) &&
-        issue.images.every(
-          (image) =>
-            image &&
-            typeof image.id === "string" &&
-            typeof image.name === "string" &&
-            typeof image.mimeType === "string" &&
-            typeof image.size === "number",
-        ))) &&
+    (issue.images === undefined || validImages(issue.images)) &&
     Array.isArray(issue.labels) &&
     issue.labels.every((value) => typeof value === "string") &&
     Array.isArray(issue.activity) &&
@@ -192,9 +210,7 @@ export function createLocalIssue(draft: IssueDraft): LocalIssue {
   const issue: LocalIssue = {
     ...draft,
     title: draft.title.trim(),
-    labels: [
-      ...new Set(draft.labels.map((label) => label.trim()).filter(Boolean)),
-    ],
+    labels: cleanLabels(draft.labels),
     id: crypto.randomUUID(),
     number: Math.max(0, ...issues.map((issue) => issue.number)) + 1,
     createdAt: at,
@@ -239,18 +255,20 @@ export function updateLocalIssue(
   const next = {
     ...previous,
     ...patch,
-    ...(patch.labels
+    ...(patch.labels ? { labels: cleanLabels(patch.labels) } : {}),
+    ...(patch.reviews
       ? {
-          labels: [
-            ...new Set(
-              patch.labels.map((label) => label.trim()).filter(Boolean),
-            ),
-          ],
+          reviews: patch.reviews.map((review) => ({
+            ...review,
+            text: capReviewText(review.text),
+          })),
         }
       : {}),
     updatedAt: at,
     activity: text
-      ? [...previous.activity, { id: crypto.randomUUID(), text, at }]
+      ? [...previous.activity, { id: crypto.randomUUID(), text, at }].slice(
+          -MAX_ACTIVITY,
+        )
       : previous.activity,
   };
   if (!next.title.trim() || !validIssue(next))
@@ -266,7 +284,10 @@ export function localIssuePrompt(issue: LocalIssue): string {
     `Status: ${ISSUE_STATUS_LABELS[issue.status]}\nPriority: ${ISSUE_PRIORITIES[issue.priority]}\nProject: ${issue.projectPath}\nLabels: ${issue.labels.join(", ") || "None"}\nAgent: ${issue.agent || "Project default"}`,
     `Created: ${issue.createdAt}\nUpdated: ${issue.updatedAt}`,
     `## Supporting details\n${issue.description.trim() || "No additional details."}`,
-    `## Activity\n${issue.activity.map((entry) => `${entry.at}: ${entry.text}`).join("\n")}`,
+    `## Activity\n${issue.activity
+      .slice(-PROMPT_ACTIVITY)
+      .map((entry) => `${entry.at}: ${entry.text}`)
+      .join("\n")}`,
     `Model: ${issue.model || "Project default"}\nModel options: ${JSON.stringify(issue.modelSettings || {})}`,
     issue.images?.length
       ? `## Attached images\n${issue.images.map((image) => image.name).join("\n")}\nUse the attached images as supporting context for this issue.`
@@ -277,6 +298,32 @@ export function localIssuePrompt(issue: LocalIssue): string {
     .join("\n\n");
 }
 
+// Feedback resumes the same thread, which already holds the full issue prompt.
+export const localIssueFeedbackPrompt = (issue: LocalIssue, feedback: string) =>
+  `Continue local issue MC-${issue.number}: ${issue.title} in this same thread.\n\nReview feedback:\n${feedback}\n\nAddress the feedback and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths; never claim evidence you did not produce.`;
+
+const hasWorkReview = (issue: LocalIssue) =>
+  issue.reviews?.some((review) => review.kind === "work") ?? false;
+
+/** Ends a run without stranding the issue: reviewed work returns to In Review. */
+export function issueRunFailurePatch(
+  issue: LocalIssue,
+  runState: "failed" | "cancelled",
+  runError?: string,
+): Partial<LocalIssue> {
+  return {
+    runState,
+    runError,
+    runOwner: undefined,
+    runHeartbeatAt: undefined,
+    // Reviewed work (feedback or commit runs) goes back to review; a first run goes back to To Do.
+    status:
+      issue.runKind === "commit" || issue.feedback || hasWorkReview(issue)
+        ? ("in_review" as const)
+        : ("todo" as const),
+  };
+}
+
 // Synchronous reservation is persisted before any async work to prevent duplicate launches.
 export async function startLocalIssue(
   id: string,
@@ -285,7 +332,7 @@ export async function startLocalIssue(
 ): Promise<void> {
   const issue = loadLocalIssues().find((issue) => issue.id === id);
   if (!issue) throw new Error("This issue no longer exists.");
-  if (issue.runState === "starting" || issue.runState === "running") return;
+  if (isIssueRunning(issue)) return;
   if (!issue.projectPath || issue.projectPath === "~")
     throw new Error(
       "Choose a project before assigning this issue to an agent.",
@@ -293,14 +340,18 @@ export async function startLocalIssue(
   const reserved = updateLocalIssue(
     id,
     {
-      status: options ? "in_progress" : "todo",
+      // Approval is final: the issue is Done while the commit run proceeds.
+      status:
+        options?.kind === "commit" ? "done" : options ? "in_progress" : "todo",
       runState: "starting",
       runError: undefined,
       runKind: options?.kind ?? "work",
+      runOwner: ISSUE_WINDOW_ID,
+      runHeartbeatAt: new Date().toISOString(),
       feedback: options?.feedback,
     },
     options?.kind === "commit"
-      ? "Approved review; preparing commit"
+      ? "Approved review; moved to Done and preparing commit"
       : options?.feedback
         ? `Review feedback: ${options.feedback}`
         : "Assigned to agent; preparing the issue thread",
@@ -310,10 +361,11 @@ export async function startLocalIssue(
   } catch (error) {
     updateLocalIssue(
       id,
-      {
-        runState: "failed",
-        runError: error instanceof Error ? error.message : String(error),
-      },
+      issueRunFailurePatch(
+        loadLocalIssues().find((issue) => issue.id === id) ?? reserved,
+        "failed",
+        error instanceof Error ? error.message : String(error),
+      ),
       "Agent could not start; retry is available",
     );
     throw error;
@@ -327,40 +379,95 @@ export async function moveLocalIssue(
 ) {
   const previous = loadLocalIssues().find((issue) => issue.id === id);
   if (!previous) throw new Error("This issue no longer exists.");
-  if (previous.runState === "starting" || previous.runState === "running") {
+  if (isIssueRunning(previous)) {
     if (previous.status === status) return;
     throw new Error(
       "The agent is working. Stop its thread before changing the issue status.",
     );
   }
-  if (previous.status === "backlog" && status === "todo") {
+  if (previous.status === status) return;
+  if (status === "in_progress")
+    throw new Error(
+      "In Progress is set when an agent starts. Move the issue to To Do to dispatch it, or send review feedback.",
+    );
+  if (status === "todo") {
     if (!launch)
       throw new Error(
-        "Agent dispatch is unavailable. The issue is still in Backlog.",
+        `Agent dispatch is unavailable. The issue is still in ${ISSUE_STATUS_LABELS[previous.status]}.`,
       );
     await startLocalIssue(id, launch);
+  } else if (status === "done") {
+    updateLocalIssue(id, { status }, "Marked done without a commit");
   } else {
     updateLocalIssue(id, { status });
   }
 }
 
-export function recoverLocalIssueRuns(
+export function touchIssueRunLeases(
+  windowId = ISSUE_WINDOW_ID,
+  now = Date.now(),
+): boolean {
+  const heartbeat = new Date(now).toISOString();
+  let changed = false;
+  // Not updateLocalIssue: a lease refresh is neither activity nor an edit.
+  const issues = loadLocalIssues().map((issue) => {
+    if (!isIssueRunning(issue) || issue.runOwner !== windowId) return issue;
+    changed = true;
+    return { ...issue, runHeartbeatAt: heartbeat };
+  });
+  if (changed) save(issues);
+  return changed;
+}
+
+const age = (now: number, at: string | undefined) => {
+  const time = at ? Date.parse(at) : NaN;
+  return Number.isNaN(time) ? Infinity : now - time;
+};
+
+/** Runs that no live agent backs. Another window's run is left alone while its heartbeat is fresh. */
+export function staleIssueRuns(
+  issues: LocalIssue[],
+  now: number,
+  windowId: string,
   isSessionRunning: (id: string | undefined) => boolean,
-) {
-  for (const issue of loadLocalIssues()) {
-    if (
-      (issue.runState === "starting" || issue.runState === "running") &&
-      !isSessionRunning(issue.sessionId)
-    ) {
-      updateLocalIssue(
-        issue.id,
-        {
-          runState: "failed",
-          runError:
-            "The app restarted during this issue run. Review its saved thread before retrying.",
-        },
-        "Issue run interrupted; the saved thread is available for review",
-      );
+): { issue: LocalIssue; error: string }[] {
+  const stale: { issue: LocalIssue; error: string }[] = [];
+  for (const issue of issues) {
+    if (!isIssueRunning(issue) || isSessionRunning(issue.sessionId)) continue;
+    if (issue.runOwner === windowId) {
+      if (issue.runState === "running")
+        stale.push({
+          issue,
+          error:
+            "The agent stopped without reporting a result. Review its saved thread before retrying.",
+        });
+      else if (age(now, issue.updatedAt) > STARTING_TIMEOUT_MS)
+        stale.push({ issue, error: "The agent never started." });
+    } else if (age(now, issue.runHeartbeatAt) > STALE_HEARTBEAT_MS) {
+      stale.push({
+        issue,
+        error:
+          "The app restarted during this issue run. Review its saved thread before retrying.",
+      });
     }
   }
+  return stale;
+}
+
+export function recoverLocalIssueRuns(
+  isSessionRunning: (id: string | undefined) => boolean,
+  now = Date.now(),
+  windowId = ISSUE_WINDOW_ID,
+) {
+  for (const { issue, error } of staleIssueRuns(
+    loadLocalIssues(),
+    now,
+    windowId,
+    isSessionRunning,
+  ))
+    updateLocalIssue(
+      issue.id,
+      issueRunFailurePatch(issue, "failed", error),
+      "Issue run interrupted; the saved thread is available for review",
+    );
 }

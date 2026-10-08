@@ -42,6 +42,9 @@
   padding: 18px;
   margin-bottom: 24px;
   background: var(--it-hover);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.65;
 }
 .it-history,
 .it-transcript {
@@ -115,11 +118,6 @@
 }
 .it-thread .agent-transcript {
   font-family: var(--font-mono);
-}
-.it-review {
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.65;
 }
 .issue-surface button {
   cursor: pointer;
@@ -220,6 +218,9 @@
   color: var(--it-text);
   font-weight: 550;
 }
+.it-sidebar nav[hidden] {
+  display: none;
+}
 .it-sidebar-heading {
   display: flex;
   align-items: center;
@@ -227,9 +228,31 @@
   padding: 20px 10px 7px;
   color: var(--it-muted);
   font-size: 12px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.it-sidebar-heading:hover {
+  color: var(--it-text);
 }
 .it-sidebar-heading .it-icon {
   width: 12px;
+  transition: transform 120ms ease;
+}
+.it-sidebar-heading[aria-expanded="false"] .it-icon {
+  transform: rotate(-90deg);
+}
+.it-commit {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--it-border);
+}
+.it-commit h4 {
+  font-weight: 550;
+  margin-bottom: 4px;
+}
+.it-history .it-transcript {
+  margin: 8px 0 0;
 }
 .it-project-nav {
   max-height: 35%;
@@ -264,9 +287,6 @@
 }
 .it-page-header > .it-icon-button:first-child {
   display: none;
-}
-.it-favorite {
-  color: #ddae53;
 }
 .it-chip {
   display: inline-flex;

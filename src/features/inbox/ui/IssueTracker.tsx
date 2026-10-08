@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { loadIssueImages, type IssueImage } from "../model/localIssueImages";
+import type { IssueImage } from "../model/localIssueImages";
 import { AttachmentChip } from "../../sessions/ui/AttachmentChip";
-import type { Attachment } from "../../sessions/model/session";
 import {
   Archive,
   ArrowLeft,
@@ -15,6 +14,7 @@ import {
   Copy,
   DashboardSquare,
   Folder,
+  GitPullRequest,
   Inbox,
   ListBullet,
   ListFilter,
@@ -25,7 +25,6 @@ import {
   Plus,
   Search,
   SlidersHorizontal,
-  Star,
   X,
 } from "../../../shared/ui/icons";
 import { Popover } from "../../../shared/ui/Popover";
@@ -50,12 +49,13 @@ import {
 } from "../../sessions/model/models";
 import { ModelPicker } from "../../sessions/ui/ModelPicker";
 import { HarnessIcon } from "../../sessions/ui/HarnessIcon";
-import { IssueImages } from "./IssueImages";
+import { IssueImages, useIssueImages } from "./IssueImages";
 import {
   createLocalIssue,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   ISSUE_STATUS_LABELS,
+  isIssueRunning,
   loadLocalIssues,
   localIssuePrompt,
   moveLocalIssue,
@@ -71,13 +71,43 @@ import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import type { ApprovalDecision } from "../../../integrations/harness";
 import "./IssueTracker.css";
 
+const SORT_KEY = "monocode.issues.sort";
+const SHOW_EMPTY_KEY = "monocode.issues.showEmpty";
+const HIDDEN_KEY = "monocode.issues.hiddenColumns";
+const readSetting = (key: string) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const writeSetting = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+};
+
 type View = "issues" | "archive";
 type Scope = "active" | "backlog" | "all";
-type Option = { value: string; label: string; icon?: ReactNode; hint?: string };
+type Option = {
+  value: string;
+  label: string;
+  icon?: ReactNode;
+  hint?: string;
+  /** Overrides the single-value selection, for menus that mix several settings. */
+  checked?: boolean;
+};
+const ACTIVE_STATUSES: readonly IssueStatus[] = [
+  "todo",
+  "in_progress",
+  "in_review",
+];
 type Props = {
   cwd: string;
   recents: RecentProject[];
   onLaunch?: (issue: LocalIssue) => Promise<void>;
+  /** Shows a GitHub entry in the navigation when provided. */
+  onOpenGithub?: () => void;
   onOpenSession?: (id: string) => void | Promise<void>;
   onReadSession?: (id: string) => Promise<Session | null | undefined>;
   onApproval?: (
@@ -103,6 +133,10 @@ const STATUS_OPTIONS: Option[] = ISSUE_STATUSES.map((status, index) => ({
   icon: <StatusIcon status={status} />,
   hint: String(index + 1),
 }));
+// In Progress is owned by the agent, so a new issue cannot start there.
+const CREATE_STATUS_OPTIONS = STATUS_OPTIONS.filter(
+  (option) => option.value !== "in_progress",
+);
 const PRIORITY_OPTIONS: Option[] = ISSUE_PRIORITIES.map((label, value) => ({
   value: String(value),
   label,
@@ -125,22 +159,8 @@ function IssueOutput({
   images?: IssueImage[];
   evidenceError?: string;
 }) {
-  const [files, setFiles] = useState<Attachment[]>([]);
   const [error, setError] = useState("");
-  useEffect(() => {
-    let alive = true;
-    void loadIssueImages(images).then(
-      (files) => {
-        if (alive) setFiles(files);
-      },
-      (reason) => {
-        if (alive) setError(String(reason));
-      },
-    );
-    return () => {
-      alive = false;
-    };
-  }, [images]);
+  const files = useIssueImages(images, (reason) => setError(String(reason)));
   return (
     <>
       <AgentMarkdown text={text} cwd={cwd} />
@@ -182,6 +202,19 @@ function Choice({
   const choices = options.filter((option) =>
     option.label.toLowerCase().includes(query.toLowerCase()),
   );
+  const pick = (option: Option) => {
+    onChange(option.value);
+    setAnchor(null);
+    anchor?.focus();
+  };
+  // Number hints are shortcuts, so the digit must not reach the search box.
+  const hotkey = (event: React.KeyboardEvent) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const option = options.find((entry) => entry.hint === event.key);
+    if (!option) return;
+    event.preventDefault();
+    pick(option);
+  };
   return (
     <>
       <button
@@ -216,6 +249,7 @@ function Choice({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
+              hotkey(event);
               if (event.key === "ArrowDown") {
                 event.preventDefault();
                 event.currentTarget.parentElement
@@ -233,6 +267,7 @@ function Choice({
             role="menu"
             aria-label={label}
             onKeyDown={(event) => {
+              hotkey(event);
               if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                 event.preventDefault();
                 const buttons = [
@@ -252,27 +287,26 @@ function Choice({
               }
             }}
           >
-            {choices.map((option) => (
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={value === option.value}
-                key={option.value}
-                onClick={() => {
-                  onChange(option.value);
-                  setAnchor(null);
-                  anchor.focus();
-                }}
-              >
-                {option.icon}
-                <span>{option.label}</span>
-                {value === option.value ? (
-                  <Check className="it-icon" />
-                ) : option.hint ? (
-                  <kbd>{option.hint}</kbd>
-                ) : null}
-              </button>
-            ))}
+            {choices.map((option) => {
+              const selected = option.checked ?? value === option.value;
+              return (
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  key={option.value}
+                  onClick={() => pick(option)}
+                >
+                  {option.icon}
+                  <span>{option.label}</span>
+                  {selected ? (
+                    <Check className="it-icon" />
+                  ) : option.hint ? (
+                    <kbd>{option.hint}</kbd>
+                  ) : null}
+                </button>
+              );
+            })}
             {choices.length === 0 ? (
               <p className="it-muted it-menu-empty">No results</p>
             ) : null}
@@ -380,7 +414,7 @@ function NewIssue({
     return {
       title: "",
       description: "",
-      status,
+      status: status === "in_progress" ? "todo" : status,
       priority: 0,
       projectPath: project,
       labels: [],
@@ -488,6 +522,7 @@ function NewIssue({
             draft={draft}
             projects={projects}
             onChange={change}
+            statusOptions={CREATE_STATUS_OPTIONS}
           />
           <input
             className="it-label-input"
@@ -539,11 +574,16 @@ function IssueProperties({
   projects,
   onChange,
   disabled = false,
+  agentLocked = false,
+  statusOptions = STATUS_OPTIONS,
 }: {
   draft: IssueDraft;
   projects: string[];
   onChange: <K extends keyof IssueDraft>(key: K, value: IssueDraft[K]) => void;
   disabled?: boolean;
+  /** The issue's thread belongs to one agent; only its models can change. */
+  agentLocked?: boolean;
+  statusOptions?: Option[];
 }) {
   const choice = defaultSessionChoice(draft.projectPath);
   const harness = draft.agent || choice.harness;
@@ -551,12 +591,13 @@ function IssueProperties({
     draft.model || (draft.agent ? preferredModelId(harness) : choice.model);
   const values =
     draft.modelSettings || preferredModelSettings(resolveModel(harness, model));
+  const lockHint = `This issue's thread uses ${HARNESS_LABEL[harness]}. Archive and recreate to switch agents.`;
   return (
     <div className="it-properties">
       <Choice
         label="Change status"
         value={draft.status}
-        options={STATUS_OPTIONS}
+        options={statusOptions}
         onChange={(value) => onChange("status", value as IssueStatus)}
         disabled={disabled}
       >
@@ -582,6 +623,8 @@ function IssueProperties({
         className="it-model-choice"
         inert={disabled}
         aria-disabled={disabled}
+        data-agent-locked={agentLocked || undefined}
+        title={agentLocked ? lockHint : undefined}
       >
         <ModelPicker
           variant="plain"
@@ -591,7 +634,9 @@ function IssueProperties({
           project={draft.projectPath}
           side="bottom"
           hotkeys={false}
+          allowedHarnesses={agentLocked ? [harness] : undefined}
           onChange={(agent, selectedModel) => {
+            if (agentLocked && agent !== harness) return;
             onChange("agent", agent);
             onChange("model", selectedModel);
             onChange(
@@ -691,7 +736,32 @@ function IssueDetail({
     setDetailError(reason instanceof Error ? reason.message : String(reason));
     reportGlobalError(reason);
   };
-  const running = issue.runState === "starting" || issue.runState === "running";
+  const running = isIssueRunning(issue);
+  // The latest work review stays primary; commit output is shown beside it, never instead of it.
+  const newestReviews = [...(issue.reviews ?? [])].reverse();
+  const workReview = newestReviews.find((review) => review.kind === "work");
+  const commitReview = newestReviews.find((review) => review.kind === "commit");
+  const previousReviews = newestReviews.filter(
+    (review) => review !== workReview && review !== commitReview,
+  );
+  const committing = issue.runKind === "commit";
+  const commitStatus = committing
+    ? running
+      ? "Committing…"
+      : issue.runState === "completed"
+        ? "Committed"
+        : issue.runState === "cancelled"
+          ? "Commit stopped; back in review"
+          : issue.runState === "failed"
+            ? `Not committed${issue.runError ? `: ${issue.runError}` : ""}`
+            : ""
+    : commitReview
+      ? "Earlier commit result"
+      : "";
+  const [historyOpen, setHistoryOpen] = useState(running);
+  useEffect(() => {
+    if (running) setHistoryOpen(true);
+  }, [running]);
   const persist = () => {
     if (!draft.title.trim()) throw new Error("Give the issue a title.");
     return updateLocalIssue(issue.id, {
@@ -872,20 +942,44 @@ function IssueDetail({
                 <h3>Review</h3>
                 <IssueOutput
                   cwd={issue.projectPath}
-                  images={issue.reviews?.slice(-1)[0]?.images}
-                  evidenceError={issue.reviews?.slice(-1)[0]?.evidenceError}
+                  images={workReview?.images}
+                  evidenceError={workReview?.evidenceError}
                   text={
-                    issue.reviews?.slice(-1)[0]?.text ||
+                    workReview?.text ||
                     blocks
                       .filter((block) => block.role === "assistant")
                       .slice(-1)[0]?.text ||
                     ""
                   }
                 />
-                {(issue.reviews?.length ?? 0) > 1 ? (
+                {commitStatus ? (
+                  <div className="it-commit">
+                    <h4>Commit</h4>
+                    <p
+                      className={
+                        issue.runKind === "commit" &&
+                        (issue.runState === "failed" ||
+                          issue.runState === "cancelled")
+                          ? "it-error"
+                          : "it-muted"
+                      }
+                    >
+                      {commitStatus}
+                    </p>
+                    {commitReview ? (
+                      <IssueOutput
+                        cwd={issue.projectPath}
+                        text={commitReview.text}
+                        images={commitReview.images}
+                        evidenceError={commitReview.evidenceError}
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
+                {previousReviews.length ? (
                   <details>
                     <summary>Previous reviews</summary>
-                    {issue.reviews!.slice(0, -1).map((review) => (
+                    {previousReviews.map((review) => (
                       <details key={review.id}>
                         <summary>
                           {new Date(review.at).toLocaleString()} ·{" "}
@@ -901,10 +995,10 @@ function IssueDetail({
                     ))}
                   </details>
                 ) : null}
-                {issue.status === "in_review" ? (
+                {issue.status === "in_review" && issue.sessionId && !running ? (
                   <button
                     className="it-primary"
-                    disabled={running || saving}
+                    disabled={saving}
                     onClick={() => {
                       try {
                         persist();
@@ -921,7 +1015,11 @@ function IssueDetail({
                 ) : null}
               </section>
             ) : null}
-            <details className="it-history">
+            <details
+              className="it-history"
+              open={historyOpen}
+              onToggle={(event) => setHistoryOpen(event.currentTarget.open)}
+            >
               <summary>Activity · {issue.activity.length} events</summary>
               {issue.activity.map((entry) => (
                 <div className="it-activity-row" key={entry.id}>
@@ -955,46 +1053,46 @@ function IssueDetail({
                   />
                 </details>
               ))}
+              {issue.sessionId ? (
+                <details className="it-transcript" open={running}>
+                  <summary>
+                    Agent transcript · {blocks.length} entries{" "}
+                    {running ? "· working" : ""}
+                  </summary>
+                  <div
+                    className="it-thread"
+                    onContextMenuCapture={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                  >
+                    <AgentTranscript
+                      historicalBlockIds={historicalBlockIds}
+                      blocks={blocks
+                        .filter((block) => !block.draft)
+                        .map((block) =>
+                          block.streaming
+                            ? { ...block, streaming: false }
+                            : block,
+                        )}
+                      cwd={issue.projectPath}
+                      harness={issue.agent || undefined}
+                      model={issue.model}
+                      modelSettings={issue.modelSettings}
+                      busy={running}
+                      managed
+                      hideTurnMetrics
+                      onApproval={
+                        onApproval
+                          ? (requestId, decision) =>
+                              onApproval(issue.sessionId!, requestId, decision)
+                          : undefined
+                      }
+                    />
+                  </div>
+                </details>
+              ) : null}
             </details>
-            {issue.sessionId ? (
-              <details className="it-transcript" open={running}>
-                <summary>
-                  Agent transcript · {blocks.length} entries{" "}
-                  {running ? "· working" : ""}
-                </summary>
-                <div
-                  className="it-thread"
-                  onContextMenuCapture={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                  }}
-                >
-                  <AgentTranscript
-                    historicalBlockIds={historicalBlockIds}
-                    blocks={blocks
-                      .filter((block) => !block.draft)
-                      .map((block) =>
-                        block.streaming
-                          ? { ...block, streaming: false }
-                          : block,
-                      )}
-                    cwd={issue.projectPath}
-                    harness={issue.agent || undefined}
-                    model={issue.model}
-                    modelSettings={issue.modelSettings}
-                    busy={running}
-                    managed
-                    hideTurnMetrics
-                    onApproval={
-                      onApproval
-                        ? (requestId, decision) =>
-                            onApproval(issue.sessionId!, requestId, decision)
-                        : undefined
-                    }
-                  />
-                </div>
-              </details>
-            ) : null}
             <form
               onSubmit={async (event) => {
                 event.preventDefault();
@@ -1043,7 +1141,19 @@ function IssueDetail({
               void change(key, value);
             }}
             disabled={running || saving || imagesBusy}
+            agentLocked={!!issue.sessionId}
           />
+          {issue.sessionId ? (
+            <p className="it-workflow-help" data-testid="agent-locked-hint">
+              This issue's thread uses{" "}
+              {
+                HARNESS_LABEL[
+                  issue.agent || defaultSessionChoice(issue.projectPath).harness
+                ]
+              }
+              . Archive and recreate to switch agents.
+            </p>
+          ) : null}
           <h3>Labels</h3>
           <input
             className="it-label-input"
@@ -1066,8 +1176,9 @@ function IssueDetail({
           />
           <h3>Agent workflow</h3>
           <p className="it-workflow-help">
-            Move Backlog → To Do to assign the issue and start a dedicated
-            thread with the title, description, and attached images.
+            Move an issue to To Do to start (or resume) its dedicated thread
+            with the title, description, and attached images. Approving a review
+            marks it Done and commits in the same thread.
           </p>
           {issue.sessionId ? (
             <button
@@ -1098,7 +1209,9 @@ function IssueDetail({
                   ? "Approved and committed"
                   : "Ready for review"
                 : issue.runState === "failed"
-                  ? "Agent needs attention"
+                  ? committing
+                    ? "Commit needs attention"
+                    : "Agent needs attention"
                   : issue.runState === "cancelled"
                     ? "Agent stopped"
                     : issue.runState === "starting"
@@ -1161,6 +1274,7 @@ export function IssueTracker({
   cwd,
   recents,
   onLaunch,
+  onOpenGithub,
   onOpenSession,
   onReadSession,
   onApproval,
@@ -1182,10 +1296,30 @@ export function IssueTracker({
   const [project, setProject] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState("newest");
-  const [showEmpty, setShowEmpty] = useState(false);
-  const [hidden, setHidden] = useState<IssueStatus[]>([]);
-  const [favorite, setFavorite] = useState(false);
+  const [sort, setSort] = useState(() => {
+    const saved = readSetting(SORT_KEY);
+    return saved === "oldest" || saved === "priority" ? saved : "newest";
+  });
+  const [showEmpty, setShowEmpty] = useState(
+    () => readSetting(SHOW_EMPTY_KEY) === "1",
+  );
+  const [hidden, setHidden] = useState<IssueStatus[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(readSetting(HIDDEN_KEY) ?? "[]");
+      return ISSUE_STATUSES.filter(
+        (status) => Array.isArray(saved) && saved.includes(status),
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [navOpen, setNavOpen] = useState({ workspace: true, projects: true });
+  useEffect(() => writeSetting(SORT_KEY, sort), [sort]);
+  useEffect(
+    () => writeSetting(SHOW_EMPTY_KEY, showEmpty ? "1" : "0"),
+    [showEmpty],
+  );
+  useEffect(() => writeSetting(HIDDEN_KEY, JSON.stringify(hidden)), [hidden]);
   const [createStatus, setCreateStatus] = useState<IssueStatus | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [context, setContext] = useState<{
@@ -1296,32 +1430,31 @@ export function IssueTracker({
   };
   const create = async (draft: IssueDraft) => {
     // Always save first in Backlog, so direct creation in To Do uses the same dispatch path.
+    // In Progress is agent-owned, so creating there means dispatching too.
+    const dispatch = draft.status === "todo" || draft.status === "in_progress";
     const issue = createLocalIssue({
       ...draft,
-      status: draft.status === "todo" ? "backlog" : draft.status,
+      status: dispatch ? "backlog" : draft.status,
     });
     setNotice(`Created MC-${issue.number}`);
-    if (draft.status === "todo") {
+    if (dispatch) {
       await move(issue.id, "todo").catch(showError);
     }
   };
+  const statuses = ISSUE_STATUSES.filter(
+    (status) =>
+      (!filter || status === filter) &&
+      (view === "archive" ||
+        scope === "all" ||
+        (scope === "backlog"
+          ? status === "backlog"
+          : ACTIVE_STATUSES.includes(status))),
+  );
   const visible = issues
     .filter((issue) => {
       if (Boolean(issue.archived) !== (view === "archive")) return false;
       if (project && !sameProjectPath(issue.projectPath, project)) return false;
-      if (
-        view !== "archive" &&
-        scope === "backlog" &&
-        issue.status !== "backlog"
-      )
-        return false;
-      if (
-        view !== "archive" &&
-        scope === "active" &&
-        !["todo", "in_progress", "in_review"].includes(issue.status)
-      )
-        return false;
-      if (filter && issue.status !== filter) return false;
+      if (!statuses.includes(issue.status)) return false;
       return `${issue.title} MC-${issue.number} ${issue.description} ${issue.labels.join(" ")}`
         .toLowerCase()
         .includes(query.toLowerCase());
@@ -1334,20 +1467,13 @@ export function IssueTracker({
           : b.number - a.number,
     );
   const selected = issues.find((issue) => issue.id === selectedId);
-  const statuses = ISSUE_STATUSES.filter(
-    (status) => !filter || status === filter,
-  ).filter(
-    (status) =>
-      view === "archive" ||
-      scope === "all" ||
-      (scope === "backlog"
-        ? status === "backlog"
-        : ["todo", "in_progress", "in_review"].includes(status)),
-  );
   const columns = statuses.filter(
     (status) =>
       !hidden.includes(status) &&
-      (showEmpty || visible.some((issue) => issue.status === status)),
+      // Done is where approved work lands, so it never disappears when empty.
+      (showEmpty ||
+        (status === "done" && view === "issues") ||
+        visible.some((issue) => issue.status === status)),
   );
   const collapsed = statuses.filter((status) => !columns.includes(status));
   const issueRow = (issue: LocalIssue) => (
@@ -1391,7 +1517,7 @@ export function IssueTracker({
           ))}
         </span>
         <span className="it-card-date">
-          {issue.runState === "running" || issue.runState === "starting" ? (
+          {isIssueRunning(issue) ? (
             <>
               <LoaderCircle className="it-icon animate-spin" />
               {issue.runState === "starting"
@@ -1413,7 +1539,7 @@ export function IssueTracker({
           void move(issue.id, value as IssueStatus).catch(showError);
         }}
         className="it-card-action it-icon-button"
-        disabled={issue.runState === "starting" || issue.runState === "running"}
+        disabled={isIssueRunning(issue)}
       >
         <MoreHorizontal className="it-icon" />
       </Choice>
@@ -1487,12 +1613,28 @@ export function IssueTracker({
               <CheckCircle className="it-icon" />
               Reviews
             </button>
+            {onOpenGithub ? (
+              <button onClick={onOpenGithub}>
+                <GitPullRequest className="it-icon" />
+                GitHub
+              </button>
+            ) : null}
           </nav>
-          <div className="it-sidebar-heading">
+          <button
+            type="button"
+            className="it-sidebar-heading"
+            aria-expanded={navOpen.workspace}
+            onClick={() =>
+              setNavOpen((previous) => ({
+                ...previous,
+                workspace: !previous.workspace,
+              }))
+            }
+          >
             Workspace
             <ChevronDown className="it-icon" />
-          </div>
-          <nav>
+          </button>
+          <nav hidden={!navOpen.workspace}>
             <button
               onClick={() => {
                 setProject("");
@@ -1520,11 +1662,21 @@ export function IssueTracker({
               Archive
             </button>
           </nav>
-          <div className="it-sidebar-heading">
+          <button
+            type="button"
+            className="it-sidebar-heading"
+            aria-expanded={navOpen.projects}
+            onClick={() =>
+              setNavOpen((previous) => ({
+                ...previous,
+                projects: !previous.projects,
+              }))
+            }
+          >
             Your projects
             <ChevronDown className="it-icon" />
-          </div>
-          <nav className="it-project-nav">
+          </button>
+          <nav className="it-project-nav" hidden={!navOpen.projects}>
             {projects.map((path) => (
               <button
                 key={path}
@@ -1568,14 +1720,6 @@ export function IssueTracker({
             </>
           ) : null}
           <strong>{viewTitle}</strong>
-          <button
-            className={`it-icon-button ${favorite ? "it-favorite" : ""}`}
-            aria-label="Favorite issue view"
-            aria-pressed={favorite}
-            onClick={() => setFavorite((value) => !value)}
-          >
-            <Star className="it-icon" />
-          </button>
           <button
             className="it-chip it-push"
             disabled={storeError}
@@ -1694,13 +1838,24 @@ export function IssueTracker({
                   },
                   {
                     value: "empty",
-                    label: showEmpty
-                      ? "Hide empty groups"
-                      : "Show empty groups",
+                    label: "Show empty groups",
+                    checked: showEmpty,
                   },
-                  { value: "newest", label: "Newest first" },
-                  { value: "oldest", label: "Oldest first" },
-                  { value: "priority", label: "Priority" },
+                  {
+                    value: "newest",
+                    label: "Newest first",
+                    checked: sort === "newest",
+                  },
+                  {
+                    value: "oldest",
+                    label: "Oldest first",
+                    checked: sort === "oldest",
+                  },
+                  {
+                    value: "priority",
+                    label: "Priority",
+                    checked: sort === "priority",
+                  },
                 ]}
                 onChange={(value) => {
                   if (value === "board" || value === "list") {
@@ -1795,25 +1950,29 @@ export function IssueTracker({
                 >
                   <MoreHorizontal className="it-icon" />
                 </button>
-                <button
-                  className="it-icon-button it-column-action"
-                  aria-label={`Create issue in ${ISSUE_STATUS_LABELS[status]}`}
-                  onClick={() => setCreateStatus(status)}
-                >
-                  <Plus className="it-icon" />
-                </button>
+                {status === "in_progress" ? null : (
+                  <button
+                    className="it-icon-button it-column-action"
+                    aria-label={`Create issue in ${ISSUE_STATUS_LABELS[status]}`}
+                    onClick={() => setCreateStatus(status)}
+                  >
+                    <Plus className="it-icon" />
+                  </button>
+                )}
               </div>
               <div className="it-column-items">
                 {visible
                   .filter((issue) => issue.status === status)
                   .map(issueRow)}
-                <button
-                  className="it-add-row"
-                  onClick={() => setCreateStatus(status)}
-                >
-                  <Plus className="it-icon" />
-                  Add issue
-                </button>
+                {status === "in_progress" ? null : (
+                  <button
+                    className="it-add-row"
+                    onClick={() => setCreateStatus(status)}
+                  >
+                    <Plus className="it-icon" />
+                    Add issue
+                  </button>
+                )}
               </div>
             </section>
           ))}
@@ -1918,8 +2077,8 @@ export function IssueTracker({
               "backlog"
             }
             options={STATUS_OPTIONS}
-            disabled={["starting", "running"].includes(
-              issues.find((issue) => issue.id === context.id)?.runState || "",
+            disabled={isIssueRunning(
+              issues.find((issue) => issue.id === context.id) ?? {},
             )}
             onChange={(value) => {
               void move(context.id, value as IssueStatus).catch(showError);
@@ -1962,8 +2121,8 @@ export function IssueTracker({
           </button>
           <button
             role="menuitem"
-            disabled={["starting", "running"].includes(
-              issues.find((issue) => issue.id === context.id)?.runState || "",
+            disabled={isIssueRunning(
+              issues.find((issue) => issue.id === context.id) ?? {},
             )}
             onClick={() => {
               try {

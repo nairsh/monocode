@@ -4,6 +4,7 @@ export const COMPOSER_MAX_HEIGHT = 160;
 type Resizable = {
   style: { height: string };
   scrollHeight: number;
+  scrollTop?: number;
   parentElement?: {
     style: { minHeight: string };
     offsetHeight: number;
@@ -19,9 +20,12 @@ export function resizeComposer(el: Resizable, maxHeight = COMPOSER_MAX_HEIGHT) {
   // the final height is ready so the browser cannot clamp the transcript's
   // scroll position while its viewport temporarily grows.
   if (wrapper) wrapper.style.minHeight = `${wrapper.offsetHeight}px`;
+  // The collapsed measurement can also move the field's own scroll offset.
+  const scrollTop = el.scrollTop;
   try {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    if (scrollTop !== undefined) el.scrollTop = scrollTop;
   } finally {
     if (wrapper) wrapper.style.minHeight = minHeight;
   }

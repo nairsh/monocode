@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   attachmentsFromFiles,
   filesFromClipboard,
+  MAX_ATTACHMENTS,
   pickAttachments,
   revokeAttachment,
 } from "../../sessions/model/attachments";
@@ -18,6 +19,31 @@ import {
 
 const NO_IMAGES: IssueImage[] = [];
 
+/** Loads preview attachments for saved issue images, reporting failures once per load. */
+export function useIssueImages(
+  images: IssueImage[] | undefined,
+  onError: (reason: unknown) => void,
+) {
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const report = useRef(onError);
+  report.current = onError;
+  useEffect(() => {
+    let alive = true;
+    void loadIssueImages(images).then(
+      (loaded) => {
+        if (alive) setFiles(loaded);
+      },
+      (reason) => {
+        if (alive) report.current(reason);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [images]);
+  return files;
+}
+
 export function IssueImages({
   images = NO_IMAGES,
   onChange,
@@ -32,25 +58,13 @@ export function IssueImages({
   onBusy?: (busy: boolean) => void;
 }) {
   const anchor = useRef<HTMLDivElement>(null);
-  const [previews, setPreviews] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const flight = useRef(false);
   const handlers = useRef({ images, onChange, onError, onBusy });
   handlers.current = { images, onChange, onError, onBusy };
-  useEffect(() => {
-    let alive = true;
-    void loadIssueImages(images).then(
-      (files) => {
-        if (alive) setPreviews(files);
-      },
-      (reason) => {
-        if (alive) handlers.current.onError(reason);
-      },
-    );
-    return () => {
-      alive = false;
-    };
-  }, [images]);
+  const previews = useIssueImages(images, (reason) =>
+    handlers.current.onError(reason),
+  );
   const read = (reader: () => Promise<Attachment[]>) => {
     if (flight.current || disabled) return;
     flight.current = true;
@@ -60,8 +74,10 @@ export function IssueImages({
       const files = await reader();
       try {
         if (!files.length) return;
-        if (handlers.current.images.length + files.length > 20)
-          throw new Error("An issue can contain up to 20 images.");
+        if (handlers.current.images.length + files.length > MAX_ATTACHMENTS)
+          throw new Error(
+            `An issue can contain up to ${MAX_ATTACHMENTS} images.`,
+          );
         const saved = await saveIssueImages(files);
         handlers.current.onChange([...handlers.current.images, ...saved]);
       } finally {

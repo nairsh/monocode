@@ -19,6 +19,8 @@ import {
   isFilesystemTab,
   isPlanTab,
   isReleaseNotesTab,
+  isSectionTab,
+  SECTION_TITLE,
   isReviewTab,
   isSessionChangesTab,
   isTerminalTab,
@@ -115,6 +117,11 @@ export function surfaceTabMenuItems(
 export function surfaceTabPresentation(
   file: FilePaneTab,
 ): SurfaceTabPresentation {
+  if (isSectionTab(file)) {
+    const title = SECTION_TITLE[file.section];
+    return { name: title, label: title, iconName: "README.md", tooltip: title };
+  }
+
   if (isReleaseNotesTab(file)) {
     const title = releaseNotesTitle(file.releaseNotes.version);
     return {

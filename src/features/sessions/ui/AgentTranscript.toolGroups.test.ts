@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Block } from "../model/session";
 import { AgentTranscript } from "./AgentTranscript";
+import { previewFromTool } from "../../../integrations/harness/providers/claude/claudeProtocol";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -103,5 +104,24 @@ describe("tool-call groups", () => {
     );
     const counts = container.querySelector('[aria-label="12 added, 3 removed"]');
     expect(counts?.textContent).toBe("+12 -3");
+  });
+
+  it("shows counts from a Claude Edit beside its file", () => {
+    const preview = previewFromTool("Edit", {
+      file_path: "/repo/src/app.ts",
+      old_string: "old\n",
+      new_string: "new\nextra\n",
+    });
+    act(() => root.render(createElement(AgentTranscript, {
+      cwd: "/repo",
+      blocks: [
+        { id: "user", role: "user", text: "Fix it" },
+        { id: "edit", role: "tool", text: "Edit", tool: {
+          kind: "edit", status: "completed", preview,
+        } },
+      ],
+    })));
+    expect(container.querySelector('[aria-label="2 added, 1 removed"]')?.textContent)
+      .toBe("+2 -1");
   });
 });

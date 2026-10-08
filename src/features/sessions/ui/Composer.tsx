@@ -1,9 +1,9 @@
 import {
   AiIdea,
+  Paperclip,
   Check,
   CircleDashed,
   CursorMagicSelection,
-  FilePlus,
   Plus,
   SendArrow,
   Share,
@@ -140,7 +140,13 @@ import {
 } from "../../notes";
 import { resolveTabGroupLogo } from "../../workspace/model/tabGroups";
 import { useComposerSkills } from "./useComposerSkills";
-import { Popover } from "../../../shared/ui/Popover";
+import {
+  MENU_CHECK,
+  MENU_ICON,
+  MENU_ROW,
+  MENU_WIDTH,
+  Popover,
+} from "../../../shared/ui/Popover";
 import { UsageLimitNotice } from "./UsageLimitNotice";
 import { consumePlanCommand, PLAN_COMMAND } from "../model/plan";
 import {
@@ -989,6 +995,22 @@ export function Composer({
     highlight.scrollLeft = el.scrollLeft;
   }, []);
 
+  // Menus hand focus back here. A bare focus() reveals the caret, which
+  // scrolls a long draft to its end; keep the view and selection as left.
+  const refocus = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { scrollTop, selectionStart, selectionEnd, selectionDirection } = el;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(
+      selectionStart,
+      selectionEnd,
+      selectionDirection ?? undefined,
+    );
+    el.scrollTop = scrollTop;
+    syncHighlightScroll(el);
+  }, [syncHighlightScroll]);
+
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -1806,6 +1828,44 @@ export function Composer({
     : stacked
       ? "inset-x-0 top-1 bottom-2"
       : "inset-0";
+  const plusModes = [
+    {
+      label: "Plan mode",
+      title: "Review a plan before building",
+      Icon: AiIdea,
+      active: planActive,
+      available: !remote || Boolean(remoteFeatures?.plan),
+      command: PLAN_COMMAND,
+      set: setPlanSelected,
+    },
+    {
+      label: "Operator",
+      title: "Give this thread access to MonoCode",
+      Icon: CursorMagicSelection,
+      active: operatorActive,
+      available: !remote,
+      command: OPERATOR_COMMAND,
+      set: setOperatorSelected,
+    },
+    {
+      label: "Orchestrator",
+      title: "Plan and coordinate agent work",
+      Icon: Share,
+      active: orchestrationActive,
+      available: !remote && !hideTopBar,
+      command: ORCHESTRATOR_COMMAND,
+      set: setOrchestrationSelected,
+    },
+    {
+      label: "Draft",
+      title: "Save this message without starting the agent",
+      Icon: CircleDashed,
+      active: draftActive,
+      available: Boolean(canSaveDraft && onSaveDraft),
+      command: DRAFT_COMMAND,
+      set: setDraftSelected,
+    },
+  ];
 
   return (
     <div
@@ -2034,7 +2094,7 @@ export function Composer({
                   enabled={enabled}
                   onCwdChange={onCwdChange}
                   onNewTerminal={worktreeRemoved ? undefined : onNewTerminal}
-                  onClose={() => ref.current?.focus()}
+                  onClose={refocus}
                 />
               ) : null}
               {!hideBranchPicker && remote && draftWorkspace &&
@@ -2049,7 +2109,7 @@ export function Composer({
                     onBaseChange={onWorktreeBaseChange}
                     onSelectWorktree={onWorktreeChange}
                     onOpenSettings={onManageWorktrees}
-                    onClose={() => ref.current?.focus()}
+                    onClose={refocus}
                   />
                   {(workspaceMode ?? "current") === "current" ? (
                     <BranchPicker
@@ -2057,7 +2117,7 @@ export function Composer({
                       branch={branch}
                       enabled={enabled && !busy}
                       onChange={onBranchChange}
-                      onClose={() => ref.current?.focus()}
+                      onClose={refocus}
                     />
                   ) : null}
                 </>
@@ -2070,7 +2130,7 @@ export function Composer({
                   worktreeRemoved={worktreeRemoved}
                   onBranchChange={onBranchChange}
                   onManage={onManageWorktrees}
-                  onClose={() => ref.current?.focus()}
+                  onClose={refocus}
                 />
               ) : !hideBranchPicker && remote ? (
                 <>
@@ -2084,7 +2144,7 @@ export function Composer({
                     branch={branch}
                     enabled={enabled && !busy}
                     onChange={onBranchChange}
-                    onClose={() => ref.current?.focus()}
+                    onClose={refocus}
                   />
                 </>
               ) : null}
@@ -2225,157 +2285,65 @@ export function Composer({
                     anchor={plusRef}
                     side="top"
                     align="start"
-                    width={250}
+                    width={MENU_WIDTH}
+                    rounded="rounded-2xl"
                     onDismiss={() => setPlusOpen(false)}
                     data-composer-plus
-                    className="p-1.5"
+                    className="p-1.5 font-sans"
                   >
-                    <p className="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-content/40">
-                      Add to message
-                    </p>
                     <button
                       type="button"
                       disabled={!attachmentsSupported}
+                      title={
+                        attachmentsSupported
+                          ? "Attach files or images"
+                          : remote && !remoteFeatures?.attachments
+                            ? "Update this machine’s host to attach files"
+                            : `${HARNESS_TITLE[harness]} does not support attachments`
+                      }
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => {
                         setPlusOpen(false);
                         attachFromPicker();
                       }}
-                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      className={MENU_ROW}
                     >
-                      <FilePlus className="mt-0.5 size-4 shrink-0" />
-                      <span className="min-w-0">
-                        <span className="block text-[13px]">Upload file</span>
-                        <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                          {attachmentsSupported
-                            ? "Attach files or images"
-                            : remote && !remoteFeatures?.attachments
-                              ? "Update this machine’s host to attach files"
-                              : `${HARNESS_TITLE[harness]} does not support attachments`}
-                        </span>
+                      <Paperclip className={MENU_ICON} strokeWidth={1.5} />
+                      <span className="min-w-0 flex-1 truncate">
+                        Upload file
                       </span>
                     </button>
-                    {!remote || remoteFeatures?.plan ? (
-                      <button
-                        type="button"
-                        aria-pressed={planActive}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setPlanSelected(!planActive);
-                          if (planActive) clearLeadingMode(PLAN_COMMAND.name);
-                          setOperatorSelected(false);
-                          setOrchestrationSelected(false);
-                          setDraftSelected(false);
-                          setPlusOpen(false);
-                          ref.current?.focus();
-                        }}
-                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                      >
-                        <AiIdea className="mt-0.5 size-4 shrink-0 text-yellow-300/80" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-[13px]">Plan mode</span>
-                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                            Review a plan before building
-                          </span>
-                        </span>
-                        {planActive ? (
-                          <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
-                        ) : null}
-                      </button>
-                    ) : null}
-                    {!remote ? (
-                      <button
-                        type="button"
-                        aria-pressed={operatorActive}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setOperatorSelected(!operatorActive);
-                          if (operatorActive) {
-                            clearLeadingMode(OPERATOR_COMMAND.name);
-                          }
-                          setPlanSelected(false);
-                          setOrchestrationSelected(false);
-                          setDraftSelected(false);
-                          setPlusOpen(false);
-                          ref.current?.focus();
-                        }}
-                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                      >
-                        <CursorMagicSelection className="mt-0.5 size-4 shrink-0 text-sky-300/80" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-[13px]">Operator</span>
-                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                            Give this thread access to MonoCode
-                          </span>
-                        </span>
-                        {operatorActive ? (
-                          <Check className="mt-0.5 size-3.5 shrink-0 text-sky-300/80" />
-                        ) : null}
-                      </button>
-                    ) : null}
-                    {!remote && !hideTopBar && (
-                      <button
-                        type="button"
-                        aria-pressed={orchestrationActive}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setOrchestrationSelected(!orchestrationActive);
-                          if (orchestrationActive) {
-                            clearLeadingMode(ORCHESTRATOR_COMMAND.name);
-                          }
-                          setPlanSelected(false);
-                          setOperatorSelected(false);
-                          setDraftSelected(false);
-                          setPlusOpen(false);
-                          ref.current?.focus();
-                        }}
-                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                      >
-                        <Share className="mt-0.5 size-4 shrink-0 text-fuchsia-300/65" />
-                        <span className="min-w-0 flex-1">
-                          <span className="flex items-center gap-1.5">
-                            <span className="text-[13px]">Orchestrator</span>
-                            <span className="rounded-full bg-fuchsia-300/10 px-1.5 py-0.5 text-[9px] font-medium leading-none tracking-wide text-fuchsia-200/55 mb-px">
-                              v1
+                    {plusModes.map(
+                      ({ label, title, Icon, active, available, command, set }) =>
+                        available ? (
+                          <button
+                            key={label}
+                            type="button"
+                            aria-pressed={active}
+                            title={title}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              for (const mode of plusModes) mode.set(false);
+                              set(!active);
+                              if (active) clearLeadingMode(command.name);
+                              setPlusOpen(false);
+                              refocus();
+                            }}
+                            className={MENU_ROW}
+                          >
+                            <Icon className={MENU_ICON} strokeWidth={1.5} />
+                            <span className="min-w-0 flex-1 truncate">
+                              {label}
                             </span>
-                          </span>
-                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                            Plan and coordinate agent work
-                          </span>
-                        </span>
-                        {orchestrationActive && (
-                          <Check className="mt-0.5 size-3.5 shrink-0 text-fuchsia-300/80" />
-                        )}
-                      </button>
+                            {active ? (
+                              <Check
+                                className={MENU_CHECK}
+                                strokeWidth={1.75}
+                              />
+                            ) : null}
+                          </button>
+                        ) : null,
                     )}
-                    {canSaveDraft && onSaveDraft ? (
-                      <button
-                        type="button"
-                        aria-pressed={draftActive}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setDraftSelected(!draftActive);
-                          if (draftActive) clearLeadingMode(DRAFT_COMMAND.name);
-                          setPlanSelected(false);
-                          setOperatorSelected(false);
-                          setOrchestrationSelected(false);
-                          setPlusOpen(false);
-                          ref.current?.focus();
-                        }}
-                        className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
-                      >
-                        <CircleDashed className="mt-0.5 size-4 shrink-0 text-content/60" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-[13px]">Draft</span>
-                          <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
-                            Save this message without starting the agent
-                          </span>
-                        </span>
-                        {draftActive ? (
-                          <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
-                        ) : null}
-                      </button>
-                    ) : null}
                   </Popover>
                 ) : null}
               </div>
@@ -2453,7 +2421,7 @@ export function Composer({
                   onSettingsChange={(settings) =>
                     onModelSettingsChange?.(settings)
                   }
-                  onClose={() => ref.current?.focus()}
+                  onClose={refocus}
                 />
                 {controlsBeside ? (
                   <ModelControlPills
@@ -2464,7 +2432,7 @@ export function Composer({
                     onSettingsChange={(settings) =>
                       onModelSettingsChange?.(settings)
                     }
-                    onClose={() => ref.current?.focus()}
+                    onClose={refocus}
                   />
                 ) : null}
                 {!compact && harness !== "fx" ? (
@@ -2473,7 +2441,7 @@ export function Composer({
                     value={runtimeMode}
                     busy={busy}
                     onChange={onRuntimeModeChange}
-                    onClose={() => ref.current?.focus()}
+                    onClose={refocus}
                   />
                 ) : null}
               </div>

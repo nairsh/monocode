@@ -13,15 +13,12 @@ import {
   useMemo,
   useRef,
   useState,
-  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import { SearchableProjectPicker } from "../../projects/ui/SearchableProjectPicker";
-import { OverlayNav } from "../../../app/shell/TitleBar";
-import { WindowControls } from "../../../app/shell/WindowControls";
 import { useDragResize } from "../../../shared/hooks/useDragResize";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../../projects/hooks/useTabGroupLogos";
@@ -49,7 +46,6 @@ import {
   type NoteImageAsset,
 } from "../noteImages";
 import { projectKey, projectName } from "../../../shared/lib/paths";
-import { IS_MAC } from "../../../platform/tauri/platform";
 import {
   looksLikeProject,
   type RecentProject,
@@ -62,6 +58,7 @@ import {
   resolveTabGroupLogo,
   resolveTabGroupMascot,
 } from "../../workspace/model/tabGroups";
+import type { Editor } from "@tiptap/react";
 import { NoteMarkdownEditor } from "./NoteMarkdownEditor";
 import { filesFromClipboard } from "../../sessions/model/attachments";
 
@@ -96,24 +93,11 @@ function enqueueNoteSave(
 }
 
 type Props = {
-  besideRail?: boolean;
-  compactRail?: boolean;
   cwd?: string;
   recents: RecentProject[];
-  onClose: () => void;
-  onToggleSidebar?: () => void;
 };
 
-export function NotesView({
-  besideRail = false,
-  compactRail = false,
-  cwd,
-  recents,
-  onClose,
-  onToggleSidebar,
-}: Props) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+export function NotesView({ cwd, recents }: Props) {
   const listLock = useLockOverscroll<HTMLDivElement>();
   const resize = useDragResize({
     min: MIN_WIDTH,
@@ -170,17 +154,6 @@ export function NotesView({
   useEffect(() => {
     rememberedNoteId = selectedId;
   }, [selectedId]);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseRef.current();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -244,11 +217,6 @@ export function NotesView({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  };
-
-  const onAddToChat = (note: Note) => {
-    requestAddNoteToChat(note);
-    onClose();
   };
 
   const list = (
@@ -341,24 +309,6 @@ export function NotesView({
       data-app-notes
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
-      <div
-        className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
-        data-tauri-drag-region="deep"
-      >
-        {IS_MAC && compactRail ? <div className="w-4 shrink-0" /> : null}
-        {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
-        {besideRail ? null : (
-          <OverlayNav onBack={onClose} onToggleSidebar={onToggleSidebar} />
-        )}
-        <div className="flex min-w-0 flex-1 items-center gap-2 px-3 text-[13px]">
-          <File
-            className="size-3.5 shrink-0 text-content/45"
-            strokeWidth={1.75}
-          />
-          <span className="min-w-0 truncate text-content">Notes</span>
-        </div>
-        {IS_MAC ? null : <WindowControls />}
-      </div>
       <div className="flex min-h-0 min-w-0 flex-1">
         {list}
         <NoteDetail
@@ -367,7 +317,7 @@ export function NotesView({
           activeCwd={cwd}
           onSaved={onSaved}
           onDelete={onDelete}
-          onAddToChat={onAddToChat}
+          onAddToChat={requestAddNoteToChat}
         />
       </div>
     </div>
@@ -563,8 +513,7 @@ function NoteEditor({
   const noteRef = useRef(note);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const titleFieldRef = useRef<HTMLInputElement>(null);
-  const sourceFieldRef = useRef<HTMLTextAreaElement>(null);
-  const selectionRef = useRef<{ start: number; end: number } | null>(null);
+  const editorRef = useRef<Editor | null>(null);
   const lastDropAt = useRef(0);
   const skipSave = useRef(false);
   const saveTimer = useRef<number | null>(null);
@@ -668,34 +617,43 @@ function NoteEditor({
   }, [saveNow]);
 
   const insertionRange = useCallback(() => {
-    return (
-      selectionRef.current ?? {
-        start: bodyRef.current.length,
-        end: bodyRef.current.length,
-      }
-    );
+    // An editor the user isn't in appends images at the end, as before.
+    const editor = editorRef.current;
+    if (!editor?.isFocused) return null;
+    const { from, to } = editor.state.selection;
+    return { from, to };
   }, []);
 
   const addDroppedImages = useCallback(
     async (
       load: () => Promise<NoteImageAsset[]>,
-      range: { start: number; end: number },
+      range: { from: number; to: number } | null,
     ) => {
-      sourceFieldRef.current?.blur();
       setImageBusy(true);
       setImageDrag(false);
       try {
         const images = await load();
-        const inserted = insertNoteImagesMarkdown(
-          bodyRef.current,
-          range.start,
-          range.end,
-          images,
-        );
-        editNote({ body: inserted.value });
-        selectionRef.current = { start: inserted.cursor, end: inserted.cursor };
+        const editor = editorRef.current;
+        if (editor && range) {
+          // The editor reports the new Markdown through its change handler.
+          const size = editor.state.doc.content.size;
+          editor
+            .chain()
+            .insertContentAt(
+              { from: Math.min(range.from, size), to: Math.min(range.to, size) },
+              images.map((image) => ({
+                type: "image",
+                attrs: { src: image.markdownPath, alt: image.name },
+              })),
+            )
+            .run();
+        } else {
+          const end = bodyRef.current.length;
+          const inserted = insertNoteImagesMarkdown(bodyRef.current, end, end, images);
+          editNote({ body: inserted.value });
+          scheduleSave();
+        }
         setSaveError(null);
-        scheduleSave();
       } catch (err: unknown) {
         setSaveError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -931,30 +889,31 @@ function NoteEditor({
             </div>
           ) : null}
           <NoteMarkdownEditor
-            textareaRef={sourceFieldRef}
-            selectionRef={selectionRef}
-            cwd={sourceCwd}
+            editorRef={editorRef}
             value={body}
-            onPaste={(event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+            onPaste={(event) => {
               const range = insertionRange();
               const files = filesFromClipboard(event.clipboardData);
               if (files.some((file) => file.type.startsWith("image/"))) {
-                event.preventDefault();
                 void addDroppedImages(
                   () => saveNoteImagesFromFiles(note.id, files),
                   range,
                 );
-                return;
+                return true;
               }
-              // Text is the textarea's to insert. A paste with nothing the
+              // Text is the editor's to insert. A paste with nothing the
               // webview can see is a screenshot on the native clipboard.
-              if (files.length || event.clipboardData.getData("text/plain"))
-                return;
-              event.preventDefault();
+              if (
+                files.length ||
+                event.clipboardData?.getData("text/plain") ||
+                event.clipboardData?.getData("text/html")
+              )
+                return false;
               void addDroppedImages(
                 () => saveNoteImagesFromClipboard(note.id),
                 range,
               );
+              return true;
             }}
             onChange={(next) => {
               editNote({ body: next });

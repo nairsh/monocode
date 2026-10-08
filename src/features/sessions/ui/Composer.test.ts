@@ -1347,7 +1347,7 @@ describe("Composer question focus", () => {
     );
     const draftMode = [
       ...document.querySelectorAll<HTMLButtonElement>("button"),
-    ].find((button) => button.textContent?.includes("Save this message"));
+    ].find((button) => button.title.includes("Save this message"));
     expect(draftMode).toBeDefined();
     await act(async () => draftMode!.click());
 
@@ -1708,7 +1708,7 @@ describe("Composer question focus", () => {
       );
       const draftMode = [
         ...document.querySelectorAll<HTMLButtonElement>("button"),
-      ].find((button) => button.textContent?.includes("Save this message"))!;
+      ].find((button) => button.title.includes("Save this message"))!;
       await act(async () => draftMode.click());
       const textarea = container.querySelector("textarea")!;
       await act(async () => {

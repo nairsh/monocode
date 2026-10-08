@@ -63,6 +63,13 @@ type Props = Omit<ComponentPropsWithoutRef<"div">, "style"> & {
 
 const FRAME = "isolate overflow-hidden border border-content/10 shadow-xl";
 
+/** Compact icon-and-label menu, shared by the composer's plus and access menus. */
+export const MENU_WIDTH = 220;
+export const MENU_ROW =
+  "flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content hover:bg-content/6 disabled:cursor-not-allowed disabled:opacity-40";
+export const MENU_ICON = "size-4 shrink-0 text-content/70";
+export const MENU_CHECK = "size-3.5 shrink-0 text-content/60";
+
 /** Which corner the open animation grows from, so it reads as anchored. */
 function origin(side: PopoverSide, align: PopoverAlign): string {
   const near = align === "start" ? "0%" : align === "end" ? "100%" : "50%";

@@ -1755,7 +1755,7 @@ function SidebarComponent({
           </span>
         )}
       </div>
-      <WorkspaceTitleActions onSearch={onGoToFile} onNew={onNew} />
+      <WorkspaceTitleActions onSearch={onGoToFile} />
     </div>
   );
 
@@ -1806,7 +1806,6 @@ function SidebarComponent({
               onSelectProject={onSelectProject}
               onOpenProject={onOpenProject}
               onRemoveProject={onRemoveProject}
-              onNew={onNew}
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
               onOpenNotificationSettings={onOpenNotificationSettings}
@@ -2477,7 +2476,6 @@ function SidebarProjectPicker({
   onSelectProject,
   onOpenProject,
   onRemoveProject,
-  onNew,
   onSearch,
   onOpenInbox,
   onOpenNotificationSettings,
@@ -2495,7 +2493,6 @@ function SidebarProjectPicker({
   onSelectProject: (path: string) => void;
   onOpenProject?: () => void;
   onRemoveProject?: Props["onRemoveProject"];
-  onNew?: () => string | void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
   onOpenNotificationSettings?: (projectPath?: string) => void;
@@ -2527,11 +2524,6 @@ function SidebarProjectPicker({
         onOpenNotificationSettings={onOpenNotificationSettings}
       />
       <div className="ml-auto flex items-center">
-        {onNew ? (
-          <IconButton label={`New tab (${MOD}T)`} onClick={onNew}>
-            <Plus className="size-3.5" strokeWidth={1.75} />
-          </IconButton>
-        ) : null}
         {onSearch ? (
           <IconButton
             label={`Search (${MOD}K)`}
@@ -2879,14 +2871,8 @@ function CompactRailAction({
   );
 }
 
-function WorkspaceTitleActions({
-  onSearch,
-  onNew,
-}: {
-  onSearch?: () => void;
-  onNew?: () => void;
-}) {
-  if (!onSearch && !onNew) return null;
+function WorkspaceTitleActions({ onSearch }: { onSearch?: () => void }) {
+  if (!onSearch) return null;
   return (
     <div
       className="flex shrink-0 items-center gap-0.5"
@@ -2895,11 +2881,6 @@ function WorkspaceTitleActions({
       {onSearch ? (
         <IconButton label={`Go to File (${MOD}P)`} onClick={onSearch}>
           <Search className="size-3.5" strokeWidth={1.75} />
-        </IconButton>
-      ) : null}
-      {onNew ? (
-        <IconButton label={`New session (${MOD}T)`} onClick={onNew}>
-          <Plus className="size-3.5" strokeWidth={1.75} />
         </IconButton>
       ) : null}
     </div>

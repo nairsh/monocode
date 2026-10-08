@@ -1,6 +1,6 @@
 import { lazySurface } from "../../../shared/ui/lazySurface";
-import type { PointerEvent as ReactPointerEvent } from "react";
-import { memo, useSyncExternalStore } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { createContext, memo, useContext, useSyncExternalStore } from "react";
 import {
   MarkdownViewShell,
   useMarkdownMode,
@@ -13,10 +13,12 @@ import {
   isPlanTab,
   isReleaseNotesTab,
   isReviewTab,
+  isSectionTab,
   isSessionChangesTab,
   isTerminalTab,
   type EditorPane,
   type FilePaneTab,
+  type SectionKind,
 } from "../../workspace/model/layout";
 import { isImagePath } from "../model/filePreview";
 import type { TerminalMetaPatch } from "../../terminal/model/terminalTab";
@@ -55,6 +57,11 @@ const WorkingTreeDiff = lazySurface(async () => {
   const module = await import("../../source-control/ui/WorkingTreeDiff");
   return { default: module.WorkingTreeDiff };
 });
+
+/** The app draws Notes, Inbox and Automations tabs; panes only place them. */
+export const SectionSurface = createContext<
+  ((file: FilePaneTab & { section: SectionKind }) => ReactNode) | null
+>(null);
 
 type Props = {
   pane: EditorPane;
@@ -106,6 +113,7 @@ function FilePaneComponent({
   onPaneDragStart,
   onTerminalMetaChange,
 }: Props) {
+  const renderSection = useContext(SectionSurface);
   const diffViewer = useSyncExternalStore(
     subscribeDiffViewer,
     loadDiffViewer,
@@ -180,7 +188,9 @@ function FilePaneComponent({
                   : "hidden"
               }
             >
-              {isAgentTab(file) ? (
+              {isSectionTab(file) ? (
+                renderSection?.(file)
+              ) : isAgentTab(file) ? (
                 <AgentTabView
                   title={file.path}
                   session={sessions.find(

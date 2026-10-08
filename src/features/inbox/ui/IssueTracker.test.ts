@@ -277,7 +277,7 @@ it("approves a review as a commit run in the same thread", async () => {
   expect(launch.mock.calls[0][0]).toMatchObject({
     sessionId: "same-thread",
     runKind: "commit",
-    status: "in_progress",
+    status: "done",
   });
   expect(container.textContent).not.toContain("My work");
   expect(container.textContent).not.toContain("Stored on this device");
@@ -334,4 +334,227 @@ it("renders chunked chat activity with collapsible tool details", async () => {
   expect(document.querySelector(".it-transcript")?.textContent).toContain(
     "All checks passed",
   );
+});
+
+function reviewed(patch: Partial<LocalIssue> = {}) {
+  const issue = seed();
+  updateLocalIssue(issue.id, {
+    status: "in_review",
+    sessionId: "same-thread",
+    runState: "completed",
+    agent: "codex",
+    reviews: [
+      {
+        id: "review",
+        text: "Validated",
+        at: new Date().toISOString(),
+        kind: "work",
+      },
+    ],
+    ...patch,
+  });
+  return issue;
+}
+function buttonByText(text: string) {
+  return [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+    (entry) => entry.textContent === text,
+  );
+}
+
+it("keeps the Done column on the board when it is empty, until the user hides it", async () => {
+  seed();
+  await render();
+  expect(container.querySelector('[aria-label="Done issues"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label="To Do issues"]')).toBeNull();
+  act(() => button("Hide Done column").click());
+  expect(container.querySelector('[aria-label="Done issues"]')).toBeNull();
+  expect(container.querySelector(".it-hidden-columns")?.textContent).toContain(
+    "Done",
+  );
+});
+
+it("keeps the Done group header in the list layout when it is empty", async () => {
+  seed();
+  await render();
+  act(() => button("List view").click());
+  expect(container.querySelector(".it-list")).not.toBeNull();
+  expect(
+    container.querySelector('[aria-label="Done issues"] h2')?.textContent,
+  ).toBe("Done");
+});
+
+it("opens GitHub from the navigation only when the host provides it", async () => {
+  await render();
+  expect(container.querySelector(".it-sidebar")?.textContent).not.toContain(
+    "GitHub",
+  );
+  const onOpenGithub = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(IssueTracker, {
+        cwd: "/tmp/web",
+        recents: [],
+        onOpenGithub,
+      }),
+    ),
+  );
+  const entry = [
+    ...container.querySelectorAll<HTMLButtonElement>(".it-sidebar nav button"),
+  ].find((item) => item.textContent === "GitHub")!;
+  act(() => entry.click());
+  expect(onOpenGithub).toHaveBeenCalledTimes(1);
+});
+
+it("locks the agent once the issue has a thread but not before", async () => {
+  const issue = seed();
+  updateLocalIssue(issue.id, { agent: "codex" });
+  await render();
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  expect(
+    document.querySelector(".it-model-choice[data-agent-locked]"),
+  ).toBeNull();
+  expect(
+    document.querySelector('[data-testid="agent-locked-hint"]'),
+  ).toBeNull();
+  act(() =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  updateLocalIssue(issue.id, { sessionId: "thread" });
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  const locked = document.querySelector(".it-model-choice[data-agent-locked]")!;
+  expect(locked.getAttribute("title")).toContain("Archive and recreate");
+  expect(
+    document.querySelector('[data-testid="agent-locked-hint"]')?.textContent,
+  ).toContain("Archive and recreate to switch agents.");
+});
+
+it("returns to In Review with Approve available after a failed feedback run", async () => {
+  const issue = reviewed();
+  const launch = vi.fn(async (_issue: LocalIssue) => {
+    throw new Error("Provider offline");
+  });
+  await render(launch);
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  act(() =>
+    type(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Add issue detail"]',
+      )!,
+      "Please adjust spacing",
+    ),
+  );
+  await act(async () => buttonByText("Send feedback and iterate")!.click());
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(loadLocalIssues()[0]).toMatchObject({
+    status: "in_review",
+    runState: "failed",
+    runError: "Provider offline",
+  });
+  expect(buttonByText("Approve and commit")).toBeDefined();
+  expect(buttonByText("Retry agent")).toBeDefined();
+});
+
+it("shows the latest work review as primary with the commit result beside it", async () => {
+  const issue = reviewed({
+    status: "done",
+    runKind: "commit",
+    reviews: [
+      {
+        id: "work",
+        text: "Work summary",
+        at: new Date(2026, 0, 1).toISOString(),
+        kind: "work",
+      },
+      {
+        id: "commit",
+        text: "Committed abc1234",
+        at: new Date(2026, 0, 2).toISOString(),
+        kind: "commit",
+      },
+    ],
+  });
+  await render();
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  const review = document.querySelector(".it-review")!;
+  expect(review.textContent).toContain("Work summary");
+  expect(review.querySelector(".it-commit")?.textContent).toContain(
+    "Committed",
+  );
+  expect(review.querySelector(".it-commit")?.textContent).toContain(
+    "Committed abc1234",
+  );
+});
+
+it("picks a status with its number hint", async () => {
+  const issue = seed();
+  await render();
+  act(() => button(`Change status for MC-${issue.number}`).click());
+  const search = document.querySelector<HTMLInputElement>(
+    'input[aria-label="Search change status for mc-1"]',
+  )!;
+  act(() => {
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "4",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  expect(loadLocalIssues()[0].status).toBe("in_review");
+});
+
+it("checks the active sort, remembers it, and collapses sidebar sections", async () => {
+  seed();
+  await render();
+  act(() => button("Display options").click());
+  const item = (label: string) =>
+    [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes(label))!;
+  expect(item("Newest first").getAttribute("aria-checked")).toBe("true");
+  expect(item("Show empty groups").getAttribute("aria-checked")).toBe("false");
+  act(() => item("Oldest first").click());
+  expect(localStorage.getItem("monocode.issues.sort")).toBe("oldest");
+  act(() => button("Display options").click());
+  expect(item("Oldest first").getAttribute("aria-checked")).toBe("true");
+  expect(item("Newest first").getAttribute("aria-checked")).toBe("false");
+  act(() =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  const heading = [
+    ...container.querySelectorAll<HTMLButtonElement>(".it-sidebar-heading"),
+  ].find((entry) => entry.textContent === "Your projects")!;
+  expect(heading.getAttribute("aria-expanded")).toBe("true");
+  act(() => heading.click());
+  expect(heading.getAttribute("aria-expanded")).toBe("false");
+  expect(
+    container.querySelector(".it-project-nav")?.hasAttribute("hidden"),
+  ).toBe(true);
+});
+
+it("cannot create an issue directly in the agent-owned In Progress status", async () => {
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  expect(
+    container.querySelector('[aria-label="Create issue in In Progress"]'),
+  ).toBeNull();
+  act(() =>
+    (
+      document.querySelector('[aria-label="Change status"]') as HTMLElement
+    ).click(),
+  );
+  const labels = [...document.querySelectorAll('[role="menuitemradio"]')].map(
+    (entry) => entry.textContent,
+  );
+  expect(labels.some((label) => label?.includes("In Progress"))).toBe(false);
+  expect(labels.some((label) => label?.includes("To Do"))).toBe(true);
 });

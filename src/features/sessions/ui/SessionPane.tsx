@@ -906,6 +906,13 @@ const LocalSessionPane = memo(function LocalSessionPane({
               ) : (
                 <EmptySession
                   cwd={session.cwd}
+                  {...(isRemoteProjectPath(session.cwd)
+                    ? {}
+                    : {
+                        recents,
+                        onCwdChange: (cwd: string) =>
+                          onCwdChange(session.id, cwd),
+                      })}
                   hasChatBackground={Boolean(
                     projectBackground || globalBackgroundPath,
                   )}
@@ -1128,7 +1135,9 @@ const LocalSessionPane = memo(function LocalSessionPane({
               ref={composerDockMotion.dockedRef}
               data-session-composer
               inert={btw.open}
-              className="mx-auto w-full max-w-3xl shrink-0"
+              // A Mono covers the usage footer (h-7 + border) that lifts the
+              // thread composer; keep the input at the same height.
+              className={`mx-auto w-full max-w-3xl shrink-0 ${agent ? "pb-[29px]" : ""}`}
             >
               {agent ? (
                 <>
