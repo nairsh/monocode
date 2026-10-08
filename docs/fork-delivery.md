@@ -8,7 +8,11 @@ Repository: https://github.com/nairsh/monocode, already a GitHub fork of https:/
 
 The original upstream `Release` workflow remains available for upstream's signing/hosting setup. Do not use `v*` tags for personal builds: that workflow requires Apple/updater/R2 secrets this fork does not inherit. Personal tags use `fork-*`.
 
-The fork configuration disables updater artifacts and leaves the in-app updater key/endpoints empty. It builds Vite in `fork` mode so the manual update message points to this fork's releases as well. Upstream's updater must not overwrite the fork. This build is ad-hoc signed, not notarized; a downloaded app can require macOS Privacy & Security → Open Anyway. Normal notarized distribution requires the owner's Apple signing credentials. Do not disable Gatekeeper globally.
+The fork configuration enables signed updater artifacts and points exclusively to `https://github.com/nairsh/monocode/releases/download/fork-updates/latest.json`. The public verification key is committed in `tauri.fork.conf.json`; the private key is stored in the repository's `FORK_UPDATER_PRIVATE_KEY` Actions secret, with a private local backup at `~/.tauri/monocode-fork.key`. Preserve that backup: replacing or losing the key breaks updates for installed copies trusting the old key. Never commit the private key. Updater signatures are separate from Apple signing/notarization.
+
+Trusted main builds use version `0.9.1-fork.<Actions run number>`, produce the signed `.app.tar.gz` archive and `latest.json`, and publish immutable commit-specific assets before advancing the dedicated `fork-updates` feed. The workflow serializes builds per ref, refuses to publish an obsolete main commit and prevents feed version regression on retries. PR/upstream proposal builds disable updater artifact generation and do not receive the signing secret. An existing commit release keeps its original manifest and archives. If the fork version base is changed later, it must increase; keep the `-fork.0` suffix in the checked-in config.
+
+The app checks when the sidebar mounts (normally at launch), displays an update button, and downloads, verifies, installs and restarts when clicked. Settings and the app menu also provide manual checks. It does not pull Git commits or automatically merge upstream changes. Builds through `fork-66552a4e8b50` have no updater and require one manual installation of an updater-enabled DMG. It builds Vite in `fork` mode so manual download messages point to this fork as well. Upstream's updater must not overwrite the fork. This build is ad-hoc signed, not notarized; a downloaded app can require macOS Privacy & Security → Open Anyway. Normal notarized distribution requires the owner's Apple signing credentials. Do not disable Gatekeeper globally.
 
 The application name/identifier stay `MonoCode` / `com.monocode.desktop` to preserve existing application data. Quit the previous app before replacing `/Applications/MonoCode.app`. Keep a recoverable copy of the old application and preserve its data; deleting the application data is unnecessary. Only one installed active application should remain at the normal Applications path.
 
@@ -25,7 +29,7 @@ A clean Git merge and passing tests cannot guarantee preservation of custom UX. 
 ## Local build
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" npm run tauri -- build --bundles app,dmg --config src-tauri/tauri.fork.conf.json
+TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/monocode-fork.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD='' PATH="$HOME/.cargo/bin:$PATH" npm run tauri -- build --bundles app,dmg --config src-tauri/tauri.fork.conf.json
 ```
 
 On the reviewed Mac, `/opt/homebrew/bin/rustc` could not load `libLLVM.dylib`; the already-installed Rustup toolchain works. The PATH prefix selects that existing toolchain without modifying the user's shell configuration.

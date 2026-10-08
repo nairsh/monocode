@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   macos:
     if: github.repository == 'nairsh/monocode'
@@ -41,8 +45,17 @@ jobs:
           NODE_OPTIONS: --no-experimental-webstorage
       - run: npm run test:host
       - run: cargo test --locked
+      - run: node --test scripts/fork-updater.test.mjs
+      - name: Configure fork version and signing
+        env:
+          FORK_SIGNED: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
+        run: node scripts/fork-updater.mjs configure "$RUNNER_TEMP/fork-build.json"
       - name: Build Apple Silicon installer
-        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.fork.conf.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.fork.conf.json --config "$RUNNER_TEMP/fork-build.json"
       - name: Verify app and record source
         shell: bash
         run: |
@@ -54,6 +67,9 @@ jobs:
           git rev-parse HEAD > target/aarch64-apple-darwin/release/bundle/dmg/SOURCE_COMMIT.txt
           cd target/aarch64-apple-darwin/release/bundle/dmg
           shasum -a 256 ./*.dmg > SHA256SUMS.txt
+      - name: Stage signed updater and feed
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: node scripts/fork-updater.mjs manifest "$RUNNER_TEMP/fork-build.json" target/aarch64-apple-darwin/release/bundle/dmg
       - uses: actions/upload-artifact@v4
         with:
           name: MonoCode-macOS-arm64-${{ github.run_id }}
@@ -80,16 +96,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          current=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [[ "$current" != "$SOURCE_SHA" ]]; then
+            echo 'Main has advanced; skipping an obsolete release.'
+            exit 0
+          fi
           tag="fork-${SOURCE_SHA:0:12}"
           cat > "$RUNNER_TEMP/release.md" <<'BODY'
           Personal MonoCode fork for Apple Silicon Macs. Download the DMG and its SHA256SUMS.txt checksum.
 
-          This build uses ad-hoc signing and is not Apple-notarized. macOS may require an explicit Open Anyway approval in Privacy & Security. Automatic in-app updating is disabled, so an upstream release cannot replace this fork.
+          This build uses ad-hoc signing and is not Apple-notarized. macOS may require an explicit Open Anyway approval in Privacy & Security. In-app updates check this fork only and verify downloads with the fork's updater signing key. Click the update button to install and restart. Versions before this updater was enabled need one manual DMG installation.
 
           The app keeps MonoCode's application identifier and existing data location. Quit the old app before replacing it in Applications; do not delete your application data.
           BODY
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; keeping its original artifacts."
+            gh release download "$tag" --pattern latest.json --dir installer --clobber
           else
             gh release create "$tag" installer/* --target "$SOURCE_SHA" --prerelease --title "MonoCode fork ${SOURCE_SHA:0:12} (Apple Silicon)" --notes-file "$RUNNER_TEMP/release.md"
           fi
+          if gh release view fork-updates >/dev/null 2>&1; then
+            mkdir previous-feed
+            gh release download fork-updates --pattern latest.json --dir previous-feed
+            # A retry of an older run must not move the feed backwards.
+            if ! node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              const next = JSON.parse(readFileSync("installer/latest.json")).version;
+              const previous = JSON.parse(readFileSync("previous-feed/latest.json")).version;
+              const parts = (v) => v.split(/\D+/).map(Number);
+              const a = parts(next), b = parts(previous);
+              const differing = a.findIndex((n, i) => n !== b[i]);
+              process.exit(differing < 0 || a[differing] > b[differing] ? 0 : 1);
+            '; then
+              echo 'Keeping the newer updater feed.'
+              exit 0
+            fi
+          else
+            gh release create fork-updates installer/latest.json --target "$SOURCE_SHA" --prerelease --title 'MonoCode fork update feed' --notes 'Update metadata for signed Apple Silicon fork releases. Download installers from the commit-specific releases.'
+          fi
+          gh release upload fork-updates installer/latest.json --clobber

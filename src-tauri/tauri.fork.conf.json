@@ -1,12 +1,18 @@
 {
+  "version": "0.9.1-fork.0",
   "build": {
     "beforeBuildCommand": "npm run build -- --mode fork"
   },
   "bundle": {
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "macOS": { "signingIdentity": "-" }
   },
   "plugins": {
-    "updater": { "pubkey": "", "endpoints": [] }
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyM0VGRUU2MkY5QzAwRDUKUldUVkFKd3Y1djQrd3ZzQW51cnV6Y2Q3cCtNUU94QXdRRUUrcGlJWmNSMCtNSWZNencxek9nTHIK",
+      "endpoints": [
+        "https://github.com/nairsh/monocode/releases/download/fork-updates/latest.json"
+      ]
+    }
   }
 }
