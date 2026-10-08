@@ -36,6 +36,8 @@ import { parseRemoteAttachments, resolveAttachments } from "./attachments";
 // Streamed output is written in batches. Anything a user may need to act on
 // (approvals, questions, errors, completion) is written immediately.
 const FLUSH_MS = 120;
+const FLUSH_EVENTS = 1_000;
+const FLUSH_BYTES = 1024 * 1024;
 const BATCHED = new Set<string>([
   "message.delta",
   "reasoning.delta",
@@ -255,6 +257,7 @@ export class HostEngine {
     {
       value: HostSession;
       events: HarnessEvent[];
+      bytes?: number;
       timer?: ReturnType<typeof setTimeout>;
     }
   >();
@@ -267,8 +270,9 @@ export class HostEngine {
   ) {
     // Provider dispatch is not transactional with SQLite. Never replay a send
     // automatically after a crash; its external effects may already exist.
-    for (const value of store.sessions()) {
-      if (value.status === "running") {
+    for (const binding of store.startupBindings()) {
+      if (binding.status === "running") {
+        const value = store.session(binding.id);
         this.save(
           this.settled(
             value,
@@ -279,11 +283,11 @@ export class HostEngine {
           { type: "interrupted" },
         );
       }
-      if (value.session.providerSessionId)
-        this.provider(value.session.harness).bind(
-          value.session.id,
-          value.session.providerSessionId,
-          value.session.cwd,
+      if (binding.providerSessionId)
+        this.provider(binding.harness).bind(
+          binding.id,
+          binding.providerSessionId,
+          binding.cwd,
         );
     }
   }
@@ -351,6 +355,7 @@ export class HostEngine {
     const events = live.events;
     live.value = this.save(live.value, { type: "events", events });
     live.events = [];
+    live.bytes = 0;
   }
 
   private scheduledFlush(id: string, provider: HostProvider): void {
@@ -869,7 +874,8 @@ export class HostEngine {
     if (session === live.value.session) return;
     live.value = { ...live.value, session };
     live.events.push(event);
-    if (!BATCHED.has(event.type))
+    live.bytes = (live.bytes ?? 0) + Buffer.byteLength(JSON.stringify(event));
+    if (!BATCHED.has(event.type) || live.events.length >= FLUSH_EVENTS || live.bytes >= FLUSH_BYTES)
       this.scheduledFlush(id, this.provider(session.harness));
     else
       live.timer ??= setTimeout(

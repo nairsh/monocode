@@ -313,6 +313,8 @@ export type Block = {
   id: string;
   role: BlockRole;
   text: string;
+  /** Completed remote tool output available through an explicit detail read. */
+  remoteDetail?: { revision: number; bytes: number };
   image?: GeneratedImageMeta;
   attachments?: Attachment[];
   streaming?: boolean;

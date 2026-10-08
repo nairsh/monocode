@@ -13,6 +13,7 @@ export const INLINE_SYNC_BYTES = 4 * 1024 * 1024;
 export const SYNC_CHUNK_BYTES = 4 * 1024 * 1024;
 const TRANSFER_TTL_MS = 2 * 60_000;
 const MAX_TRANSFERS = 8;
+const MAX_TRANSFER_BYTES = 128 * 1024 * 1024;
 
 const encodedBytes = (value: string) =>
   Buffer.byteLength(JSON.stringify(value));
@@ -39,7 +40,7 @@ export class SyncTransfers {
       Buffer.byteLength(text) <= this.limits.inline
     )
       return sync;
-    this.prune();
+    this.prune(text.length * 2);
     const transfer = randomUUID();
     this.transfers.set(transfer, {
       sessionId,
@@ -86,11 +87,17 @@ export class SyncTransfers {
     return { data };
   }
 
-  private prune() {
+  private prune(incomingBytes: number) {
     const now = Date.now();
     for (const [id, entry] of this.transfers)
       if (entry.expires < now) this.transfers.delete(id);
-    while (this.transfers.size >= MAX_TRANSFERS)
-      this.transfers.delete(this.transfers.keys().next().value!);
+    let bytes = [...this.transfers.values()].reduce((total, entry) => total + entry.text.length * 2, 0);
+    // Preserve a single oversized session (chunking must still reopen it),
+    // while preventing several large abandoned transfers from accumulating.
+    while (this.transfers.size && (this.transfers.size >= MAX_TRANSFERS || bytes + incomingBytes > MAX_TRANSFER_BYTES)) {
+      const id = this.transfers.keys().next().value!;
+      bytes -= this.transfers.get(id)!.text.length * 2;
+      this.transfers.delete(id);
+    }
   }
 }

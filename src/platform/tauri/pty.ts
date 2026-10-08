@@ -1,20 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-type DataPayload = { id: string; data: string };
+type DataPayload = { id: string; data: string; pid?: number; sequence?: number };
 type ExitPayload = { id: string; code: number | null };
 
-type DataHandler = (data: Uint8Array) => void;
+type DataHandler = (data: Uint8Array, consumed: () => void) => void;
 type ExitHandler = (code: number | null) => void;
 
 const dataHandlers = new Map<string, DataHandler>();
 const exitHandlers = new Map<string, ExitHandler>();
-const dataBuffer = new Map<string, Uint8Array[]>();
+const dataBuffer = new Map<string, { data: Uint8Array; consumed: () => void }[]>();
 const dataBufferBytes = new Map<string, number>();
 /** PTYs this window opened. Global `pty-data` still fires for every terminal
  * in the process; decoding those in a window that never mounted them was
  * megabytes of base64 work and a 256KB replay buffer per stranger id. */
 const openedPtys = new Set<string>();
+const pendingConsumption = new Map<string, Set<() => void>>();
 
 /**
  * Replay budget for a PTY whose view is not mounted. Chunks arrive at up to
@@ -70,14 +71,16 @@ export function trimReplay(
   return { drop, bytes: left };
 }
 
-function pushBuffered(id: string, chunk: Uint8Array) {
+function pushBuffered(id: string, chunk: Uint8Array, consumed: () => void) {
   const queued = dataBuffer.get(id) ?? [];
-  queued.push(chunk);
+  queued.push({ data: chunk, consumed });
   const trimmed = trimReplay(
-    queued.map((entry) => entry.byteLength),
+    queued.map((entry) => entry.data.byteLength),
     (dataBufferBytes.get(id) ?? 0) + chunk.byteLength,
   );
-  if (trimmed.drop > 0) queued.splice(0, trimmed.drop);
+  if (trimmed.drop > 0) {
+    for (const dropped of queued.splice(0, trimmed.drop)) dropped.consumed();
+  }
   dataBuffer.set(id, queued);
   dataBufferBytes.set(id, trimmed.bytes);
 }
@@ -91,13 +94,30 @@ function ensureBridge() {
   if (bridge) return;
   bridge = Promise.all([
     listen<DataPayload>("pty-data", (event) => {
-      const { id, data } = event.payload;
+      const { id, data, pid, sequence } = event.payload;
       const handler = dataHandlers.get(id);
       if (!handler && !openedPtys.has(id)) return;
       const chunk = decodePtyChunk(data);
       if (!chunk) return;
-      if (handler) handler(chunk);
-      else pushBuffered(id, chunk);
+      let acknowledged = false;
+      const consumed = () => {
+        if (acknowledged) return;
+        acknowledged = true;
+        pendingConsumption.get(id)?.delete(consumed);
+        if (pid == null || sequence == null) return;
+        void invoke("pty_ack", { id, pid, sequence }).catch(() => undefined);
+      };
+      if (handler) {
+        const pending = pendingConsumption.get(id) ?? new Set();
+        pending.add(consumed);
+        pendingConsumption.set(id, pending);
+        handler(chunk, consumed);
+      } else {
+        pushBuffered(id, chunk, consumed);
+        // Acceptance into the bounded replay cache is consumption when there
+        // is no xterm view. A background shell must not wait for a remount.
+        consumed();
+      }
     }),
     listen<ExitPayload>("pty-exit", (event) => {
       const { id, code } = event.payload;
@@ -117,11 +137,15 @@ function retain() {
 
 function release() {
   users = Math.max(0, users - 1);
-  if (users > 0 || !bridge) return;
+  scheduleBridgeTeardown();
+}
+
+function scheduleBridgeTeardown() {
+  if (users > 0 || openedPtys.size > 0 || !bridge) return;
   const pending = bridge;
   teardownTimer = setTimeout(() => {
     teardownTimer = undefined;
-    if (users > 0) return;
+    if (users > 0 || openedPtys.size > 0) return;
     bridge = null;
     void pending.then((fns) => fns.forEach((fn) => fn()));
   }, 500);
@@ -155,19 +179,23 @@ export async function getPtyStatus(
 }
 
 export async function killPty(id: string): Promise<void> {
+  pendingConsumption.delete(id);
   dataHandlers.delete(id);
   exitHandlers.delete(id);
   openedPtys.delete(id);
   clearBuffered(id);
+  scheduleBridgeTeardown();
   await invoke("pty_kill", { id }).catch(() => undefined);
 }
 
 export async function killAllPtys(): Promise<void> {
+  pendingConsumption.clear();
   dataHandlers.clear();
   exitHandlers.clear();
   openedPtys.clear();
   dataBuffer.clear();
   dataBufferBytes.clear();
+  scheduleBridgeTeardown();
   await invoke("pty_kill_all").catch(() => undefined);
 }
 
@@ -183,10 +211,14 @@ export function subscribePty(
   const queued = dataBuffer.get(id);
   if (queued) {
     clearBuffered(id);
-    for (const chunk of queued) onData(chunk);
+    for (const chunk of queued) onData(chunk.data, chunk.consumed);
   }
   return () => {
-    if (dataHandlers.get(id) === onData) dataHandlers.delete(id);
+    if (dataHandlers.get(id) === onData) {
+      dataHandlers.delete(id);
+      for (const consumed of pendingConsumption.get(id) ?? []) consumed();
+      pendingConsumption.delete(id);
+    }
     if (exitHandlers.get(id) === onExit) exitHandlers.delete(id);
     release();
   };

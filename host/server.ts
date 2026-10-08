@@ -4,6 +4,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { hostname, homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -137,6 +138,7 @@ export function createHostServer(
     { binaries: string; probed: number; catalog: Promise<HostModelCatalog> }
   >();
   const transfers = new SyncTransfers();
+  const revisionWaits = new Map<string, { owner: string; wake: boolean; controller?: AbortController; expires: number }>();
   const workspace = new WorkspaceCommands(
     engine.store,
     (projectId, action) => engine.withIdleProject(projectId, action),
@@ -288,6 +290,8 @@ export function createHostServer(
                 "attachments.read",
                 "sessions.draft",
                 "sessions.plan",
+                "sessions.wait",
+                "sessions.projectedSync",
               ],
             };
             break;
@@ -378,8 +382,64 @@ export function createHostServer(
                 Number.isSafeInteger(params.revision)
                   ? Number(params.revision)
                   : undefined,
+                params.projected === true ? {
+                  projected: true,
+                  startBlockId: typeof params.startBlockId === "string" ? params.startBlockId : undefined,
+                  earlier: params.earlier === true,
+                  all: params.all === true,
+                  untilBlockId: typeof params.untilBlockId === "string" ? params.untilBlockId : undefined,
+                } : undefined,
               ),
             );
+            break;
+          }
+          case "sessions.wait": {
+            if (!Array.isArray(params.cursors) || !params.cursors.length || params.cursors.length > 64)
+              throw new Error("Invalid session subscriptions");
+            const cursors = params.cursors.map((cursor: unknown) => {
+              if (!cursor || typeof cursor !== "object") throw new Error("Invalid session cursor");
+              const value = cursor as { sessionId?: unknown; revision?: unknown };
+              if (typeof value.sessionId !== "string" || !value.sessionId || value.sessionId.length > 128 ||
+                !Number.isSafeInteger(value.revision) || Number(value.revision) < 0)
+                throw new Error("Invalid session cursor");
+              return { sessionId: value.sessionId, revision: Number(value.revision) };
+            });
+            const controller = new AbortController();
+            const subscriptionId = params.subscriptionId;
+            if (subscriptionId !== undefined && (typeof subscriptionId !== "string" || subscriptionId.length > 128 || !subscriptionId))
+              throw new Error("Invalid subscription ID");
+            const owner = createHash("sha256").update(token).digest("hex");
+            for (const [id, wait] of revisionWaits) if (wait.expires < Date.now()) revisionWaits.delete(id);
+            const previous = typeof subscriptionId === "string" ? revisionWaits.get(subscriptionId) : undefined;
+            if (previous && previous.owner !== owner) throw new Error("Subscription belongs to another device");
+            if (revisionWaits.size >= 256 && !previous) throw new Error("Too many session subscriptions; retry later");
+            const wait = { owner, wake: previous?.wake ?? false, controller, expires: Date.now() + 25_000 };
+            if (typeof subscriptionId === "string") revisionWaits.set(subscriptionId, wait);
+            if (wait.wake) controller.abort();
+            const disconnected = () => controller.abort();
+            response.once("close", disconnected);
+            try {
+              result = await engine.store.waitForRevisions(cursors, controller.signal);
+              if (!engine.store.authenticated(token)) throw new Error("Device credential is invalid or revoked");
+            } finally {
+              response.removeListener("close", disconnected);
+              if (typeof subscriptionId === "string" && revisionWaits.get(subscriptionId) === wait) revisionWaits.delete(subscriptionId);
+            }
+            break;
+          }
+          case "sessions.wake": {
+            if (typeof params.subscriptionId !== "string" || !params.subscriptionId || params.subscriptionId.length > 128)
+              throw new Error("Invalid subscription ID");
+            const owner = createHash("sha256").update(token).digest("hex");
+            for (const [id, wait] of revisionWaits) if (wait.expires < Date.now()) revisionWaits.delete(id);
+            const wait = revisionWaits.get(params.subscriptionId);
+            if (wait && wait.owner !== owner) throw new Error("Subscription belongs to another device");
+            if (wait) { wait.wake = true; wait.controller?.abort(); }
+            else {
+              if (revisionWaits.size >= 256) throw new Error("Too many session subscriptions; retry later");
+              revisionWaits.set(params.subscriptionId, { owner, wake: true, expires: Date.now() + 25_000 });
+            }
+            result = { awake: true };
             break;
           }
           case "sessions.syncChunk":
@@ -389,6 +449,19 @@ export function createHostServer(
               Number(params.offset),
             );
             break;
+          case "sessions.blockDetail": {
+            if (typeof params.blockId !== "string" || params.blockId.length > 256 || !Number.isSafeInteger(params.revision) || Number(params.revision) < 0)
+              throw new Error("Invalid block detail request");
+            const id = String(params.sessionId ?? "");
+            result = transfers.respond(id, engine.store.blockDetail(id, params.blockId, Number(params.revision)));
+            break;
+          }
+          case "sessions.search": {
+            if (typeof params.query !== "string" || !params.query.trim() || params.query.length > 512)
+              throw new Error("Invalid transcript search");
+            result = engine.store.searchBlocks(String(params.sessionId ?? ""), params.query);
+            break;
+          }
           case "sessions.get": {
             const value = engine.store.session(String(params.sessionId ?? ""));
             result = value.revision === params.revision ? null : value;

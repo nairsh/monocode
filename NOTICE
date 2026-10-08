@@ -5,6 +5,9 @@ Provider marks that appear in the UI (including Claude, Codex, Cursor, GitHub, G
 
 The incremental highlighting strategy in src/features/files/editor/codeHighlightPlugin.ts
 is adapted from T3 Code, apps/web/src/lib/incrementalHighlighting.ts (d7d7f8f3e).
+The closed-fence Markdown block reuse in
+src/features/sessions/ui/incrementalMarkdownBlocks.ts adapts the safe boundary
+principle from T3 Code, apps/web/src/markdown-incremental.ts (a9dabbf10).
 
 MIT License
 

@@ -80,8 +80,18 @@ type PendingQuestion = {
 // Match Codex's non-blocking question policy: a minute of grace, then a
 // minute of countdown. Interaction keeps the question open for the user.
 const QUESTION_AUTO_RESOLVE_MS = 120_000;
+const IDLE_THREAD_RELEASE_MS = 60_000;
 
 type Live = {
+  idleTimer?: ReturnType<typeof setTimeout>;
+  idleGeneration: number;
+  idleReleaseUnsupported: boolean;
+  /** Unsubscribed; the server controls when its idle runtime is unloaded. */
+  unsubscribed: boolean;
+  resuming?: Promise<void>;
+  releasing?: Promise<void>;
+  retainedWork: Set<string>;
+  backgroundThreads: Set<string>;
   rpc: JsonRpcClient;
   threadId: string;
   cwd: string;
@@ -140,6 +150,73 @@ const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
 const cancelledThreads = new Set<string>();
 
+function cancelIdleRelease(live: Live): void {
+  live.idleGeneration += 1;
+  clearTimeout(live.idleTimer);
+  live.idleTimer = undefined;
+}
+
+function scheduleIdleRelease(sessionId: string, live: Live): void {
+  if (live.idleReleaseUnsupported || live.unsubscribed || liveByThread.get(sessionId) !== live) return;
+  clearTimeout(live.idleTimer);
+  const generation = live.idleGeneration;
+  live.idleTimer = setTimeout(() => {
+    live.idleTimer = undefined;
+    const releasing = live.turns.catch(() => undefined).then(async () => {
+      const eligible = () => liveByThread.get(sessionId) === live &&
+        live.idleGeneration === generation && !live.muteUpdates &&
+        !live.activeTurnId && !live.turnDone && !live.notificationQueue &&
+        live.approvals.size === 0 && live.questions.size === 0 && live.openAgentRows.size === 0 &&
+        live.retainedWork.size === 0;
+      if (!eligible()) {
+        if (liveByThread.get(sessionId) === live && live.idleGeneration === generation &&
+          !live.activeTurnId && !live.turnDone) scheduleIdleRelease(sessionId, live);
+        return;
+      }
+      try {
+        // Unknown/older servers fail closed: never release a thread without
+        // proving its background commands have finished.
+        for (const threadId of [live.threadId, ...live.backgroundThreads]) {
+          const page = await live.rpc.request<{ data?: unknown[]; nextCursor?: string | null }>(
+            "thread/backgroundTerminals/list", { threadId }, 10_000,
+          );
+          if (!Array.isArray(page.data) || (page.nextCursor != null && typeof page.nextCursor !== "string")) {
+            live.idleReleaseUnsupported = true;
+            return;
+          }
+          if (page.data.length > 0 || page.nextCursor != null) {
+            scheduleIdleRelease(sessionId, live);
+            return;
+          }
+          if (!eligible()) {
+            if (live.idleGeneration === generation) scheduleIdleRelease(sessionId, live);
+            return;
+          }
+        }
+        if (!eligible()) return;
+        const response = await live.rpc.request<{ status?: string }>("thread/unsubscribe", { threadId: live.threadId }, 10_000);
+        if (!["unsubscribed", "notLoaded", "notSubscribed"].includes(response.status ?? "")) {
+          live.idleReleaseUnsupported = true;
+          return;
+        }
+        live.unsubscribed = true;
+        live.emittedAssistantByItem.clear();
+        live.emittedReasoningByItem.clear();
+        live.pendingSubagent.clear();
+        live.subagentThreads.clear();
+        live.backgroundThreads.clear();
+      } catch {
+        live.idleReleaseUnsupported = true;
+      }
+    });
+    live.turns = releasing;
+    live.releasing = releasing;
+    void releasing.finally(() => {
+      if (live.releasing === releasing) live.releasing = undefined;
+    });
+  }, IDLE_THREAD_RELEASE_MS);
+}
+
 let resolveCodexBinaryImpl: () => Promise<{ path: string }> =
   resolveCodexBinary;
 
@@ -176,6 +253,7 @@ export async function sendCodexTurn(input: SendTurnInput): Promise<void> {
       }
     });
   await live.turns;
+  scheduleIdleRelease(input.sessionId, live);
 }
 
 export async function compactCodexContext(
@@ -204,6 +282,7 @@ export async function compactCodexContext(
       }
     });
   await live.turns;
+  scheduleIdleRelease(input.sessionId, live);
 }
 
 export async function rewindCodexLastTurn(
@@ -425,6 +504,7 @@ export async function stopCodexSession(sessionId: string): Promise<void> {
   const live = liveByThread.get(sessionId);
   liveByThread.delete(sessionId);
   if (live) {
+    cancelIdleRelease(live);
     live.muteUpdates = true;
     live.turnGeneration += 1;
     clearServerRequests(live);
@@ -469,7 +549,28 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     ) &&
     existing.controlsAgents === controlsAgents
   ) {
+    cancelIdleRelease(existing);
     existing.onEvent = input.onEvent;
+    await existing.releasing;
+    if (liveByThread.get(input.sessionId) !== existing) throw new Error("Harness process is not running");
+    if (existing.unsubscribed) {
+      existing.muteUpdates = true;
+      existing.resuming ??= existing.rpc.request("thread/resume", {
+        threadId: existing.threadId,
+        ...buildThreadStartParams({
+          cwd: input.cwd,
+          runtimeMode: input.runtimeMode,
+          controlsAgents: input.controlsAgents,
+          model: nativeModelId(input.model),
+          serviceTier: input.modelSettings?.serviceTier,
+        }),
+      }, 15_000).then(() => { existing.unsubscribed = false; });
+      try { await existing.resuming; } finally {
+        existing.resuming = undefined;
+        if (liveByThread.get(input.sessionId) === existing) existing.muteUpdates = false;
+      }
+    }
+    if (liveByThread.get(input.sessionId) !== existing) throw new Error("Harness process is not running");
     return existing;
   }
   if (existing) {
@@ -662,6 +763,11 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     void effort;
 
     const live: Live = {
+      idleGeneration: 0,
+      idleReleaseUnsupported: false,
+      unsubscribed: false,
+      retainedWork: new Set(),
+      backgroundThreads: new Set(),
       rpc,
       threadId,
       cwd: input.cwd,
@@ -828,6 +934,20 @@ function handleNotification(
     (method === "thread/started"
       ? stringField(asRecord(rec?.thread), "id")
       : undefined);
+  const workThread = threadId ?? live.threadId;
+  const workItem = asRecord(rec?.item);
+  const workItemId = stringField(workItem, "id");
+  const workItemType = stringField(workItem, "type");
+  if (method === "item/started" && workItemId &&
+    ["commandExecution", "mcpToolCall", "dynamicToolCall"].includes(workItemType ?? "")) {
+    live.retainedWork.add(`${workThread}:${workItemId}`);
+  }
+  if (method === "item/completed" && workItemId) live.retainedWork.delete(`${workThread}:${workItemId}`);
+  if (threadId && threadId !== live.threadId) {
+    live.backgroundThreads.add(threadId);
+    if (method === "turn/started") live.retainedWork.add(`${threadId}:turn`);
+    if (method === "turn/completed" || method === "turn/aborted") live.retainedWork.delete(`${threadId}:turn`);
+  }
   if (threadId && threadId !== live.threadId) {
     return handleSubagentNotification(live, threadId, method, params);
   }
@@ -1504,6 +1624,7 @@ function autoApproval(
 
 /** Exported for tests. */
 export function __codexTestReset(): void {
+  for (const live of liveByThread.values()) cancelIdleRelease(live);
   liveByThread.clear();
   resumeByThread.clear();
   cancelledThreads.clear();

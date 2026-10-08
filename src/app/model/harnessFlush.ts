@@ -22,6 +22,7 @@ export function scheduleHarnessFlush(
 /** Keep hidden streams on their own cadence even while a visible chat streams. */
 export class HarnessEventQueue {
   private queued = new Map<string, HarnessEvent[]>();
+  private queuedBytes = new Map<string, number>();
   private foregroundFlush: ScheduledFlush | null = null;
   private backgroundFlush: ScheduledFlush | null = null;
 
@@ -36,6 +37,16 @@ export class HarnessEventQueue {
     const events = this.queued.get(sessionId);
     if (events) events.push(event);
     else this.queued.set(sessionId, [event]);
+    const bytes = (this.queuedBytes.get(sessionId) ?? 0) +
+      ((event.type === "message.delta" || event.type === "reasoning.delta")
+        ? event.text.length * 2 : JSON.stringify(event).length * 2);
+    this.queuedBytes.set(sessionId, bytes);
+    // Bound bursts between scheduled frames without dropping or reordering
+    // events. A single oversized event is applied immediately and intact.
+    if ((this.queued.get(sessionId)?.length ?? 0) >= 1000 || bytes >= 1024 * 1024) {
+      this.flushMatching((id) => id === sessionId);
+      return;
+    }
     if (
       event.type === "approval.requested" ||
       event.type === "approval.resolved" ||
@@ -72,6 +83,7 @@ export class HarnessEventQueue {
       if (!matches(id)) continue;
       batches.set(id, events);
       this.queued.delete(id);
+      this.queuedBytes.delete(id);
     }
     this.schedulePending();
     if (batches.size > 0) this.apply(batches);

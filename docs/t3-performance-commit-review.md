@@ -2,6 +2,8 @@
 
 ## Coverage and evidence
 
+The initial assessments below are retained as review history. [The completion ledger](t3-performance-completion.md) now records the final implementation or concrete non-applicability of every one of the 52 entries and all architecture findings.
+
 This follow-up examines change history, complementing [the architecture review](t3-performance-review.md). MonoCode starts at `c49bac429ac9bdad72f2dd9317191e4dfc7cce3c`. T3 was fetched again and pinned to `300f7f9d45ff19c01bc987dbf1c3bc3e9a3a59ee`; its newest commit is an unrelated composer feature.
 
 The bounded history query was `git log <pinned-sha> --since=2026-09-07`: 1,351 commits, including **52 whose subjects begin with perf**. Every one of those 52 is inventoried below. Relevant desktop/shared/server production patches were examined alongside MonoCode code; mobile-only and delivery-only changes were triaged out. Additional performance-related fixes are discussed separately. This is not a claim to have audited every line of all 1,351 commits, or every performance change in T3's entire history. Commit dates below are Git committer dates. Titles containing multipliers or percentage savings are not adopted as measured MonoCode results.
@@ -165,10 +167,9 @@ Node/V8 compile caching is not a WebKit optimization, mobile audio initializatio
 
 ## Validation and remaining limits
 
-- 4,864 web tests passed, 13 skipped; 457 test files passed.
-- The highlighter suite passed 9 tests, including full-token equivalence and the parsing-work fixture.
-- The explorer/cache/index targeted run passed 41 tests.
-- TypeScript checking passed. Production packaging is recorded in the delivery notes.
+- Final web suite: 4,929 tests passed, 13 skipped; 466 files passed. Later browser corrections passed their targeted transcript/code and remote-detail/scroll suites; final TypeScript passed.
+- Host: 111 passed, five skipped. Rust: 591 passed, one ignored; formatting and all-target Clippy passed.
+- Production fork-mode app/DMG packaging and the numeric performance harness passed. Full implementation, browser evidence and limits are in the completion ledger and delivery notes.
 - No new dependencies, browser features, mobile features, telemetry collection or background T3 monitor were added.
 - The existing fork build and upstream merge-proposal workflows remain. The prior c49bac4 GitHub macOS build completed successfully during this review.
 - Whole-app frame times, input latency, idle energy and process-tree memory still need production traces. Source analysis and work-count fixtures cannot establish those outcomes.

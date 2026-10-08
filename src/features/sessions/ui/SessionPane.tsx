@@ -1,4 +1,5 @@
 import { GripVertical, X } from "../../../shared/ui/icons";
+import { useSessionDetail } from "../../../app/model/sessionPublication";
 import {
   memo,
   useCallback,
@@ -119,6 +120,14 @@ import type { HostSession } from "../../connections/model/protocol";
 
 export type SessionPaneProps = {
   session: Session;
+  remoteHistory?: {
+    hasEarlier: boolean;
+    loadEarlier: (beforePrepend: () => void) => Promise<void>;
+    loadAll: () => Promise<void>;
+    search: (query: string) => Promise<string[]>;
+    loadUntilBlock: (id: string) => Promise<boolean>;
+  };
+  onLoadBlockDetail?: (blockId: string) => Promise<Block>;
   workspaceSwitchingSessionId?: string;
   reviewUndoLocked?: boolean;
   visible: boolean;
@@ -264,6 +273,7 @@ type Props = SessionPaneProps & {
 };
 
 export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
+  const detail = useSessionDetail(props.session, props.visible) ?? props.session;
   // Sessions in a project on another machine render this same pane, backed by
   // the host instead of this computer's session runtime.
   if (isRemoteProjectPath(props.session.cwd))
@@ -278,7 +288,7 @@ export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
         render={(remote) => <LocalSessionPane {...props} {...remote} />}
       />
     );
-  return <LocalSessionPane {...props} />;
+  return <LocalSessionPane {...props} session={detail} />;
 });
 
 const LocalSessionPane = memo(function LocalSessionPane({
@@ -288,6 +298,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
   remoteSessionStarted = false,
   allowedModelHarnesses,
   session,
+  remoteHistory,
+  onLoadBlockDetail,
   workspaceSwitchingSessionId,
   reviewUndoLocked = false,
   visible,
@@ -526,15 +538,20 @@ const LocalSessionPane = memo(function LocalSessionPane({
   );
   const navigateBlock = useCallback(
     async (blockId: string | null, query?: string) => {
+      if (blockId && remoteHistory) {
+        if (!(await remoteHistory.loadUntilBlock(blockId))) return false;
+        if (onLoadBlockDetail) await onLoadBlockDetail(blockId);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
       if (navigateBlockRef.current?.(blockId, query)) return true;
       if (!blockId) return false;
-      if (!(await monoTranscript.reveal(blockId))) return false;
+      if (!(remoteHistory ? await remoteHistory.loadUntilBlock(blockId) : await monoTranscript.reveal(blockId))) return false;
       await new Promise<void>((resolve) =>
         requestAnimationFrame(() => resolve()),
       );
       return navigateBlockRef.current?.(blockId, query) ?? false;
     },
-    [monoTranscript.reveal],
+    [monoTranscript.reveal, remoteHistory, onLoadBlockDetail, session.blocks],
   );
   const jumpRequest = useSyncExternalStore(
     subscribeTranscriptJump,
@@ -915,11 +932,12 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     historicalBlockIds={monoTranscript.historicalBlockIds}
                     initialTurns={agent ? MONO_PAGE_TURNS : undefined}
                     pageSize={agent ? MONO_PAGE_TURNS : undefined}
-                    hasEarlier={monoTranscript.hasEarlier}
-                    loadEarlierOnScroll={!!agent}
+                    hasEarlier={remoteHistory?.hasEarlier ?? monoTranscript.hasEarlier}
+                    loadEarlierOnScroll={!!agent || !!remoteHistory}
                     onLoadEarlier={
-                      agent ? monoTranscript.loadEarlier : undefined
+                      remoteHistory?.loadEarlier ?? (agent ? monoTranscript.loadEarlier : undefined)
                     }
+                    onLoadBlockDetail={onLoadBlockDetail}
                     onReturnToLatest={
                       monoTranscript.viewingOlderPage
                         ? monoTranscript.latest
@@ -1063,7 +1081,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     visible={visible}
                     focused={focused}
                     onNavigate={navigateBlock}
-                    onSearch={monoTranscript.search}
+                    onSearch={remoteHistory?.search ?? monoTranscript.search}
                     side={
                       session.linkedWorkItemUpdateCard &&
                       session.linkedWorkItemUpdateCard.status !== "loading"

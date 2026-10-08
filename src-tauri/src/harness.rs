@@ -2597,12 +2597,42 @@ fn which_via_login_shell(name: &str) -> Option<PathBuf> {
 }
 
 fn which_in_path(path: &str, name: &str) -> Option<PathBuf> {
-    std::env::split_paths(std::ffi::OsStr::new(path)).find_map(|dir| {
+    // Only command names are cacheable. Explicit paths still take the normal
+    // validation path, and a miss must see a newly installed CLI immediately.
+    type ResolutionCache = HashMap<(String, String), (std::time::Instant, PathBuf)>;
+    static RESOLVED: OnceLock<Mutex<ResolutionCache>> = OnceLock::new();
+    let cache = RESOLVED.get_or_init(|| Mutex::new(HashMap::new()));
+    let cacheable = !name.contains('/')
+        && !name.contains('\\')
+        && std::env::split_paths(std::ffi::OsStr::new(path))
+            .all(|dir| dir.as_os_str().is_empty() || dir.is_absolute());
+    let key = (path.to_owned(), name.to_owned());
+    if cacheable {
+        if let Ok(mut entries) = cache.lock() {
+            entries.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(30));
+            if let Some((_, resolved)) = entries.get(&key) {
+                if is_executable_file(resolved) {
+                    return Some(resolved.clone());
+                }
+                entries.remove(&key);
+            }
+        }
+    }
+    let resolved = std::env::split_paths(std::ffi::OsStr::new(path)).find_map(|dir| {
         if dir.as_os_str().is_empty() {
             return None;
         }
         existing_binary(dir.join(name))
-    })
+    });
+    if cacheable {
+        if let (Some(resolved), Ok(mut entries)) = (resolved.as_ref(), cache.lock()) {
+            if entries.len() >= 128 {
+                entries.clear();
+            }
+            entries.insert(key, (std::time::Instant::now(), resolved.clone()));
+        }
+    }
+    resolved
 }
 
 fn first_binary(candidates: Vec<PathBuf>) -> Option<PathBuf> {
@@ -3504,8 +3534,14 @@ mod tests {
             unreadable.display(),
             real.display()
         );
-        assert_eq!(which_in_path(&path, "claude"), Some(target));
+        assert_eq!(which_in_path(&path, "claude"), Some(target.clone()));
         assert_eq!(which_in_path(&path, "codex"), None);
+        let installed = real.join("codex");
+        std::fs::write(&installed, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(which_in_path(&path, "codex"), Some(installed));
+        std::fs::remove_file(&target).unwrap();
+        assert_eq!(which_in_path(&path, "claude"), None);
         assert_eq!(which_in_path("", "claude"), None);
 
         let _ = std::fs::remove_dir_all(&dir);

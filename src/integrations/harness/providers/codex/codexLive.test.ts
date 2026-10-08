@@ -169,6 +169,87 @@ describe("codex live turn sequence", () => {
     __codexTestReset();
   });
 
+  it("unsubscribes a settled idle thread and resumes the same thread before another turn", async () => {
+    const { turn } = await startTurn("codex-live");
+    vi.useFakeTimers();
+    notify("turn/completed", { turn: { id: "turn_1", status: "completed" } });
+    await turn;
+    await vi.advanceTimersByTimeAsync(60_000);
+    const probe = parse().find((m) => m.method === "thread/backgroundTerminals/list")!;
+    expect(probe).toBeDefined();
+    reply(probe.id as number, { data: [], nextCursor: null });
+    await vi.advanceTimersByTimeAsync(0);
+    const unload = parse().find((m) => m.method === "thread/unsubscribe")!;
+    expect(unload.params).toEqual({ threadId: "thr_1" });
+    reply(unload.id as number, { status: "unsubscribed" });
+    await vi.advanceTimersByTimeAsync(0);
+    const next = sendCodexTurn({ sessionId: "codex-live", cwd: "/repo", model: "codex:gpt-5.4",
+      modelSettings: {}, runtimeMode: "supervised", text: "again", attachments: [], onEvent: () => {} });
+    await vi.advanceTimersByTimeAsync(0);
+    const resume = parse().find((m) => m.method === "thread/resume")!;
+    expect((resume.params as { threadId: string }).threadId).toBe("thr_1");
+    reply(resume.id as number, { thread: { id: "thr_1" } });
+    await vi.advanceTimersByTimeAsync(0);
+    const starts = parse().filter((m) => m.method === "turn/start");
+    expect(starts).toHaveLength(2);
+    reply(starts[1].id as number, { turn: { id: "turn_2" } });
+    notify("turn/completed", { turn: { id: "turn_2", status: "completed" } });
+    await next;
+    expect(parse().filter((m) => m.method === "thread/start")).toHaveLength(1);
+  });
+
+  it.each(["background", "unsupported", "stale", "malformed cursor", "empty cursor"])("retains idle threads safely for %s work", async (reason) => {
+    const { turn } = await startTurn("codex-live");
+    vi.useFakeTimers();
+    notify("turn/completed", { turn: { id: "turn_1", status: "completed" } });
+    await turn;
+    await vi.advanceTimersByTimeAsync(60_000);
+    const probe = parse().find((m) => m.method === "thread/backgroundTerminals/list")!;
+    let next: Promise<void> | undefined;
+    if (reason === "stale") {
+      next = sendCodexTurn({ sessionId: "codex-live", cwd: "/repo", model: "codex:gpt-5.4",
+        modelSettings: {}, runtimeMode: "supervised", text: "again", attachments: [], onEvent: () => {} });
+    }
+    reply(probe.id as number, reason === "unsupported" ? {} : {
+      data: reason === "background" ? [{ processId: "running-command" }] : [],
+      nextCursor: reason === "malformed cursor" ? false : reason === "empty cursor" ? "" : null,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(parse().some((m) => m.method === "thread/unsubscribe")).toBe(false);
+    if (next) {
+      const starts = parse().filter((m) => m.method === "turn/start");
+      reply(starts[1].id as number, { turn: { id: "turn_2" } });
+      notify("turn/completed", { turn: { id: "turn_2", status: "completed" } });
+      await next;
+    }
+  });
+
+  it("does not resume a stopped binding while an idle-release probe is pending", async () => {
+    const { turn } = await startTurn("codex-live");
+    vi.useFakeTimers();
+    notify("turn/completed", { turn: { id: "turn_1", status: "completed" } });
+    await turn;
+    await vi.advanceTimersByTimeAsync(60_000);
+    const next = sendCodexTurn({ sessionId: "codex-live", cwd: "/repo", model: "codex:gpt-5.4",
+      modelSettings: {}, runtimeMode: "supervised", text: "again", attachments: [], onEvent: () => {} });
+    const rejected = expect(next).rejects.toThrow("Harness process is not running");
+    await stopCodexSession("codex-live");
+    await rejected;
+    expect(parse().some((m) => m.method === "thread/resume")).toBe(false);
+    expect(parse().some((m) => m.method === "thread/unsubscribe")).toBe(false);
+  });
+
+  it("keeps native work retained even when the parent turn has completed", async () => {
+    const { turn } = await startTurn("codex-live");
+    vi.useFakeTimers();
+    notify("item/started", { threadId: "thr_1", item: { id: "background", type: "commandExecution", command: "sleep 120" } });
+    notify("turn/completed", { turn: { id: "turn_1", status: "completed" } });
+    await turn;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(parse().some((m) => m.method === "thread/unsubscribe")).toBe(false);
+    expect(parse().some((m) => m.method === "thread/backgroundTerminals/list")).toBe(false);
+  });
+
   it("reports when the provider accepts a turn", async () => {
     const onAccepted = vi.fn();
     const { turn } = await startTurn("codex-live", { onAccepted });
@@ -1666,7 +1747,8 @@ describe("codex live turn sequence", () => {
           turn: { id: "turn_1", status: "completed" },
         });
       await vi.advanceTimersByTimeAsync(0);
-      expect(vi.getTimerCount()).toBe(0);
+      // Optional question timer is gone; the provider has one idle-release timer.
+      expect(vi.getTimerCount()).toBe(action === "complete" ? 1 : 0);
       await vi.advanceTimersByTimeAsync(240_000);
       respondCodexQuestion("codex-live", question.requestId, {
         kind: "answered",

@@ -224,6 +224,7 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
     });
 
     let oscBuffer = "";
+    const oscDecoder = new TextDecoder();
 
     let unsubscribe = () => {};
     let didStart = false;
@@ -231,11 +232,11 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
       if (closed) return;
       unsubscribe = subscribePty(
         id,
-        (data) => {
+        (data, consumed) => {
           if (closed) return;
           const onMeta = onMetaChangeRef.current;
           if (onMeta) {
-            const text = new TextDecoder().decode(data);
+            const text = oscDecoder.decode(data, { stream: true });
             const scanned = scanOscCwd(text, oscBuffer);
             oscBuffer = scanned.rest;
             if (scanned.cwd) {
@@ -246,7 +247,7 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
               onMeta(patch);
             }
           }
-          term.write(data);
+          term.write(data, consumed);
         },
         (code) => {
           if (closed) return;
@@ -426,12 +427,19 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
           inFlight = false;
         });
     };
-    refresh();
-    const interval = setInterval(refresh, 1000);
-    document.addEventListener("visibilitychange", refresh);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const syncPolling = () => {
+      clearInterval(interval);
+      interval = undefined;
+      if (document.hidden) return;
+      refresh();
+      interval = setInterval(refresh, 1000);
+    };
+    syncPolling();
+    document.addEventListener("visibilitychange", syncPolling);
     return () => {
       clearInterval(interval);
-      document.removeEventListener("visibilitychange", refresh);
+      document.removeEventListener("visibilitychange", syncPolling);
     };
   }, [id, cwd, wantsMeta]);
 

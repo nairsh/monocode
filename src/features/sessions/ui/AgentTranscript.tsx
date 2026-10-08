@@ -76,6 +76,8 @@ import { legacyTaskListFromText } from "../model/taskList";
 import { resolveModel } from "../model/models";
 import { harnessForTurn } from "../model/secondOpinion";
 import { TranscriptTurnCache } from "../model/transcriptTurnCache";
+import { VirtualTranscriptTurn, useTurnState, preserveTranscriptAnchor, consumeVirtualAnchorAdjustment } from "./VirtualTranscriptTurn";
+import { RemoteToolDetail, RemoteToolDetailContext } from "./RemoteToolDetail";
 import { Shimmer } from "../../../shared/ui/Shimmer";
 import {
   hasPendingApproval,
@@ -180,6 +182,7 @@ const TURN_PAGE_SIZE = 20;
 
 type Props = {
   blocks: Block[];
+  onLoadBlockDetail?: (blockId: string) => Promise<Block>;
   /** Archived messages render immediately, even when first loaded in this visit. */
   historicalBlockIds?: ReadonlySet<string>;
   initialTurns?: number;
@@ -251,6 +254,7 @@ type Props = {
 };
 
 function AgentTranscriptComponent({
+  onLoadBlockDetail,
   blocks: sourceBlocks,
   historicalBlockIds,
   initialTurns = INITIAL_TURNS,
@@ -621,6 +625,32 @@ function AgentTranscriptComponent({
   );
   const firstVisibleTurn = Math.max(0, turns.length - visibleTurnCount);
   const visibleTurns = turns.slice(firstVisibleTurn);
+  const [revealedTurnId, setRevealedTurnId] = useState<string | null>(null);
+  const [selectingHistory, setSelectingHistory] = useState(false);
+  useEffect(() => {
+    if (!visible || turns.length <= 100 || !scrollerEl) return;
+    const selectAll = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "a" ||
+        target?.closest("input, textarea, [contenteditable]")) return;
+      preserveTranscriptAnchor(scrollerEl, () => setSelectingHistory(true));
+    };
+    document.addEventListener("keydown", selectAll);
+    return () => document.removeEventListener("keydown", selectAll);
+  }, [visible, turns.length, scrollerEl]);
+  useEffect(() => {
+    if (!selectingHistory) return;
+    const release = () => {
+      const selection = document.getSelection();
+      if (!selection || selection.isCollapsed) setSelectingHistory(false);
+    };
+    document.addEventListener("selectionchange", release);
+    document.addEventListener("pointerup", release);
+    return () => {
+      document.removeEventListener("selectionchange", release);
+      document.removeEventListener("pointerup", release);
+    };
+  }, [selectingHistory]);
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
   const visibleTurnCountRef = useRef(visibleTurnCount);
@@ -683,10 +713,10 @@ function AgentTranscriptComponent({
     if (el) {
       prependHeight.current = el.scrollHeight;
       prependAnchor.current = null;
-      if (bottomAligned) {
+      {
         const viewportTop = el.getBoundingClientRect().top;
         for (const turn of el.querySelectorAll<HTMLElement>(
-          ".transcript-turn",
+          ".transcript-turn:not([data-turn-placeholder])",
         )) {
           const rect = turn.getBoundingClientRect();
           if (rect.bottom <= viewportTop) continue;
@@ -771,6 +801,7 @@ function AgentTranscriptComponent({
         turn.some((block) => block.id === blockId),
       );
       if (index < 0) return false;
+      flushSync(() => setRevealedTurnId(all[index][0].id));
       const needed = all.length - index;
       if (needed <= visibleTurnCountRef.current) return true;
       prepareToPrepend();
@@ -886,8 +917,21 @@ function AgentTranscriptComponent({
   );
 
   return (
+    <RemoteToolDetailContext.Provider value={onLoadBlockDetail}>
     <div
       ref={setScroller}
+      onPointerDownCapture={(event) => {
+        if (turns.length <= 100 || event.button !== 0 || !event.shiftKey ||
+          (event.target as HTMLElement).closest("button, input, textarea, a")) return;
+        // An explicit Shift-click range includes the loaded eligible history.
+        // Ordinary drag selects/pins rows as its range crosses the viewport.
+        if (scrollerEl) preserveTranscriptAnchor(scrollerEl, () => setSelectingHistory(true),
+          (event.target as HTMLElement).closest("[data-transcript-turn]"));
+      }}
+      onKeyDownCapture={(event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a")
+          if (scrollerEl) preserveTranscriptAnchor(scrollerEl, () => setSelectingHistory(true));
+      }}
       className={`agent-transcript h-full overflow-y-auto overscroll-none [overflow-anchor:none] font-mono text-[13px] leading-5${bottomAligned ? " mono-transcript-fades scrollbar-none" : ""}`}
     >
       <TranscriptContent bottomAligned={bottomAligned}>
@@ -939,6 +983,12 @@ function AgentTranscriptComponent({
         ) : null}
         {visibleTurns.map((turn, turnIndex) => {
           const isLastTurn = firstVisibleTurn + turnIndex === turns.length - 1;
+          return <VirtualTranscriptTurn key={turn[0].id} id={turn[0].id}
+            root={scrollerEl} enabled={turns.length > 100 && !selectingHistory}
+            forceMounted={isLastTurn || turn[0].id === revealedTurnId}
+            className={`transcript-turn flex min-w-0 flex-col${isLastTurn ? " transcript-turn-live" : ""}${
+              promptAnchor && anchorTurn && isLastTurn && turn.some((block) => block.role === "user") ? " transcript-turn-anchor" : ""
+            }`} renderContent={() => {
           // A Mono's own follow-up replies join the turn they follow; each
           // run keeps its prompt, but the turn reads as one message.
           const runs = inlineWork ? monoTurnRuns(turn) : [turn];
@@ -1229,17 +1279,7 @@ function AgentTranscriptComponent({
             </TurnRow>
           );
           return (
-            <div
-              key={turn[0].id}
-              data-transcript-turn={turnId}
-              className={`transcript-turn flex min-w-0 flex-col${
-                isLastTurn ? " transcript-turn-live" : ""
-              }${
-                promptAnchor && anchorTurn && isLastTurn && userBlock
-                  ? " transcript-turn-anchor"
-                  : ""
-              }`}
-            >
+            <>
               {stampAt != null ? <DaySeparator at={stampAt} /> : null}
               {items
                 .flatMap((item, itemIndex) => {
@@ -1352,8 +1392,9 @@ function AgentTranscriptComponent({
                   }
                 />
               ) : null}
-            </div>
+            </>
           );
+          }} />;
         })}
       </TranscriptContent>
       {onAddToChat || onSaveSelectionNote ? (
@@ -1365,6 +1406,7 @@ function AgentTranscriptComponent({
         />
       ) : null}
     </div>
+    </RemoteToolDetailContext.Provider>
   );
 }
 
@@ -2119,7 +2161,7 @@ function UserMessageBlock({
   onSendDraft?: (block: Block) => boolean | void;
   onRemoveDraft?: (block: Block) => boolean | void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useTurnState(`user:${block.id}`, false);
   const [overflows, setOverflows] = useState(false);
   const [singleLine, setSingleLine] = useState(false);
   const textRef = useRef<HTMLElement>(null);
@@ -2683,6 +2725,7 @@ function useTurnScrollAnchor(
     const resize = new ResizeObserver((entries) => {
       // A parked transcript's scroller is detached and measures zero.
       if (!el.isConnected) return;
+      const alreadyAdjusted = consumeVirtualAnchorAdjustment(el);
       const viewportTop = el.getBoundingClientRect().top;
       let shift = 0;
       let precedingDelta = 0;
@@ -2703,7 +2746,7 @@ function useTurnScrollAnchor(
         if (top + previous <= viewportTop) shift += height - previous;
         precedingDelta += height - previous;
       }
-      if (shift) {
+      if (shift && !alreadyAdjusted) {
         el.scrollTop += shift;
         onAdjust(el);
       }
@@ -3063,7 +3106,7 @@ function ActivityPhaseGroup({
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
 }) {
-  const [override, setOverride] = useState<boolean | null>(null);
+  const [override, setOverride] = useTurnState<boolean | null>(`phase:${phase.steps[0]?.id}`, null);
   const waiting = phase.steps.some(needsApproval);
   const open = waiting || (override ?? active);
   const mounted = useCollapseMount(open);
@@ -3358,7 +3401,7 @@ function SubagentRow({
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
 }) {
-  const [override, setOverride] = useState<boolean | null>(null);
+  const [override, setOverride] = useTurnState<boolean | null>(`subagent:${block.id}`, null);
   const open = override ?? toolCallState(block) === "rejected";
   return (
     <SubagentPanel
@@ -3722,7 +3765,7 @@ function ActivityStatusRow({ block }: { block: Block }) {
  * you a note you wanted to read.
  */
 function ActivityInterjectionRow({ block }: { block: Block }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useTurnState(`interjection:${block.id}`, false);
   const meta = block.interjection;
   if (!meta) return null;
   const chrome = interjectionChrome(meta);
@@ -3796,7 +3839,7 @@ function ActivityThinkingRow({
   bare?: boolean;
   onOpenFile?: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useTurnState(`thinking:${block.id}`, false);
   const text = proseSummary(block.text) || "Thinking";
   // In a group the rail is the bullet, so there is nothing to breathe while
   // reasoning streams in — the line itself does.
@@ -3878,7 +3921,7 @@ function ActivityNoteRow({
   expandable?: boolean;
   onOpenFile?: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useTurnState(`note:${block.id}`, false);
   const text = proseSummary(block.text);
   const icon = bare ? null : (
     <Minus className="size-3.5 shrink-0 text-content/50" strokeWidth={1.75} />
@@ -3921,7 +3964,11 @@ function ActivityNoteRow({
   );
 }
 
-function ActivityToolRow({
+function ActivityToolRow(props: Parameters<typeof FullActivityToolRow>[0]) {
+  return <RemoteToolDetail block={props.block}><FullActivityToolRow {...props} /></RemoteToolDetail>;
+}
+
+function FullActivityToolRow({
   block,
   cwd,
   live = false,
@@ -3938,7 +3985,7 @@ function ActivityToolRow({
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
 }) {
-  const [errorOpen, setErrorOpen] = useState(false);
+  const [errorOpen, setErrorOpen] = useTurnState(`error:${block.id}`, false);
   const appCall = monoCodeToolCall(block);
   if (appCall) {
     return (
@@ -4032,7 +4079,7 @@ function MonoCodeCallRow({
   const state = toolCallState(block);
   const output =
     block.tool?.detail?.trim() || block.tool?.preview?.output?.trim();
-  const [errorOpen, setErrorOpen] = useState(false);
+  const [errorOpen, setErrorOpen] = useTurnState(`mono-error:${block.id}`, false);
   const hasError = state === "rejected" && !!output;
   const pendingApproval = needsApproval(block);
   const command = `monocode app ${call.action}`;
@@ -4203,7 +4250,7 @@ function ToolCall({
   onOpenDiff?: (path: string) => void;
   embedded?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useTurnState(`tool:${block.id}`, false);
   const preview = block.tool?.preview;
   const label = toolCallLabel(block, cwd);
   const detail = block.tool?.detail?.trim();
@@ -4573,7 +4620,7 @@ const INTERJECTION_BODY =
 /** A mid-turn interjection, e.g. OMP advisor notes: a labeled boundary with
  * a collapsible advisory body below it. */
 function InterjectionDivider({ block }: { block: Block }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useTurnState(`advice:${block.id}`, false);
   const [overflows, setOverflows] = useState(false);
   const textRef = useRef<HTMLPreElement>(null);
 

@@ -18,6 +18,7 @@ import { acceptQuickLaunch } from "./model/quickLaunchSession";
 import { useWorkspaceNavigation } from "./hooks/useWorkspaceNavigation";
 import { useIdleSessionDetach } from "./hooks/useIdleSessionDetach";
 import { HarnessEventQueue } from "./model/harnessFlush";
+import { useSessionPublication, SessionDetailContext, onlyLiveTextChanged } from "./model/sessionPublication";
 import {
   handleAgentApp,
   canAccessAgentAppProject,
@@ -1051,7 +1052,7 @@ function Workspace({
     const tab = newTab(session.id);
     return { session, tab };
   });
-  const [sessions, setSessions] = useState<Session[]>(
+  const { sessions, sessionsRef, sessionPublication, setSessions, publishDetails } = useSessionPublication(
     () => windowTransfer?.sessions ?? resumed?.sessions ?? [seed.session],
   );
   const [sessionDeleteDialog, setSessionDeleteDialog] = useState<{
@@ -1321,8 +1322,6 @@ function Workspace({
   /** Project whose listing failed, so the error cannot leak to another one. */
   const [historyErrorCwd, setHistoryErrorCwd] = useState<string | null>(null);
 
-  const sessionsRef = useRef(sessions);
-  sessionsRef.current = sessions;
   const linkedSessionUpdatesRef = useRef<
     ReadonlyMap<string, LinkedSessionUpdate>
   >(new Map());
@@ -1345,14 +1344,14 @@ function Workspace({
   useLayoutEffect(() => {
     const migration = detachMonoTabs(
       tabs,
-      sessions,
+      sessionsRef.current,
       activeTabId,
       projectCwd,
       (cwd) => newDefaultSession(cwd),
     );
     if (!migration) return;
     tabsRef.current = migration.tabs;
-    sessionsRef.current = [...sessions, ...migration.addedSessions];
+    sessionsRef.current = [...sessionsRef.current, ...migration.addedSessions];
     setTabs(migration.tabs);
     setSessions(sessionsRef.current);
     setActiveTabIdState(migration.activeTabId);
@@ -1584,9 +1583,14 @@ function Workspace({
             return events ? applyHarnessEvents(session, events) : session;
           });
           if (!next.some((session, index) => session !== prev[index])) return;
-          sessionsRef.current = next;
-          syncDockBadge(next);
-          setSessions(next);
+          const textOnly = next.every((session, index) => session === prev[index] ||
+            (onlyLiveTextChanged(prev[index], session) &&
+              latestTurnNeedsHarnessLogin(prev[index].blocks) === latestTurnNeedsHarnessLogin(session.blocks)));
+          if (textOnly) publishDetails(next);
+          else {
+            syncDockBadge(next);
+            setSessions(next);
+          }
         },
       ),
   );
@@ -2230,9 +2234,12 @@ function Workspace({
   }, []);
 
   useEffect(() => {
-    const liveIds = new Set(sessions.map((session) => session.id));
+    let timer: number | undefined;
+    const observe = () => {
+    const currentSessions = sessionsRef.current;
+    const liveIds = new Set(currentSessions.map((session) => session.id));
     const visibleIds = openSessionIds(tabsRef.current);
-    for (const session of sessions) {
+    for (const session of currentSessions) {
       if (
         removingSessionIds.current.has(session.id) ||
         switchingWorktrees.current.has(session.id)
@@ -2282,8 +2289,14 @@ function Workspace({
     }
     if (pendingPersist.current.size === 0) return;
 
-    const timer = window.setTimeout(() => {
-      const dirty = [...pendingPersist.current.values()];
+    if (timer != null) return;
+    timer = window.setTimeout(() => {
+      timer = undefined;
+      // A completion, rename or immediate save may have overtaken the queued
+      // checkpoint. Always persist the current session, never its old snapshot.
+      const dirty = [...pendingPersist.current.keys()].flatMap((id) =>
+        sessionsRef.current.find((session) => session.id === id) ?? [],
+      );
       pendingPersist.current.clear();
       void Promise.all(
         dirty.map(async (session) => {
@@ -2305,8 +2318,11 @@ function Workspace({
         }),
       );
     }, 650);
-    return () => window.clearTimeout(timer);
-  }, [persistSession, sessions]);
+    };
+    observe();
+    const stop = sessionPublication.subscribeAll(observe);
+    return () => { stop(); if (timer != null) window.clearTimeout(timer); };
+  }, [persistSession, sessionPublication]);
 
   useEffect(() => {
     const refs = inFlightRefs(sessions, tabs);
@@ -12210,6 +12226,8 @@ function Workspace({
         key={`${monoViewMono.id}:${selectedMonoActivity.turnId}`}
         agent={monoLook(monoViewMono)}
         blocks={selectedMonoActivity.blocks}
+        session={monoViewSession}
+        selection={monoActivity}
         live={selectedMonoActivity.live}
         cwd={sessionWorkCwd(monoViewSession)}
         onClose={() => setMonoActivity(null)}
@@ -12312,6 +12330,7 @@ function Workspace({
   );
 
   return (
+    <SessionDetailContext.Provider value={sessionPublication}>
     <OrchestrationActions.Provider value={orchestrationActions}>
       <OrchestrationWorkers.Provider value={orchestrationWorkers}>
         <div
@@ -12970,6 +12989,7 @@ function Workspace({
         <TranscriptPoolOutlet pool={transcriptPool} />
       </OrchestrationWorkers.Provider>
     </OrchestrationActions.Provider>
+    </SessionDetailContext.Provider>
   );
 }
 function conversationTitle(session: Session): string {

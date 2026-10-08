@@ -35,10 +35,10 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 ## Validation on 2026-10-08
 
 - Production TypeScript/Vite/Rust/Tauri build completed; ARM64 app signature and DMG integrity verified.
-- Web after the full T3 transfer batch: 458 test files passed, 4,892 tests passed, 13 skipped. TypeScript passed. Local Node 26 initially interfered with happy-dom storage; `NODE_OPTIONS=--no-experimental-webstorage` resolved the failures. The fork build uses that test setting as well.
+- Web after the complete reviewed T3 transfer: 466 test files passed, 4,929 tests passed, 13 skipped. Subsequent targeted browser corrections passed 22 transcript/code and 21 remote-detail/scroll tests; final TypeScript passed. Local Node 26 initially interfered with happy-dom storage; `NODE_OPTIONS=--no-experimental-webstorage` resolved the failures. The fork build uses that test setting as well.
 - The targeted sidebar, transcript cache and transcript pool suite passed all 43 tests. TypeScript checking passed. These cover unnecessary database/layout/grouping work as well as existing interactions.
-- Host: 100 tests passed, 5 skipped.
-- Rust: 586 tests passed, 1 ignored.
+- Host: 111 tests passed, 5 skipped, including the production host pretest build.
+- Rust: 591 tests passed, 1 ignored. Formatting and workspace/all-target Clippy with warnings denied passed.
 - Both new workflows passed actionlint 1.7.12 and the patch passed whitespace validation.
 - The upstream workflow's first dispatch exposed a reusable-workflow permission ceiling error; the corrected dispatch completed successfully and found upstream already included. No real new-upstream merge/conflict has occurred yet.
 - The final manual-download routing change passed all seven updater tests (including the new fork routing regression check) and was rebuilt in fork mode.
@@ -47,3 +47,5 @@ Local output: `target/release/bundle/dmg/` and `target/release/bundle/macos/Mono
 - Installed 0.9.0 at `/Applications/MonoCode.app` and visually verified project/chat restoration. Previous 0.7.0 moved to Trash. The old app ZIP and pre-launch application-data copy are in `~/Library/Application Support/MonoCode-fork-backups/2026-10-08/`.
 
 The performance fixes scope sidebar refreshes to successful saved changes, skip unchanged row-position measurements, reuse historical transcript groups during final-answer streaming, and bound parked transcript DOM. The follow-up transfer stabilizes sidebar summary arrays and dependent filtering/sorting, scopes and bounds explorer refresh workers/cache retention, and reuses completed code-line grammar state. Regression fixtures show zero additional query filters/order comparisons over 30 unrelated shell updates and 465 rather than 96,465 tokenizer characters over 30 growing-tail updates. Explorer tests cover cold pending-read invalidation, late success/failure races, deleted parents, root/remote boundaries and the four-worker bound. See the architecture and commit reviews for limits and remaining work. No comparative whole-app speed or energy improvement is claimed.
+
+The completed follow-up adds per-session detail publication, active-history content recycling, bounded remote transport/history/detail reads, changed-block host durability, guarded idle Codex subscription release, terminal flow control and Git/Inbox resource savings. `npm run test:performance` emits numeric JSON/Markdown reports; the release retains those artifacts alongside the DMG and source checksum. [The full completion ledger](t3-performance-completion.md) distinguishes every transferred mechanism, existing equivalent and non-applicable T3 feature. No remote host was deployed: format-1 host databases require a stopped whole-state-directory backup before upgrade and restoration before any older-host downgrade.

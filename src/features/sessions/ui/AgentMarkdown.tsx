@@ -28,6 +28,7 @@ import {
 import type { PluggableList } from "unified";
 import { ExplorerMenu, type ExplorerMenuItem } from "../../files/ui/ExplorerMenu";
 import { FileActionError } from "../../files/ui/FileActionError";
+import { createIncrementalMarkdownBlocks } from "./incrementalMarkdownBlocks";
 import { FileTypeIcon } from "../../files/ui/FileTypeIcon";
 import { boundedCode } from "../../files/editor/codeHighlightPlugin";
 import { createLazyMermaidPlugin } from "../../files/editor/mermaidPlugin";
@@ -491,8 +492,13 @@ const MARKDOWN_COMPONENTS = {
  * but put it on a real block box; index.css zeroes its margins so spacing still
  * comes from the block inside it.
  */
+const MarkdownFadeContext = createContext(false);
 function DirectionalBlock({ dir, ...props }: BlockProps) {
-  const block = <Block {...props} />;
+  const fading = useContext(MarkdownFadeContext);
+  const code = /^ {0,3}(`{3,}|~{3,})/.test(props.content);
+  // Reparse prose when its fade transform changes. Code never receives that
+  // transform, so its mounted DOM/selection can survive stream completion.
+  const block = <Block key={code ? "code" : fading ? "fade" : "plain"} {...props} />;
   return dir ? (
     <div dir={dir} className="agent-markdown-block">
       {block}
@@ -524,6 +530,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   hardBreaks?: boolean;
 }) {
   const [fileMenu, setFileMenu] = useState<FileLinkMenu | null>(null);
+  const [parseBlocks] = useState(() => createIncrementalMarkdownBlocks());
   const [fileActionError, setFileActionError] = useState<string | null>(null);
   const onFileContextMenu = useCallback(
     (event: ReactMouseEvent, path: string, navigation?: EditorNavigation) => {
@@ -607,10 +614,9 @@ export const AgentMarkdown = memo(function AgentMarkdown({
     <RemoteMediaContext.Provider value={remoteMedia}>
       <FileOpenContext.Provider value={fileOpen}>
         <>
+          <MarkdownFadeContext.Provider value={fading}>
           <Streamdown
-            // Streamdown keeps a parsed tree while the text is unchanged, so
-            // the plugin swap has to remount it once the fade is over.
-            key={fading ? "fade" : "plain"}
+            parseMarkdownIntoBlocksFn={parseBlocks}
             BlockComponent={DirectionalBlock}
             className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${fading ? "word-fading" : ""} ${className ?? ""}`}
             components={MARKDOWN_COMPONENTS}
@@ -623,6 +629,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
           >
             {paced.text}
           </Streamdown>
+          </MarkdownFadeContext.Provider>
           {fileMenu ? (
             <ExplorerMenu
               x={fileMenu.x}

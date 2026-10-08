@@ -148,6 +148,10 @@ it("skips hidden ticks and refreshes when the document becomes visible again", a
   await render(base);
   await flush();
   setHidden(true);
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(vi.getTimerCount()).toBe(0);
   await advance(90_000);
   expect(fetchGithubPrChecks).toHaveBeenCalledTimes(1);
   setHidden(false);

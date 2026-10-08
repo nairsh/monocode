@@ -13,6 +13,7 @@ import type {
 import { uploadRemoteAttachments } from "../model/remoteAttachments";
 import { temporaryWorktreeBranchName } from "../../source-control/model/worktrees";
 import type { AgentModel } from "../../sessions/model/models";
+import { estimateSessionCacheBytes, SESSION_LOAD_CACHE_MAX_BYTES } from "../../sessions/data/sessionCache";
 import {
   ModelSourceContext,
   type ModelSource,
@@ -24,6 +25,7 @@ import { registerRemoteSessionActions } from "../model/remoteSessionActions";
 import {
   clearPendingRemoteCommand,
   loadRemoteSession,
+  loadRemoteBlockDetail,
   OPEN_CONNECTIONS_EVENT,
   pendingRemoteCommand,
   pendingRemoteFollowup,
@@ -36,6 +38,7 @@ import {
   remoteSessionFor,
   savePendingRemoteCommand,
   useRemoteMachines,
+  waitForRemoteSession,
 } from "../model/connections";
 import { parseRemotePath, remotePath, remoteProjectFor, type RemoteProject } from "../model/remoteProjects";
 import {
@@ -96,9 +99,14 @@ const catalogKey = (machineId: string, projectId: string) =>
   JSON.stringify([machineId, projectId]);
 function rememberSessionSnapshot(key: string, snapshot: HostSession) {
   cachedSessionSnapshots.delete(key);
+  if (estimateSessionCacheBytes(snapshot.session) > SESSION_LOAD_CACHE_MAX_BYTES) return;
   cachedSessionSnapshots.set(key, snapshot);
-  if (cachedSessionSnapshots.size > 8)
-    cachedSessionSnapshots.delete(cachedSessionSnapshots.keys().next().value!);
+  let bytes = [...cachedSessionSnapshots.values()].reduce((total, value) => total + estimateSessionCacheBytes(value.session), 0);
+  while (cachedSessionSnapshots.size > 8 || bytes > SESSION_LOAD_CACHE_MAX_BYTES) {
+    const oldest = cachedSessionSnapshots.keys().next().value!;
+    bytes -= estimateSessionCacheBytes(cachedSessionSnapshots.get(oldest)!.session);
+    cachedSessionSnapshots.delete(oldest);
+  }
 }
 
 /** Fetches a host conversation into the snapshot cache, so its tab opens with
@@ -109,7 +117,13 @@ export async function preloadRemoteSession(
 ): Promise<void> {
   const key = snapshotKey(machineId, sessionId);
   if (cachedSessionSnapshots.has(key)) return;
-  rememberSessionSnapshot(key, await loadRemoteSession(machineId, sessionId));
+  let descriptor = cachedDescriptors.get(machineId);
+  if (!descriptor) {
+    descriptor = requireHostDescriptor(await remoteRequest<HostDescriptor>(machineId, "environment.describe", { supportedProviders: REMOTE_PROVIDERS }));
+    cachedDescriptors.set(machineId, descriptor);
+  }
+  rememberSessionSnapshot(key, await loadRemoteSession(machineId, sessionId, undefined, undefined,
+    descriptor.capabilities.includes("sessions.projectedSync") ? { projected: true } : undefined));
 }
 
 /** A tab in a project on another machine. The host owns the session; this
@@ -205,12 +219,14 @@ function ConnectedRemoteSession({
   const [sessionId, setSessionId] = useState(() => remoteSessionFor(shell.id));
   const boundSession = useRef(sessionId);
   const bindingVersion = useRef(0);
+  const loadedDetails = useRef(new Map<string, { revision: number; block: Block }>());
   const deletingSession = useRef<string | undefined>(undefined);
   useEffect(() => {
     const changed = () => {
       const next = remoteSessionFor(shell.id);
       if (next !== boundSession.current) {
         bindingVersion.current++;
+        loadedDetails.current.clear();
         boundSession.current = next;
         setStarting(undefined);
         setUnseenSend(undefined);
@@ -354,6 +370,9 @@ function ConnectedRemoteSession({
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     let failed = 0;
+    const waiting = new AbortController();
+    let supportsWait = !!cachedDescriptors.get(machine.id)?.capabilities.includes("sessions.wait");
+    let projected = !!cachedDescriptors.get(machine.id)?.capabilities.includes("sessions.projectedSync");
     const version = bindingVersion.current;
     const stale = () => disposed || version !== bindingVersion.current ||
       (!!sessionId && deletingSession.current === sessionId);
@@ -379,15 +398,23 @@ function ConnectedRemoteSession({
           cachedDescriptors.set(machine.id, host);
           setDescriptor(host);
           described = true;
+          supportsWait = host.capabilities.includes("sessions.wait");
+          projected = host.capabilities.includes("sessions.projectedSync");
         }
         const known =
           snapshotRef.current?.session.id === sessionId
             ? snapshotRef.current
             : undefined;
-        const next = sessionId
-          ? await loadRemoteSession(machine.id, sessionId, known)
+        let next = sessionId
+          ? await loadRemoteSession(machine.id, sessionId, known, waiting.signal, projected ? { projected: true } : undefined)
           : undefined;
         if (stale()) return;
+        if (next && snapshotRef.current?.session.id === next.session.id &&
+          snapshotRef.current.session.blocks[0]?.id !== known?.session.blocks[0]?.id) {
+          timer = setTimeout(() => void poll(), 0);
+          return;
+        }
+        if (next) next = restoreLoadedDetails(next);
         if (next && next.projectId !== project.projectId)
           throw new Error("This session belongs to a different host project");
         setOnline(true);
@@ -400,6 +427,10 @@ function ConnectedRemoteSession({
         setSnapshot(next);
         if (next) onSnapshot?.(shell.id, next);
         active = !!next?.session.busy;
+        if (next && sessionId && supportsWait) {
+          await waitForRemoteSession(machine.id, sessionId, next.revision, waiting.signal);
+          if (stale()) return;
+        }
       } catch (reason) {
         if (stale()) return;
         setOnline(false);
@@ -412,6 +443,8 @@ function ConnectedRemoteSession({
           () => void poll(),
           failed
             ? Math.min(10_000, 750 * 2 ** Math.min(failed, 4))
+            : supportsWait && sessionId
+              ? 0
             : active
               ? 750
               : visible
@@ -422,6 +455,7 @@ function ConnectedRemoteSession({
     void poll();
     return () => {
       disposed = true;
+      waiting.abort();
       clearTimeout(timer);
     };
   }, [
@@ -1175,7 +1209,75 @@ function ConnectedRemoteSession({
     return remotePath(machine.environmentId, absolute);
   };
 
+  function restoreLoadedDetails(value: HostSession): HostSession {
+    let changed = false;
+    const ids = new Set(value.session.blocks.map((block) => block.id));
+    for (const id of loadedDetails.current.keys()) if (!ids.has(id)) loadedDetails.current.delete(id);
+    const blocks = value.session.blocks.map((block) => {
+      const detail = loadedDetails.current.get(block.id);
+      if (!block.remoteDetail) return block;
+      if (detail?.revision !== block.remoteDetail.revision) {
+        loadedDetails.current.delete(block.id);
+        return block;
+      }
+      changed = true;
+      return detail.block;
+    });
+    return changed ? { ...value, session: { ...value.session, blocks } } : value;
+  }
+
+  async function expandHistory(options: { earlier?: boolean; all?: boolean; untilBlockId?: string }, beforePrepend: () => void = () => {}) {
+    const known = snapshotRef.current;
+    if (!known || !sessionId) return;
+    const version = bindingVersion.current;
+    const next = restoreLoadedDetails(await loadRemoteSession(machine.id, sessionId, known, undefined, { projected: true, ...options }));
+    if (!alive.current || version !== bindingVersion.current || deletingSession.current === sessionId) return;
+    // A concurrent revision/page change must never be replaced by this older response.
+    if (snapshotRef.current !== known) throw new Error("Conversation changed while loading history; retry");
+    beforePrepend();
+    snapshotRef.current = next;
+    rememberSessionSnapshot(snapshotKey(machine.id, sessionId), next);
+    setSnapshot(next);
+    onSnapshot?.(shell.id, next);
+    setRefresh((value) => value + 1);
+  }
+
+  async function loadBlockDetail(blockId: string): Promise<Block> {
+    const known = snapshotRef.current;
+    const block = known?.session.blocks.find((block) => block.id === blockId);
+    if (!known || !block || !sessionId) throw new Error("Tool output no longer exists");
+    if (!block.remoteDetail) return block;
+    const version = bindingVersion.current;
+    const detail = await loadRemoteBlockDetail(machine.id, sessionId, blockId, block.remoteDetail.revision);
+    const current = snapshotRef.current;
+    const loaded = loadedDetails.current.get(blockId);
+    if (alive.current && version === bindingVersion.current && current?.session.id === known.session.id &&
+      loaded?.revision === block.remoteDetail.revision && current.session.blocks.some((candidate) => candidate === loaded.block)) return loaded.block;
+    if (!alive.current || version !== bindingVersion.current || current?.session.id !== known.session.id ||
+      current.session.blocks.find((candidate) => candidate.id === blockId)?.remoteDetail?.revision !== block.remoteDetail.revision)
+      throw new Error("Tool output changed while loading; retry");
+    loadedDetails.current.set(blockId, { revision: block.remoteDetail.revision, block: detail });
+    const next = restoreLoadedDetails(current);
+    snapshotRef.current = next;
+    rememberSessionSnapshot(snapshotKey(machine.id, sessionId), next);
+    setSnapshot(next);
+    onSnapshot?.(shell.id, next);
+    return detail;
+  }
+
   const overrides: RemoteSessionOverrides = {
+    remoteHistory: descriptor?.capabilities.includes("sessions.projectedSync") && hostSession ? {
+      hasEarlier: !!snapshot?.historyBefore,
+      loadEarlier: (beforePrepend) => expandHistory({ earlier: true }, beforePrepend),
+      loadAll: () => expandHistory({ all: true }),
+      search: (query) => remoteRequest<string[]>(machine.id, "sessions.search", { sessionId, query }),
+      loadUntilBlock: async (id) => {
+        if (!snapshotRef.current?.session.blocks.some((block) => block.id === id))
+          await expandHistory({ untilBlockId: id });
+        return !!snapshotRef.current?.session.blocks.some((block) => block.id === id);
+      },
+    } : undefined,
+    onLoadBlockDetail: loadBlockDetail,
     session,
     remoteSession: true,
     remoteFeatures: {

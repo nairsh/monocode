@@ -57,6 +57,8 @@ export type HostSession = {
   autoWorktreeBranch?: string;
   /** Host-only: the revision at which each block last changed. */
   blockRevisions?: Record<string, number>;
+  /** Desktop projection: earliest loaded block when older history remains. */
+  historyBefore?: string | null;
 };
 export type HostSessionSummary = Omit<
   HostSession,

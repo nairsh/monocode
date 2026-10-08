@@ -201,3 +201,30 @@ it("uses the terminal-specific font stack", async () => {
     document.documentElement.style.removeProperty("--font-terminal");
   }
 });
+
+it("stops title polling while the window is hidden and resumes on visibility", async () => {
+  const { host, root } = setup();
+  vi.useFakeTimers();
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  try {
+    await act(async () => {
+      root.render(createElement(TerminalView, { id: "poll", cwd: "/tmp", active: true, onMetaChange: () => {} }));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(pty.getPtyStatus).toHaveBeenCalledTimes(3);
+    hidden.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    const pending = vi.getTimerCount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(pty.getPtyStatus).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(pending);
+    hidden.mockReturnValue(false);
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(pty.getPtyStatus).toHaveBeenCalledTimes(4);
+  } finally {
+    await act(async () => { root.unmount(); });
+    host.remove();
+    hidden.mockRestore();
+    vi.useRealTimers();
+  }
+});

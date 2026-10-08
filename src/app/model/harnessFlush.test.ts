@@ -48,6 +48,22 @@ it("does not depend on animation frames while the window is hidden", () => {
   expect(flush).toHaveBeenCalledTimes(1);
 });
 
+it("flushes bounded event/byte bursts intact before their scheduled frame", () => {
+  const { queue, apply } = controlledQueue(new Set(["front"]));
+  for (let index = 0; index < 1000; index++) queue.enqueue("front", { type: "message.delta", text: String(index) });
+  expect(apply).toHaveBeenCalledOnce();
+  expect(apply.mock.calls[0][0].get("front")?.map((event) => event.type === "message.delta" ? event.text : "")).toEqual(
+    Array.from({ length: 1000 }, (_, index) => String(index)),
+  );
+  apply.mockClear();
+  const output = "🦊".repeat(300_000);
+  queue.enqueue("front", { type: "message.delta", text: output });
+  expect(apply).toHaveBeenCalledOnce();
+  expect(apply.mock.calls[0][0].get("front")).toEqual([{ type: "message.delta", text: output }]);
+  queue.flush();
+  expect(apply).toHaveBeenCalledOnce();
+});
+
 function controlledQueue(foreground: Set<string>) {
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;

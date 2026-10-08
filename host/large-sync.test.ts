@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -8,7 +8,7 @@ import { HostStore } from "./store";
 import { createHostServer } from "./server";
 import type { SendTurnInput } from "../src/integrations/harness/core/types";
 import type { HostSession } from "../src/features/connections/model/protocol";
-import { loadRemoteSession } from "../src/features/connections/model/connections";
+import { loadRemoteSession, loadRemoteBlockDetail } from "../src/features/connections/model/connections";
 
 // The desktop's native client (src-tauri/src/remote.rs) rejects responses over
 // 16 MiB. This routes the real renderer sync code through the real host server
@@ -125,6 +125,31 @@ const text = (size: number, seed: string) =>
   `${seed} "quoted" \\path\\ \u0001 naïve 🚀\n`
     .repeat(Math.ceil(size / 40))
     .slice(0, size);
+
+it("projects old large tools and retrieves their exact full output through bounded authenticated chunks", async () => {
+  const s = await setup();
+  const current = s.store.session(s.sessionId);
+  const tool = { id: "completed-huge", role: "tool" as const, text: text(17_000_000, "needle"), tool: { title: "Shell", status: "completed" } };
+  s.store.save({ ...current, revision: current.revision + 1, session: { ...current.session, blocks: [tool] } }, { type: "fixture" });
+  const projected = await loadRemoteSession("machine", s.sessionId, undefined, undefined, { projected: true });
+  expect(projected.session.blocks[0].remoteDetail).toMatchObject({ revision: current.revision + 1 });
+  expect(desktop.methods).toEqual(["sessions.sync"]);
+  expect(desktop.largest).toBeLessThan(16 * 1024);
+  const outputDirectory = process.env.MONOCODE_PERF_OUTPUT_DIR;
+  if (outputDirectory) {
+    mkdirSync(outputDirectory, { recursive: true });
+    writeFileSync(join(outputDirectory, "perf-host-projection.json"), JSON.stringify({
+      initialProjectionBytes: desktop.largest,
+      fullSnapshotBytes: Buffer.byteLength(JSON.stringify(visible(s.store.session(s.sessionId)))),
+      fullToolBytes: Buffer.byteLength(JSON.stringify(tool)),
+    }, null, 2) + "\n");
+  }
+  const full = await loadRemoteBlockDetail("machine", s.sessionId, tool.id, current.revision + 1);
+  expect(full).toEqual(tool);
+  expect(desktop.methods).toContain("sessions.blockDetail");
+  expect(desktop.methods).toContain("sessions.syncChunk");
+  expect(desktop.largest).toBeLessThanOrEqual(DESKTOP_LIMIT);
+}, LARGE);
 
 it(
   "reopens and updates a session whose transcript exceeds 16 MiB",

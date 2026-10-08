@@ -55,6 +55,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo check
       - run: cargo test
+        env:
+          MONOCODE_PERF_OUTPUT_DIR: ${{ runner.temp }}/monocode-native-performance
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: monocode-native-performance-${{ matrix.os }}
+          path: ${{ runner.temp }}/monocode-native-performance/
+          if-no-files-found: ignore
+          retention-days: 30
 
   rpm:
     name: RPM build (${{ matrix.image }})

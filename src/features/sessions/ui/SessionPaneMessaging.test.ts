@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionPane, type SessionPaneProps } from "./SessionPane";
 import { clearComposerDraft, setComposerDraft } from "../model/draftCache";
+import { SessionPublication, SessionDetailContext } from "../../../app/model/sessionPublication";
 
 const probes = vi.hoisted(() => ({
   pick: vi.fn(),
@@ -88,6 +89,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 const noop = () => {};
+it("uses current subscribed detail and catches up after a hidden-pane revisit", () => {
+  const pane = props();
+  pane.session = { ...pane.session, blocks: [...pane.session.blocks,
+    { id: "answer", role: "assistant", text: "first" }] };
+  const store = new SessionPublication([pane.session]);
+  const render = () => root.render(createElement(SessionDetailContext.Provider,
+    { value: store }, createElement(SessionPane, pane)));
+  act(render);
+  const latestBlocks = () => probes.transcript.mock.calls[probes.transcript.mock.calls.length - 1][0].blocks;
+  const next = { ...pane.session, blocks: [pane.session.blocks[0],
+    { ...pane.session.blocks[1], text: "current streamed answer" }] };
+  act(() => store.replace([next]));
+  expect(latestBlocks()[1].text).toBe("current streamed answer");
+  pane.visible = false;
+  act(render);
+  const hiddenCalls = probes.transcript.mock.calls.length;
+  const hidden = { ...next, title: "renamed", blocks: [next.blocks[0],
+    { ...next.blocks[1], text: "output while hidden" }] };
+  act(() => store.replace([hidden]));
+  expect(probes.transcript.mock.calls).toHaveLength(hiddenCalls);
+  pane.visible = true;
+  pane.session = { ...pane.session, title: "renamed" };
+  act(render);
+  expect(latestBlocks()[1].text).toBe("output while hidden");
+});
+
 function props(): SessionPaneProps {
   return {
     session: {

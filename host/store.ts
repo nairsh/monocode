@@ -11,8 +11,17 @@ import type {
 } from "../src/features/connections/model/protocol";
 import type { LinkedWorkItem } from "../src/features/sessions/model/session";
 import { sessionNeedsInput } from "../src/features/sessions/model/session";
+import { projectHostBlock } from "./session-projection";
+import type { Block } from "../src/features/sessions/model/session";
 
 const CACHED_SESSIONS = 32;
+const CACHE_BYTES = 32 * 1024 * 1024;
+const REPLAY_ITEMS = 1_000;
+const REPLAY_BYTES = 8 * 1024 * 1024;
+// Version 0 contains legacy inline snapshots. Version 1 permits normalized
+// block rows and requires a host that can reconstruct them. Restoring a
+// pre-upgrade backup is the supported path to an older host binary.
+const STORE_FORMAT_VERSION = 1;
 
 export class HostStore {
   readonly db: DatabaseSync;
@@ -22,21 +31,43 @@ export class HostStore {
   // served from memory instead of re-parsing whole transcripts. Callers must
   // treat returned values as immutable.
   private cache = new Map<string, HostSession>();
+  private cacheSizes = new Map<string, number>();
+  private blockSizes = new WeakMap<object, number>();
+  private changes = new Set<string>();
+  private listeners = new Set<() => void>();
+  private inTransaction = false;
 
   constructor(path: string) {
     this.attachmentDir = join(dirname(path), "attachments");
     this.db = new DatabaseSync(path);
+    const format = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
+    if (format > STORE_FORMAT_VERSION) {
+      this.db.close();
+      throw new Error(`Host database format ${format} is newer than this host supports (${STORE_FORMAT_VERSION}). Use a newer host or restore a compatible backup.`);
+    }
     this.db
       .exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, name TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), snapshot TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_blocks (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, id TEXT NOT NULL, payload TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id, id));
       CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, signature TEXT NOT NULL, receipt TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (session_id TEXT NOT NULL REFERENCES sessions(id), revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(session_id, revision));
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE);`);
     const columns = this.db.prepare("PRAGMA table_info(sessions)").all();
     if (!columns.some((column) => column.name === "summary"))
       this.db.exec("ALTER TABLE sessions ADD COLUMN summary TEXT");
+    const blockColumns = this.db.prepare("PRAGMA table_info(session_blocks)").all();
+    if (!blockColumns.some((column) => column.name === "position")) {
+      this.db.exec("ALTER TABLE session_blocks ADD COLUMN position INTEGER NOT NULL DEFAULT 0; ALTER TABLE session_blocks ADD COLUMN role TEXT NOT NULL DEFAULT ''");
+      for (const row of this.db.prepare("SELECT id, snapshot FROM sessions").all()) {
+        const snapshot = JSON.parse(String(row.snapshot)) as { storedBlockIds?: string[] };
+        for (const [position, id] of (snapshot.storedBlockIds ?? []).entries())
+          this.db.prepare("UPDATE session_blocks SET position=?, role=json_extract(payload, '$.role') WHERE session_id=? AND id=?").run(position, row.id, id);
+      }
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS session_block_history ON session_blocks(session_id, role, position)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS session_block_order ON session_blocks(session_id, position)");
     this.db
       .prepare("INSERT OR IGNORE INTO metadata VALUES ('environmentId', ?)")
       .run(randomUUID());
@@ -49,25 +80,66 @@ export class HostStore {
 
   transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
+    this.inTransaction = true;
+    let value: T;
     try {
-      const value = fn();
+      value = fn();
       this.db.exec("COMMIT");
-      return value;
     } catch (error) {
       this.cache.clear();
+      this.cacheSizes.clear();
+      this.changes.clear();
       try {
         this.db.exec("ROLLBACK");
       } catch (rollbackError) {
         console.error("Could not roll back host transaction:", rollbackError);
       }
       throw error;
+    } finally {
+      this.inTransaction = false;
     }
+    if (this.changes.size) {
+      this.changes.clear();
+      for (const listener of this.listeners) listener();
+    }
+    return value;
   }
 
   project(id: string): HostProject {
     const row = this.db.prepare("SELECT * FROM projects WHERE id=?").get(id);
     if (!row) throw new Error("Project is not registered on this machine");
     return row as unknown as HostProject;
+  }
+
+  /** One bounded revision wait per machine; no transcript/event queues. */
+  waitForRevisions(cursors: { sessionId: string; revision: number }[], signal?: AbortSignal): Promise<Record<string, number | null>> {
+    if (this.listeners.size >= 128) throw new Error("Too many session subscriptions; retry later");
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (changed: Record<string, number | null>) => {
+        clearTimeout(timer);
+        this.listeners.delete(check);
+        signal?.removeEventListener("abort", abort);
+        resolve(changed);
+      };
+      const abort = () => finish({});
+      const check = () => {
+        const changed: Record<string, number | null> = {};
+        for (const cursor of cursors) {
+          const row = this.db.prepare("SELECT json_extract(snapshot, '$.revision') AS revision FROM sessions WHERE id=?").get(cursor.sessionId);
+          const revision = row ? Number(row.revision) : null;
+          if (revision !== cursor.revision) changed[cursor.sessionId] = revision;
+        }
+        if (Object.keys(changed).length) finish(changed);
+      };
+      // Register before reading revisions to avoid a replay/live gap.
+      this.listeners.add(check);
+      signal?.addEventListener("abort", abort, { once: true });
+      timer = setTimeout(abort, 20_000);
+      timer.unref?.();
+      if (signal?.aborted) abort();
+      else check();
+    });
   }
 
   projects(): HostProject[] {
@@ -86,21 +158,57 @@ export class HostStore {
   }
 
   private remember(value: HostSession): HostSession {
+    let size = 0;
+    for (const block of value.session.blocks) {
+      let bytes = this.blockSizes.get(block);
+      if (bytes === undefined) {
+        bytes = Buffer.byteLength(JSON.stringify(block));
+        this.blockSizes.set(block, bytes);
+      }
+      size += bytes;
+    }
     this.cache.delete(value.session.id);
-    this.cache.set(value.session.id, value);
-    if (this.cache.size > CACHED_SESSIONS)
-      this.cache.delete(this.cache.keys().next().value!);
+    this.cacheSizes.delete(value.session.id);
+    if (size <= CACHE_BYTES) {
+      this.cache.set(value.session.id, value);
+      this.cacheSizes.set(value.session.id, size);
+    }
+    let total = [...this.cacheSizes.values()].reduce((a, b) => a + b, 0);
+    while (this.cache.size > CACHED_SESSIONS || total > CACHE_BYTES) {
+      const id = this.cache.keys().next().value!;
+      total -= this.cacheSizes.get(id) ?? 0;
+      this.cache.delete(id);
+      this.cacheSizes.delete(id);
+    }
     return value;
+  }
+
+  private decode(snapshot: string): HostSession {
+    const stored = JSON.parse(snapshot) as HostSession & { storedBlockIds?: string[] };
+    if (!stored.storedBlockIds) return stored;
+    const { storedBlockIds, ...value } = stored;
+    const blocks = new Map(this.db.prepare(
+      "SELECT id, payload FROM session_blocks WHERE session_id=?",
+    ).all(value.session.id).map((row) => [String(row.id), String(row.payload)]));
+    return { ...value, session: { ...value.session, blocks: storedBlockIds.map((id) => {
+      const payload = blocks.get(id);
+      if (payload === undefined) throw new Error("Stored session is missing a block");
+      return JSON.parse(payload);
+    }) } };
   }
 
   private find(id: string): HostSession | undefined {
     const cached = this.cache.get(id);
-    if (cached) return this.remember(cached);
+    if (cached) {
+      this.cache.delete(id);
+      this.cache.set(id, cached);
+      return cached;
+    }
     const row = this.db
       .prepare("SELECT snapshot FROM sessions WHERE id=?")
       .get(id);
     return row
-      ? this.remember(JSON.parse(String(row.snapshot)) as HostSession)
+      ? this.remember(this.decode(String(row.snapshot)))
       : undefined;
   }
 
@@ -134,7 +242,8 @@ export class HostStore {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  sync(id: string, revision?: number): SessionSync {
+  sync(id: string, revision?: number, options?: { projected?: boolean; startBlockId?: string; earlier?: boolean; all?: boolean; untilBlockId?: string }): SessionSync {
+    if (options?.projected) return this.projectedSync(id, revision, options);
     const value = this.session(id);
     const { blockRevisions, ...snapshot } = value;
     if (revision === value.revision) return { kind: "unchanged", revision };
@@ -155,6 +264,79 @@ export class HostStore {
     };
   }
 
+  private projectedSync(id: string, revision: number | undefined, options: { startBlockId?: string; earlier?: boolean; all?: boolean; untilBlockId?: string }): SessionSync {
+    const row = this.db.prepare("SELECT snapshot FROM sessions WHERE id=?").get(id);
+    if (!row) throw new Error("Session not found on this machine");
+    const stored = JSON.parse(String(row.snapshot)) as HostSession & { storedBlockIds?: string[] };
+    if (!stored.storedBlockIds) {
+      // Legacy inline snapshots remain readable until the next durable write.
+      const value = this.session(id);
+      if (revision === value.revision) return { kind: "unchanged", revision };
+      return { kind: "snapshot", value: { ...value, session: { ...value.session,
+        blocks: value.session.blocks.map((block) => projectHostBlock(block, value.blockRevisions?.[block.id] ?? value.revision)) } } };
+    }
+    if (revision === stored.revision && !options.earlier && !options.all && !options.untilBlockId) return { kind: "unchanged", revision };
+    const { storedBlockIds, blockRevisions, ...metadata } = stored;
+    const knownStart = options.startBlockId ? storedBlockIds.indexOf(options.startBlockId) : -1;
+    const end = options.earlier && knownStart >= 0 ? knownStart : storedBlockIds.length;
+    const turn = this.db.prepare("SELECT position FROM session_blocks WHERE session_id=? AND role='user' AND position<? ORDER BY position DESC LIMIT 1 OFFSET 19").get(id, end);
+    let pageStart = Number(turn?.position ?? 0);
+    if (!turn && !this.db.prepare("SELECT 1 FROM session_blocks WHERE session_id=? AND role='user' AND position<? LIMIT 1").get(id, end)) {
+      // Histories without user boundaries use item/byte budgets. Normal turns
+      // stay intact; a single oversized item remains accessible via chunking.
+      let bytes = 0;
+      let count = 0;
+      for (const row of this.db.prepare("SELECT position, length(CAST(payload AS BLOB)) AS bytes FROM session_blocks WHERE session_id=? AND position<? ORDER BY position DESC LIMIT 75").iterate(id, end)) {
+        if (count && bytes + Number(row.bytes) > 1024 * 1024) break;
+        bytes += Number(row.bytes);
+        count++;
+        pageStart = Number(row.position);
+      }
+    }
+    const target = options.untilBlockId ? storedBlockIds.indexOf(options.untilBlockId) : -1;
+    if (options.untilBlockId && target < 0) throw new Error("Search result no longer exists");
+    const start = options.all ? 0 : target >= 0 ? Math.min(target, knownStart < 0 ? target : knownStart) : options.earlier || knownStart < 0 ? pageStart : knownStart;
+    const ids = storedBlockIds.slice(start);
+    const snapshot = revision === undefined || revision > stored.revision || !blockRevisions || (options.startBlockId !== undefined && knownStart < 0);
+    const selected = snapshot ? ids : ids.filter((blockId, index) => start + index < knownStart || (blockRevisions[blockId] ?? stored.revision) > revision!);
+    const blocks = this.db.prepare("SELECT id, payload FROM session_blocks WHERE session_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY position").all(id, JSON.stringify(selected))
+      .map((row) => projectHostBlock(JSON.parse(String(row.payload)) as Block, blockRevisions?.[String(row.id)] ?? stored.revision));
+    const value = { ...metadata, historyBefore: start > 0 ? ids[0] : null };
+    if (snapshot) return { kind: "snapshot", value: { ...value, session: { ...value.session, blocks } } };
+    const { blocks: _, ...session } = value.session;
+    return { kind: "delta", base: revision!, value: { ...value, session }, blockIds: ids, blocks };
+  }
+
+  blockDetail(id: string, blockId: string, revision: number): SessionSync {
+    const row = this.db.prepare("SELECT snapshot FROM sessions WHERE id=?").get(id);
+    if (!row) throw new Error("Session not found on this machine");
+    const stored = JSON.parse(String(row.snapshot)) as HostSession & { storedBlockIds?: string[] };
+    if ((stored.blockRevisions?.[blockId] ?? stored.revision) !== revision)
+      throw new Error("Tool output changed; reload the session before retrying");
+    const payload = this.db.prepare("SELECT payload FROM session_blocks WHERE session_id=? AND id=?").get(id, blockId);
+    const block = payload ? JSON.parse(String(payload.payload)) as Block : this.session(id).session.blocks.find((block) => block.id === blockId);
+    if (!block) throw new Error("Tool output no longer exists");
+    const { storedBlockIds: _, blockRevisions: __, ...value } = stored;
+    return { kind: "snapshot", value: { ...value, session: { ...value.session, blocks: [block] } } };
+  }
+
+  searchBlocks(id: string, query: string): string[] {
+    const row = this.db.prepare("SELECT snapshot FROM sessions WHERE id=?").get(id);
+    if (!row) throw new Error("Session not found on this machine");
+    const stored = JSON.parse(String(row.snapshot)) as { storedBlockIds?: string[] };
+    const match = (block: Block) => [block.text, block.tool?.detail, block.tool?.preview?.output,
+      ...(block.tool?.preview?.lines?.map((line) => line.text) ?? [])].some((text) => text?.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    if (!stored.storedBlockIds) return this.session(id).session.blocks.filter(match).slice(0, 1_000).map((block) => block.id);
+    const found: string[] = [];
+    // Search is explicitly requested, not part of a stream update. SQLite's
+    // iterator bounds retention to one row; Unicode matching stays in JS.
+    for (const row of this.db.prepare("SELECT id, payload FROM session_blocks WHERE session_id=? ORDER BY position").iterate(id)) {
+      if (match(JSON.parse(String(row.payload)) as Block)) found.push(String(row.id));
+      if (found.length === 1_000) break;
+    }
+    return found;
+  }
+
   sessions(projectId?: string): HostSession[] {
     const rows = projectId
       ? this.db
@@ -162,12 +344,23 @@ export class HostStore {
           .all(projectId)
       : this.db.prepare("SELECT snapshot FROM sessions").all();
     return rows
-      .map((row) => JSON.parse(String(row.snapshot)) as HostSession)
+      .map((row) => this.decode(String(row.snapshot)))
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  /** Startup needs bindings and interrupted IDs, not every settled transcript. */
+  startupBindings(): { id: string; status: string; harness: string; cwd: string; providerSessionId?: string }[] {
+    return this.db.prepare(`SELECT id, json_extract(snapshot, '$.status') AS status,
+      json_extract(snapshot, '$.session.harness') AS harness,
+      json_extract(snapshot, '$.session.cwd') AS cwd,
+      json_extract(snapshot, '$.session.providerSessionId') AS providerSessionId FROM sessions`)
+      .all().map((row) => ({ id: String(row.id), status: String(row.status), harness: String(row.harness), cwd: String(row.cwd),
+        ...(row.providerSessionId ? { providerSessionId: String(row.providerSessionId) } : {}) }));
   }
 
   /** Returns the saved value, stamped with per-block change revisions. */
   save(input: HostSession, event: unknown): HostSession {
+    if (!this.inTransaction) return this.transaction(() => this.save(input, event));
     const previous = this.find(input.session.id);
     const value = {
       ...input,
@@ -184,15 +377,39 @@ export class HostStore {
       .run(
         value.session.id,
         value.projectId,
-        JSON.stringify(value),
+        JSON.stringify({ ...value, session: { ...value.session, blocks: [] }, storedBlockIds: value.session.blocks.map((block) => block.id) }),
         JSON.stringify(summary(value)),
       );
+    const writeBlock = this.db.prepare(
+      "INSERT INTO session_blocks (session_id, id, payload, position, role) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id, id) DO UPDATE SET payload=excluded.payload, position=excluded.position, role=excluded.role",
+    );
+    // Old inline snapshots migrate on their next write. Only changed blocks
+    // are serialized after that, in the same transaction as metadata/events.
+    const stored = new Set(this.db.prepare("SELECT id FROM session_blocks WHERE session_id=?")
+      .all(value.session.id).map((row) => String(row.id)));
+    const beforePositions = new Map(previous?.session.blocks.map((block, index) => [block.id, index]));
+    for (const [position, block] of value.session.blocks.entries()) {
+      if (!stored.has(block.id) || value.blockRevisions[block.id] === value.revision) {
+        const payload = JSON.stringify(block);
+        writeBlock.run(value.session.id, block.id, payload, position, block.role);
+        this.blockSizes.set(block, Buffer.byteLength(payload));
+      }
+      else if (beforePositions.get(block.id) !== position)
+        this.db.prepare("UPDATE session_blocks SET position=? WHERE session_id=? AND id=?").run(position, value.session.id, block.id);
+      stored.delete(block.id);
+    }
+    for (const id of stored)
+      this.db.prepare("DELETE FROM session_blocks WHERE session_id=? AND id=?").run(value.session.id, id);
     this.db
       .prepare("INSERT INTO events VALUES (?, ?, ?)")
       .run(value.session.id, value.revision, JSON.stringify(event));
     this.db
       .prepare("DELETE FROM events WHERE session_id=? AND revision<?")
       .run(value.session.id, value.revision - 2_000);
+    // The marker commits with the first normalized snapshot and its block
+    // rows; failed writes leave both the old format and old data intact.
+    this.db.exec(`PRAGMA user_version=${STORE_FORMAT_VERSION}`);
+    this.changes.add(value.session.id);
     return this.remember(value);
   }
 
@@ -232,6 +449,8 @@ export class HostStore {
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       this.cache.delete(id);
+      this.cacheSizes.delete(id);
+      this.changes.add(id);
     });
   }
 
@@ -256,17 +475,21 @@ export class HostStore {
     const snapshot = this.session(id);
     const rows = this.db
       .prepare(
-        "SELECT revision, payload FROM events WHERE session_id=? AND revision>? ORDER BY revision",
+        "SELECT revision, length(CAST(payload AS BLOB)) AS bytes FROM events WHERE session_id=? AND revision>? ORDER BY revision LIMIT ?",
       )
-      .all(id, after);
+      .all(id, after, REPLAY_ITEMS + 1);
     if (
       after > snapshot.revision ||
+      rows.length > REPLAY_ITEMS ||
+      rows.reduce((total, row) => total + Number(row.bytes), 0) > REPLAY_BYTES ||
       (after < snapshot.revision && Number(rows[0]?.revision) !== after + 1)
     ) {
       return { snapshot, revision: snapshot.revision };
     }
     return {
-      events: rows.map((row) => ({
+      events: this.db.prepare(
+        "SELECT revision, payload FROM events WHERE session_id=? AND revision>? ORDER BY revision LIMIT ?",
+      ).all(id, after, REPLAY_ITEMS).map((row) => ({
         revision: row.revision,
         event: JSON.parse(String(row.payload)),
       })),

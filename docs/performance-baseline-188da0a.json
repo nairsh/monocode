@@ -1,0 +1,11 @@
+{
+  "sourceCommit": "188da0a03138ac37d24e8660859604f428f44e58",
+  "capture": "Isolated source checkout, identical AgentTranscript.resources fixture, Node 26 and happy-dom; viewport observer held offscreen rows unrendered. Counts are deterministic fixture work, not browser latency.",
+  "transcript": [
+    { "turns": 20, "mountedMessages": 20, "nodes": 302 },
+    { "turns": 200, "mountedMessages": 200, "nodes": 3002 },
+    { "turns": 2000, "mountedMessages": 2000, "nodes": 30002 }
+  ],
+  "nativeGit": { "repositories": 6, "cacheAgeSeconds": 4, "subprocesses": 18 },
+  "inboxRouting": { "overlappingConsumers": 6, "probes": 7 }
+}

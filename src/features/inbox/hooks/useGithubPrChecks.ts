@@ -149,13 +149,23 @@ export function useGithubPrChecks(params: {
     previousPollRef.current = poll;
     if (!enabled || !open || !poll) return;
     if (resumed && !document.hidden) runRef.current("auto");
-    const timer = window.setInterval(() => {
+    let timer: number | undefined;
+    const tick = () => {
+      if (document.hidden) {
+        window.clearInterval(timer);
+        timer = undefined;
+        return;
+      }
+      runRef.current("auto");
+    };
+    const onVisibility = () => {
+      window.clearInterval(timer);
+      timer = undefined;
       if (document.hidden) return;
       runRef.current("auto");
-    }, POLL_MS);
-    const onVisibility = () => {
-      if (!document.hidden) runRef.current("auto");
+      timer = window.setInterval(tick, POLL_MS);
     };
+    if (!document.hidden) timer = window.setInterval(tick, POLL_MS);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.clearInterval(timer);

@@ -457,6 +457,7 @@ pub fn run() {
             rate_limits::fetch_opencode_go_usage,
             pty::pty_spawn,
             pty::pty_write,
+            pty::pty_ack,
             pty::pty_resize,
             pty::pty_status,
             pty::pty_kill,

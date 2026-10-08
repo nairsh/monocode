@@ -12,6 +12,7 @@ import {
 } from "./protocol";
 import { remoteProjectFor } from "./remoteProjects";
 import { withRemoteAttachmentPreviews } from "./remoteAttachmentPreviews";
+import type { Block } from "../../sessions/model/session";
 
 const CHANGE = "monocode:remote-machines";
 export const REMOTE_HISTORY_CHANGE = "monocode:remote-history";
@@ -20,6 +21,15 @@ export const refreshRemoteProjectSessions = () =>
   window.dispatchEvent(new Event(REMOTE_HISTORY_CHANGE));
 let cachedMachines: RemoteMachine[] = [];
 let machinesLoaded = false;
+let machinesRequest: Promise<RemoteMachine[]> | undefined;
+function readRemoteMachines(): Promise<RemoteMachine[]> {
+  if (machinesRequest) return machinesRequest;
+  const request = invoke<RemoteMachine[]>("remote_machines");
+  machinesRequest = request;
+  const release = () => { if (machinesRequest === request) machinesRequest = undefined; };
+  void request.then(release, release);
+  return request;
+}
 export const OPEN_CONNECTIONS_EVENT = "monocode:open-connections";
 export const OPEN_REMOTE_PROJECT_EVENT = "monocode:open-remote-project";
 export const refreshRemoteMachines = () =>
@@ -158,18 +168,116 @@ export function remoteRequest<T>(
   return invoke<T>("remote_request", { machineId, method, params });
 }
 
+type RevisionWaiter = {
+  sessionId: string;
+  revision: number;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+const revisionWaiters = new Map<string, Set<RevisionWaiter>>();
+const waitingMachines = new Set<string>();
+const activeRevisionWaits = new Map<string, { subscriptionId: string; waking: boolean }>();
+function wakeRevisionWait(machineId: string) {
+  const active = activeRevisionWaits.get(machineId);
+  if (!active || active.waking) return;
+  active.waking = true;
+  void remoteRequest(machineId, "sessions.wake", { subscriptionId: active.subscriptionId }).catch(() => {
+    // The bounded wait or its error still releases callers when waking fails.
+  });
+}
+
+/** Multiplex panes over one authenticated request per machine. The host
+ * returns revision notifications; authoritative data still comes from sync. */
+export function waitForRemoteSession(machineId: string, sessionId: string, revision: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  const promise = new Promise<void>((resolve, reject) => {
+    const waiters = revisionWaiters.get(machineId) ?? new Set<RevisionWaiter>();
+    revisionWaiters.set(machineId, waiters);
+    const remove = () => {
+      waiters.delete(waiter);
+      signal.removeEventListener("abort", abort);
+      if (!waiters.size && revisionWaiters.get(machineId) === waiters) revisionWaiters.delete(machineId);
+    };
+    const waiter: RevisionWaiter = { sessionId, revision,
+      resolve: () => { remove(); resolve(); },
+      reject: (error) => { remove(); reject(error); },
+    };
+    const abort = () => { waiter.resolve(); wakeRevisionWait(machineId); };
+    waiters.add(waiter);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  wakeRevisionWait(machineId);
+  // Collect callers from the same update before opening a machine request.
+  queueMicrotask(() => void runRevisionWait(machineId));
+  return promise;
+}
+
+async function runRevisionWait(machineId: string) {
+  if (waitingMachines.has(machineId)) return;
+  const waiters = revisionWaiters.get(machineId);
+  if (!waiters?.size) return;
+  waitingMachines.add(machineId);
+  const active = { subscriptionId: crypto.randomUUID(), waking: false };
+  activeRevisionWaits.set(machineId, active);
+  const batch = [...waiters];
+  const cursors = new Map<string, number>();
+  for (const waiter of batch) cursors.set(waiter.sessionId,
+    Math.min(cursors.get(waiter.sessionId) ?? waiter.revision, waiter.revision));
+  try {
+    // More than 64 independently visible sessions use bounded batches.
+    const selected = [...cursors].slice(0, 64);
+    const changed = await remoteRequest<Record<string, number | null>>(machineId, "sessions.wait", {
+      subscriptionId: active.subscriptionId,
+      cursors: selected.map(([sessionId, revision]) => ({ sessionId, revision })),
+    });
+    activeRevisionWaits.delete(machineId);
+    const timedOut = !Object.keys(changed).length;
+    for (const waiter of batch)
+      if (timedOut || (Object.prototype.hasOwnProperty.call(changed, waiter.sessionId) && changed[waiter.sessionId] !== waiter.revision)) waiter.resolve();
+    // Rotate retained watchers so a continuously busy first batch cannot
+    // starve later sessions when a machine has more than 64 subscribers.
+    for (const waiter of batch) if (waiters.has(waiter) && selected.some(([id]) => id === waiter.sessionId)) {
+      waiters.delete(waiter); waiters.add(waiter);
+    }
+  } catch (error) {
+    for (const waiter of batch) waiter.reject(error);
+  } finally {
+    waitingMachines.delete(machineId);
+    activeRevisionWaits.delete(machineId);
+    if (revisionWaiters.get(machineId)?.size) queueMicrotask(() => void runRevisionWait(machineId));
+  }
+}
+
+const pendingSyncs = new Map<string, Promise<SessionSync>>();
+
 /** Reads one sync, assembling it from bounded pieces when the host chunks it. */
-async function syncRemoteSession(
+function syncRemoteSession(
   machineId: string,
   sessionId: string,
   revision?: number,
+  options?: { projected?: boolean; startBlockId?: string; earlier?: boolean; all?: boolean; untilBlockId?: string },
+  signal?: AbortSignal,
 ): Promise<SessionSync> {
-  const response = await remoteRequest<SessionSyncResponse>(
-    machineId,
-    "sessions.sync",
-    { sessionId, revision },
-  );
+  const key = JSON.stringify([machineId, sessionId, revision, options]);
+  const pending = pendingSyncs.get(key);
+  if (pending) return pending;
+  const request = (async () => {
+    const response = await remoteRequest<SessionSyncResponse>(machineId, "sessions.sync", { sessionId, revision, ...options });
+    return readSyncResponse(machineId, sessionId, response);
+  })();
+  pendingSyncs.set(key, request);
+  const remove = () => { if (pendingSyncs.get(key) === request) pendingSyncs.delete(key); };
+  const settled = () => { remove(); signal?.removeEventListener("abort", remove); };
+  signal?.addEventListener("abort", remove, { once: true });
+  void request.then(settled, settled);
+  return request;
+}
+
+async function readSyncResponse(machineId: string, sessionId: string, response: SessionSyncResponse): Promise<SessionSync> {
   if (response.kind !== "chunked") return response;
+  if (!Number.isSafeInteger(response.length) || response.length <= 0 ||
+    typeof response.transfer !== "string" || !response.transfer || response.transfer.length > 128)
+    throw new Error("Invalid session transfer");
   const pieces: string[] = [];
   let offset = 0;
   while (offset < response.length) {
@@ -178,7 +286,8 @@ async function syncRemoteSession(
       "sessions.syncChunk",
       { sessionId, transfer: response.transfer, offset },
     );
-    if (!data) throw new Error("Session transfer ended early");
+    if (typeof data !== "string" || !data || data.length > response.length - offset)
+      throw new Error("Session transfer ended early or exceeded its declared length");
     pieces.push(data);
     offset += data.length;
   }
@@ -188,13 +297,19 @@ async function syncRemoteSession(
 }
 
 /** Fetches only what changed since `known`; falls back to a full snapshot. */
-export async function loadRemoteSession(
+export function loadRemoteSession(
   machineId: string,
   sessionId: string,
   known?: HostSession,
+  signal?: AbortSignal,
+  options?: { projected?: boolean; earlier?: boolean; all?: boolean; untilBlockId?: string },
 ): Promise<HostSession> {
+  return readRemoteSession(machineId, sessionId, known, options, signal);
+}
+
+async function readRemoteSession(machineId: string, sessionId: string, known?: HostSession, options?: { projected?: boolean; earlier?: boolean; all?: boolean; untilBlockId?: string }, signal?: AbortSignal): Promise<HostSession> {
   const sync = (revision?: number) =>
-    syncRemoteSession(machineId, sessionId, revision);
+    syncRemoteSession(machineId, sessionId, revision, { ...options, startBlockId: known?.session.blocks[0]?.id }, signal);
   const update = await sync(known?.revision);
   let snapshot: HostSession;
   try {
@@ -204,6 +319,15 @@ export async function loadRemoteSession(
   }
   return withRemoteAttachmentPreviews(machineId, snapshot, known,
     (params) => remoteRequest(machineId, "attachments.read", params));
+}
+
+/** Tool detail uses the same bounded transfer protocol as transcript sync. */
+export async function loadRemoteBlockDetail(machineId: string, sessionId: string, blockId: string, revision: number): Promise<Block> {
+  const response = await remoteRequest<SessionSyncResponse>(machineId, "sessions.blockDetail", { sessionId, blockId, revision });
+  const sync = await readSyncResponse(machineId, sessionId, response);
+  if (sync.kind !== "snapshot" || sync.value.session.blocks[0]?.id !== blockId)
+    throw new Error("Invalid tool detail response");
+  return sync.value.session.blocks[0];
 }
 
 /** The connected machine for an environment, from the last machine list read. */
@@ -219,7 +343,7 @@ export async function remoteMachineFor(
 ): Promise<RemoteMachine | undefined> {
   const known = knownRemoteMachine(environmentId);
   if (known || machinesLoaded) return known;
-  const value = await invoke<RemoteMachine[]>("remote_machines");
+  const value = await readRemoteMachines();
   cachedMachines = Array.isArray(value) ? value : [];
   machinesLoaded = true;
   return knownRemoteMachine(environmentId);
@@ -262,7 +386,7 @@ export function useRemoteMachines(enabled = true): {
     if (!enabled) return;
     let disposed = false;
     const refresh = () => {
-      void invoke<RemoteMachine[]>("remote_machines")
+      void readRemoteMachines()
         .then((value) => {
           if (!disposed) {
             cachedMachines = Array.isArray(value) ? value : [];

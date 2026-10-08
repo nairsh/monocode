@@ -61,6 +61,22 @@ function setup(harness: "codex" | "claude" = "codex") {
 }
 
 describe("headless session ownership", () => {
+  it("flushes synchronous bursts by item and byte budgets without dropping ordered output", async () => {
+    const { engine, store, turns, id } = setup();
+    engine.command({ type: "send", commandId: "burst", sessionId: id, text: "Work" });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    const before = store.session(id).revision;
+    for (let index = 0; index < 1_000; index++) turns[0].input.onEvent({ type: "message.delta", text: String(index) + "," });
+    expect(store.session(id).revision).toBeGreaterThan(before);
+    const text = Array.from({ length: 1_000 }, (_, index) => String(index) + ",").join("");
+    expect(store.session(id).session.blocks.at(-1)?.text).toBe(text);
+    const revision = store.session(id).revision;
+    turns[0].input.onEvent({ type: "message.delta", text: "x".repeat(1024 * 1024) });
+    expect(store.session(id).revision).toBeGreaterThan(revision);
+    expect(store.session(id).session.blocks.at(-1)?.text).toBe(text + "x".repeat(1024 * 1024));
+    turns[0].finish();
+  });
+
   it.each(["send", "compact"] as const)("clears the old draft when a normal %s starts", async (type) => {
     const { engine, store, turns, provider, id } = setup();
     provider.compact = (input) => provider.send({ ...input, text: "/compact" });

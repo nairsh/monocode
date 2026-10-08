@@ -189,13 +189,19 @@ let inboxCacheGeneration = 0;
 const inboxListInflight = new Map<string, Promise<InboxListResult>>();
 const repoByPath = new Map<string, string>();
 const repositoriesByPath = new Map<string, string[]>();
+const repoInflight = new Map<string, Promise<string>>();
+const repositoriesInflight = new Map<string, Promise<string[]>>();
 const workItemByKey = new Map<string, GithubWorkItem>();
 const workItemInflight = new Map<string, Promise<GithubWorkItem>>();
 const detailsByKey = new Map<string, GithubWorkItemDetails>();
 const detailsInflight = new Map<string, Promise<GithubWorkItemDetails>>();
 const threadByKey = new Map<string, GithubWorkItemThread>();
 const threadInflight = new Map<string, Promise<GithubWorkItemThread>>();
-const prDiffByKey = new Map<string, GithubPrDiff>();
+const PR_DIFF_CACHE_ENTRIES = 32;
+const PR_DIFF_CACHE_BYTES = 16 * 1024 * 1024;
+const PR_DIFF_CACHE_ENTRY_BYTES = 2 * 1024 * 1024;
+const prDiffByKey = new Map<string, { value: GithubPrDiff; bytes: number }>();
+let prDiffCacheBytes = 0;
 const prDiffInflight = new Map<string, Promise<GithubPrDiff>>();
 /** When each details, thread and diff entry last arrived, by cache map key. */
 const fetchedAt = new Map<string, number>();
@@ -217,6 +223,8 @@ export function clearInboxCache() {
   inboxListInflight.clear();
   repoByPath.clear();
   repositoriesByPath.clear();
+  repoInflight.clear();
+  repositoriesInflight.clear();
   workItemByKey.clear();
   workItemInflight.clear();
   detailsByKey.clear();
@@ -225,6 +233,7 @@ export function clearInboxCache() {
   threadByKey.clear();
   threadInflight.clear();
   prDiffByKey.clear();
+  prDiffCacheBytes = 0;
   prDiffInflight.clear();
   clearGitlabCache();
   clearAzureDevOpsCache();
@@ -291,24 +300,42 @@ export async function githubRepo(cwd: string): Promise<string> {
   if (cached !== undefined) return cached;
   const repositories = repositoriesByPath.get(key);
   if (repositories?.[0]) return repositories[0];
-  const repo = await invoke<string>("git_github_repo", { cwd });
-  repoByPath.set(key, repo);
-  return repo;
+  const routing = repositoriesInflight.get(key);
+  if (routing) return (await routing)[0]!;
+  const pending = repoInflight.get(key);
+  if (pending) return pending;
+  const request = invoke<string>("git_github_repo", { cwd })
+    .then((repo) => {
+      if (repoInflight.get(key) === request) repoByPath.set(key, repo);
+      return repo;
+    })
+    .finally(() => {
+      if (repoInflight.get(key) === request) repoInflight.delete(key);
+    });
+  repoInflight.set(key, request);
+  return request;
 }
 
 export async function githubRepositories(cwd: string): Promise<string[]> {
   const key = normalizeProjectPath(cwd);
   const cached = repositoriesByPath.get(key);
   if (cached) return cached;
-  const repositories = await invoke<string[]>("git_github_repositories", {
+  const pending = repositoriesInflight.get(key);
+  if (pending) return pending;
+  const request = invoke<string[]>("git_github_repositories", {
     cwd,
+  }).then((repositories) => {
+    if (repositories.length === 0) throw new Error("GitHub did not return a repository");
+    if (repositoriesInflight.get(key) === request) {
+      repositoriesByPath.set(key, repositories);
+      repoByPath.set(key, repositories[0]!);
+    }
+    return repositories;
+  }).finally(() => {
+    if (repositoriesInflight.get(key) === request) repositoriesInflight.delete(key);
   });
-  if (repositories.length === 0) {
-    throw new Error("GitHub did not return a repository");
-  }
-  repositoriesByPath.set(key, repositories);
-  repoByPath.set(key, repositories[0]!);
-  return repositories;
+  repositoriesInflight.set(key, request);
+  return request;
 }
 
 export function listGithubWorkItems(
@@ -363,7 +390,7 @@ export function githubWorkItem(
     number,
   })
     .then((item) => {
-      workItemByKey.set(key, item);
+      if (workItemInflight.get(key) === promise) workItemByKey.set(key, item);
       return item;
     })
     .finally(() => {
@@ -472,8 +499,10 @@ export async function githubWorkItemDetails(
     { cwd, repo, kind, number },
   )
     .then((details) => {
-      detailsByKey.set(key, details);
-      fetchedAt.set(`details:${key}`, Date.now());
+      if (detailsInflight.get(key) === promise) {
+        detailsByKey.set(key, details);
+        fetchedAt.set(`details:${key}`, Date.now());
+      }
       return details;
     })
     .finally(() => {
@@ -516,8 +545,10 @@ export async function githubWorkItemThread(
     number,
   })
     .then((thread) => {
-      threadByKey.set(key, thread);
-      fetchedAt.set(`thread:${key}`, Date.now());
+      if (threadInflight.get(key) === promise) {
+        threadByKey.set(key, thread);
+        fetchedAt.set(`thread:${key}`, Date.now());
+      }
       return thread;
     })
     .finally(() => {
@@ -658,7 +689,41 @@ export function peekGithubPrDiff(
   number: number,
   fullContext = false,
 ): GithubPrDiff | null {
-  return prDiffByKey.get(prDiffCacheKey(repo, number, fullContext)) ?? null;
+  return readCachedPrDiff(prDiffCacheKey(repo, number, fullContext));
+}
+
+function readCachedPrDiff(key: string): GithubPrDiff | null {
+  const cached = prDiffByKey.get(key);
+  if (!cached) return null;
+  prDiffByKey.delete(key);
+  prDiffByKey.set(key, cached);
+  return cached.value;
+}
+
+function dropCachedPrDiff(key: string): void {
+  const cached = prDiffByKey.get(key);
+  if (cached) prDiffCacheBytes -= cached.bytes;
+  prDiffByKey.delete(key);
+  fetchedAt.delete(`diff:${key}`);
+}
+
+function retainPrDiff(key: string, diff: GithubPrDiff): void {
+  // Estimate retained UTF-16 strings and file records without copying the
+  // complete patch through JSON.stringify. This is a cache budget, not RSS.
+  const bytes = (key.length + diff.patch.length) * 2 + 256 +
+    diff.files.reduce((total, file) => total + file.path.length * 2 + 64, 0);
+  dropCachedPrDiff(key);
+  // Return oversized results to the caller, but never evict useful warm diffs
+  // to retain one oversized patch (or keep an obsolete smaller version).
+  if (bytes > PR_DIFF_CACHE_ENTRY_BYTES) return;
+  while (prDiffByKey.size >= PR_DIFF_CACHE_ENTRIES || prDiffCacheBytes + bytes > PR_DIFF_CACHE_BYTES) {
+    const oldest = prDiffByKey.keys().next().value;
+    if (oldest === undefined) break;
+    dropCachedPrDiff(oldest);
+  }
+  prDiffByKey.set(key, { value: diff, bytes });
+  prDiffCacheBytes += bytes;
+  fetchedAt.set(`diff:${key}`, Date.now());
 }
 
 export async function githubPrDiff(
@@ -669,7 +734,7 @@ export async function githubPrDiff(
 ): Promise<GithubPrDiff> {
   const fullContext = options?.fullContext === true;
   const key = prDiffCacheKey(repo, number, fullContext);
-  const cached = prDiffByKey.get(key);
+  const cached = readCachedPrDiff(key);
   if (cached && freshEnough(`diff:${key}`, options?.maxAgeMs)) return cached;
   const pending = prDiffInflight.get(key);
   if (pending) return pending;
@@ -680,8 +745,9 @@ export async function githubPrDiff(
     fullContext,
   })
     .then((diff) => {
-      prDiffByKey.set(key, diff);
-      fetchedAt.set(`diff:${key}`, Date.now());
+      if (prDiffInflight.get(key) === promise) {
+        retainPrDiff(key, diff);
+      }
       return diff;
     })
     .finally(() => {

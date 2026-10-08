@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 #[cfg(unix)]
@@ -28,6 +28,64 @@ const KILL_ESCALATE: Duration = Duration::from_secs(1);
 struct PtyData {
     id: String,
     data: String,
+    pid: u32,
+    sequence: u64,
+}
+
+const OUTPUT_WINDOW_BYTES: usize = 64 * 1024;
+const OUTPUT_WINDOW_CHUNKS: usize = 8;
+
+#[derive(Default)]
+struct OutputState {
+    pending: std::collections::VecDeque<(u64, usize)>,
+    bytes: usize,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct OutputFlow {
+    state: Mutex<OutputState>,
+    ready: Condvar,
+}
+
+impl OutputFlow {
+    fn reserve(&self, bytes: usize) -> Option<u64> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.closed
+            && ((!state.pending.is_empty()
+                && state.bytes.saturating_add(bytes) > OUTPUT_WINDOW_BYTES)
+                || state.pending.len() >= OUTPUT_WINDOW_CHUNKS)
+        {
+            state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        if state.closed {
+            return None;
+        }
+        // Global sequence also isolates a replacement if the OS recycles a
+        // PID (or a Windows PTY cannot report its PID).
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.pending.push_back((sequence, bytes));
+        state.bytes += bytes;
+        Some(sequence)
+    }
+
+    fn acknowledge(&self, sequence: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Each callback releases its own chunk; never trust a future sequence
+        // to release writes the terminal has not consumed yet.
+        if let Some(index) = state.pending.iter().position(|(seq, _)| *seq == sequence) {
+            if let Some((_, bytes)) = state.pending.remove(index) {
+                state.bytes -= bytes;
+            }
+        }
+        self.ready.notify_all();
+    }
+
+    fn close(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.ready.notify_all();
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -38,6 +96,7 @@ struct PtyExit {
 }
 
 struct LivePty {
+    output: Arc<OutputFlow>,
     cwd: std::path::PathBuf,
     writer: Mutex<Box<dyn Write + Send>>,
     #[cfg(unix)]
@@ -103,6 +162,7 @@ impl PtyHost {
         };
         let pids: Vec<u32> = kids.iter().map(|live| live.pid).collect();
         for live in kids {
+            live.output.close();
             #[cfg(unix)]
             {
                 hangup(live.pid);
@@ -136,6 +196,7 @@ pub fn pty_spawn(
     let workdir = working_dir(&cwd);
     let _reservation = crate::worktree_lifecycle::reserve_spawn(&workdir)?;
     if let Some(prev) = host.remove(&id) {
+        prev.output.close();
         terminate(prev.pid);
         #[cfg(unix)]
         close_fd(prev.master_fd);
@@ -168,6 +229,13 @@ pub fn pty_write(host: State<PtyHost>, id: String, data: String) -> Result<(), S
         .write_all(data.as_bytes())
         .and_then(|_| writer.flush())
         .map_err(|e| format!("Failed to write to terminal: {e}"))
+}
+
+#[tauri::command]
+pub fn pty_ack(host: State<PtyHost>, id: String, pid: u32, sequence: u64) {
+    if let Some(live) = host.get(&id).filter(|live| live.pid == pid) {
+        live.output.acknowledge(sequence);
+    }
 }
 
 #[tauri::command]
@@ -226,6 +294,7 @@ pub fn pty_status(host: State<'_, PtyHost>, id: String) -> Result<PtyStatus, Str
 #[tauri::command]
 pub fn pty_kill(host: State<PtyHost>, id: String) -> Result<(), String> {
     if let Some(live) = host.remove(&id) {
+        live.output.close();
         terminate(live.pid);
         #[cfg(unix)]
         close_fd(live.master_fd);
@@ -302,7 +371,9 @@ fn spawn_unix(
     let reader = unsafe { File::from_raw_fd(dup_fd(master)?) };
     let writer = unsafe { File::from_raw_fd(dup_fd(master)?) };
 
+    let output = Arc::new(OutputFlow::default());
     let live = Arc::new(LivePty {
+        output: output.clone(),
         cwd: workdir.clone(),
         writer: Mutex::new(Box::new(writer)),
         master_fd: master,
@@ -312,6 +383,7 @@ fn spawn_unix(
 
     let data_app = app.clone();
     let data_id = id.clone();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut file = reader;
         let fd = file.as_raw_fd();
@@ -331,7 +403,9 @@ fn spawn_unix(
             } else if pty_should_flush(acc.len(), last_emit.elapsed())
                 || !wait_readable(fd, PTY_COALESCE.saturating_sub(last_emit.elapsed()))
             {
-                emit_pty_data(&data_app, &data_id, &acc);
+                if !emit_pty_data(&data_app, &data_id, pid, &output, &acc) {
+                    break;
+                }
                 acc.clear();
                 last_emit = Instant::now();
             } else {
@@ -342,29 +416,13 @@ fn spawn_unix(
                 }
             }
         }
-        emit_pty_data(&data_app, &data_id, &acc);
+        emit_pty_data(&data_app, &data_id, pid, &output, &acc);
+        finish_pty(&data_app, &data_id, pid, exit_rx.recv().ok().flatten());
     });
 
-    let wait_app = app;
-    let wait_id = id;
     thread::spawn(move || {
         let code = child.wait().ok().and_then(|status| status.code());
-        // Only announce this child. A remount/respawn reuses the id, and the
-        // previous wait thread must not paint "[process exited]" on the new PTY
-        // or yank the replacement out of the host map.
-        let emit = if let Some(host) = wait_app.try_state::<PtyHost>() {
-            if let Some(live) = host.remove_if_pid(&wait_id, pid) {
-                close_fd(live.master_fd);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if emit {
-            let _ = wait_app.emit(EXIT_EVENT, PtyExit { id: wait_id, code });
-        }
+        let _ = exit_tx.send(code);
     });
 
     Ok(())
@@ -418,7 +476,9 @@ fn spawn_windows(
         .take_writer()
         .map_err(|err| format!("Failed to write to terminal: {err}"))?;
 
+    let output = Arc::new(OutputFlow::default());
     let live = Arc::new(LivePty {
+        output: output.clone(),
         cwd: workdir.clone(),
         writer: Mutex::new(Box::new(writer)),
         master: Mutex::new(pair.master),
@@ -428,6 +488,7 @@ fn spawn_windows(
 
     let data_app = app.clone();
     let data_id = id.clone();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
         let mut buf = vec![0_u8; READ_CHUNK];
         loop {
@@ -437,28 +498,44 @@ fn spawn_windows(
                     // ponytail: caps bridge traffic at 125 emits/s; use a timed
                     // drain only if sustained PTY throughput becomes limiting.
                     thread::sleep(PTY_COALESCE);
-                    emit_pty_data(&data_app, &data_id, &buf[..n]);
+                    if !emit_pty_data(&data_app, &data_id, pid, &output, &buf[..n]) {
+                        break;
+                    }
                 }
                 Err(_) => break,
             }
         }
+        finish_pty(&data_app, &data_id, pid, exit_rx.recv().ok().flatten());
     });
 
-    let wait_app = app;
-    let wait_id = id;
     thread::spawn(move || {
         let code = child.wait().ok().map(|status| status.exit_code() as i32);
-        let emit = if let Some(host) = wait_app.try_state::<PtyHost>() {
-            host.remove_if_pid(&wait_id, pid).is_some()
-        } else {
-            false
-        };
-        if emit {
-            let _ = wait_app.emit(EXIT_EVENT, PtyExit { id: wait_id, code });
-        }
+        let _ = exit_tx.send(code);
     });
 
     Ok(())
+}
+
+/// The child waiter never waits for the renderer or for descendant-held PTY
+/// descriptors. The output reader retains its bounded window until EOF (or
+/// explicit close), then publishes exit after the final output batch.
+fn finish_pty(app: &AppHandle, id: &str, pid: u32, code: Option<i32>) {
+    let Some(host) = app.try_state::<PtyHost>() else {
+        return;
+    };
+    let Some(live) = host.remove_if_pid(id, pid) else {
+        return;
+    };
+    live.output.close();
+    #[cfg(unix)]
+    close_fd(live.master_fd);
+    let _ = app.emit(
+        EXIT_EVENT,
+        PtyExit {
+            id: id.to_owned(),
+            code,
+        },
+    );
 }
 
 fn working_dir(cwd: &str) -> std::path::PathBuf {
@@ -665,18 +742,30 @@ fn os_err(ctx: &str) -> String {
     format!("{ctx}: {}", std::io::Error::last_os_error())
 }
 
-fn emit_pty_data(app: &AppHandle, id: &str, bytes: &[u8]) {
+fn emit_pty_data(app: &AppHandle, id: &str, pid: u32, output: &OutputFlow, bytes: &[u8]) -> bool {
     if bytes.is_empty() {
-        return;
+        return true;
     }
+    let Some(sequence) = output.reserve(bytes.len()) else {
+        return false;
+    };
     let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
-    let _ = app.emit(
-        DATA_EVENT,
-        PtyData {
-            id: id.to_string(),
-            data,
-        },
-    );
+    if app
+        .emit(
+            DATA_EVENT,
+            PtyData {
+                id: id.to_string(),
+                data,
+                pid,
+                sequence,
+            },
+        )
+        .is_err()
+    {
+        output.close();
+        return false;
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -705,7 +794,7 @@ fn foreground_label(master_fd: i32, shell_pid: u32) -> Option<String> {
         return None;
     }
     let pid = pgrp;
-    if pid <= 0 {
+    if pid <= 0 || pid == shell_pid as i32 {
         return None;
     }
     let label = process_label(pid)?;
@@ -800,6 +889,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_window_waits_for_consumption_and_close_unblocks_reader() {
+        let flow = Arc::new(OutputFlow::default());
+        let first = flow.reserve(READ_CHUNK).unwrap();
+        flow.reserve(READ_CHUNK).unwrap();
+        flow.acknowledge(u64::MAX); // A stale/future callback cannot release bytes.
+        assert_eq!(flow.state.lock().unwrap().bytes, OUTPUT_WINDOW_BYTES);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = flow.clone();
+        let handle = thread::spawn(move || {
+            tx.send(reader.reserve(READ_CHUNK)).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+        flow.acknowledge(first);
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap().is_some());
+        handle.join().unwrap();
+        flow.close();
+        assert_eq!(flow.reserve(1), None);
+    }
+
+    #[test]
+    fn close_wakes_a_blocked_output_reader_and_replacement_ignores_old_sequences() {
+        let flow = Arc::new(OutputFlow::default());
+        let old_sequence = flow.reserve(OUTPUT_WINDOW_BYTES).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = flow.clone();
+        let handle = thread::spawn(move || {
+            tx.send(reader.reserve(1)).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
+        flow.close();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), None);
+        handle.join().unwrap();
+        let replacement = OutputFlow::default();
+        replacement.reserve(5).unwrap();
+        replacement.acknowledge(old_sequence);
+        assert_eq!(replacement.state.lock().unwrap().bytes, 5);
+    }
+
+    #[test]
+    fn tiny_terminal_chunks_are_bounded_independently_of_bytes() {
+        let flow = OutputFlow::default();
+        for _ in 0..OUTPUT_WINDOW_CHUNKS {
+            flow.reserve(1).unwrap();
+        }
+        let state = flow.state.lock().unwrap();
+        assert_eq!(state.pending.len(), 8);
+        assert_eq!(state.bytes, 8);
+    }
+
+    #[test]
     fn login_args_for_common_shells() {
         assert_eq!(login_args("/bin/zsh"), &["-l"]);
         assert_eq!(login_args("/bin/bash"), &["-l"]);
@@ -820,6 +959,7 @@ mod tests {
         host.insert(
             "term".into(),
             Arc::new(LivePty {
+                output: Arc::new(OutputFlow::default()),
                 cwd: std::path::PathBuf::from("/test"),
                 writer: Mutex::new(Box::new(std::io::sink())),
                 master_fd: -1,

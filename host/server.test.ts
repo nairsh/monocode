@@ -116,6 +116,22 @@ async function setup(providers: RemoteProvider[] = ["codex"]) {
 }
 
 describe("remote host API", () => {
+  it("pushes committed revision notifications and isolates subscription waking by device", async () => {
+    const s = await setup();
+    const create = await s.call("commands.dispatch", { type: "create", commandId: "subscribe-create", projectId: s.project.id,
+      harness: "codex", model: "codex:test", runtimeMode: "supervised" });
+    const { sessionId, revision } = create.value.result;
+    const started = vi.spyOn(s.store, "waitForRevisions");
+    const waiting = s.call("sessions.wait", { subscriptionId: "subscription", cursors: [{ sessionId, revision }] });
+    await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(1));
+    expect((await s.call("sessions.wake", { subscriptionId: "subscription" }, s.second.token)).value.error).toContain("another device");
+    await s.call("sessions.update", { sessionId, projectId: s.project.id, title: "New title" });
+    expect((await waiting).value.result).toEqual({ [sessionId]: revision + 1 });
+    await s.call("sessions.wake", { subscriptionId: "wake-before-register" });
+    expect((await s.call("sessions.wait", { subscriptionId: "wake-before-register", cursors: [{ sessionId, revision: revision + 1 }] })).value.result).toEqual({});
+    expect((await s.call("sessions.wait", { cursors: [{ sessionId, revision: -1 }] })).value.error).toContain("cursor");
+  });
+
   it("rejects a credential revoked while its request body is arriving", async () => {
     const s = await setup();
     const authenticated = vi.spyOn(s.store, "authenticated");

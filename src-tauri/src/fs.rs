@@ -788,25 +788,90 @@ pub(crate) struct GitInfo {
 /// `git_info_for` costs up to three `git` subprocesses, and it sits inside
 /// both `session_upsert` (which runs every time a transcript is persisted) and
 /// `list_by_project` (every project switch). Caching it for a beat keeps a
-/// busy session from respawning git on every keystroke-driven save; the branch
-/// can lag by at most `GIT_INFO_TTL`, which only affects a label.
+/// busy session from respawning git on every keystroke-driven save. Positive
+/// detection checks repository metadata before reuse; misses expire after 3s.
 const GIT_INFO_TTL: Duration = Duration::from_secs(3);
 
-static GIT_INFO_CACHE: Mutex<Option<HashMap<PathBuf, (Instant, GitInfo)>>> = Mutex::new(None);
+type GitInfoFingerprint = Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>;
+type GitInfoCache = HashMap<PathBuf, (Instant, GitInfo, GitInfoFingerprint)>;
+static GIT_INFO_CACHE: Mutex<Option<GitInfoCache>> = Mutex::new(None);
+
+// Cheap disk probes catch branch/remote changes, repository replacement and
+// nested-repository creation without launching Git. The longer TTL is only
+// for positive detection; global config/includes still refresh within 30s.
+fn git_info_fingerprint(root: &Path) -> GitInfoFingerprint {
+    let mut paths = vec![root.to_path_buf()];
+    for ancestor in root.ancestors() {
+        let marker = ancestor.join(".git");
+        paths.push(marker.clone());
+        if marker.is_dir() || marker.is_file() {
+            let gitdir = if marker.is_dir() {
+                marker
+            } else {
+                std::fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|text| {
+                        text.trim()
+                            .strip_prefix("gitdir: ")
+                            .map(|path| ancestor.join(path))
+                    })
+                    .unwrap_or(marker)
+            };
+            paths.extend([
+                gitdir.join("HEAD"),
+                gitdir.join("config"),
+                gitdir.join("config.worktree"),
+                gitdir.join("commondir"),
+            ]);
+            if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+                paths.push(gitdir.join(common.trim()).join("config"));
+            }
+            break;
+        }
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let stamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)));
+            (path, stamp)
+        })
+        .collect()
+}
 
 pub(crate) fn git_info_for(root: &Path) -> GitInfo {
+    let fingerprint = git_info_fingerprint(root);
     if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
         let cache = guard.get_or_insert_with(HashMap::new);
-        cache.retain(|_, (at, _)| at.elapsed() < GIT_INFO_TTL);
-        if let Some((_, info)) = cache.get(root) {
-            return info.clone();
+        cache.retain(|_, (at, _, _)| at.elapsed() < Duration::from_secs(30));
+        if let Some((at, info, cached_fingerprint)) = cache.get(root) {
+            let ttl = if info.branch.is_some() {
+                Duration::from_secs(30)
+            } else {
+                GIT_INFO_TTL
+            };
+            if at.elapsed() < ttl && cached_fingerprint == &fingerprint {
+                return info.clone();
+            }
         }
     }
     let info = git_info_uncached(root);
     if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        guard
-            .get_or_insert_with(HashMap::new)
-            .insert(root.to_path_buf(), (Instant::now(), info.clone()));
+        let cache = guard.get_or_insert_with(HashMap::new);
+        if cache.len() >= 128 && !cache.contains_key(root) {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.0)
+                .map(|(path, _)| path.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            root.to_path_buf(),
+            (Instant::now(), info.clone(), fingerprint),
+        );
     }
     info
 }
@@ -4793,7 +4858,14 @@ fn git_ahead_behind(root: &Path, base: &str) -> (i64, i64) {
     (ahead, behind)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static GIT_PROBE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
+    #[cfg(test)]
+    GIT_PROBE_COUNT.with(|count| count.set(count.get() + 1));
     let output = git_cmd().arg("-C").arg(root).args(args).output().ok()?;
     if !output.status.success() {
         return None;
@@ -6788,6 +6860,106 @@ mod tests {
             info.repo.as_deref(),
             dir.0.file_name().and_then(|name| name.to_str())
         );
+    }
+
+    #[test]
+    fn git_info_reuses_positive_detection_but_refreshes_branch_remote_and_nested_repo() {
+        let dir = tmp("git-info-freshness");
+        assert!(init_git(
+            &dir.0,
+            "main",
+            Some("https://github.com/acme/first.git")
+        ));
+        let child = dir.0.join("nested");
+        std::fs::create_dir(&child).unwrap();
+        assert_eq!(git_info_for(&child).repo.as_deref(), Some("first"));
+        let aged = Instant::now() - Duration::from_secs(4);
+        {
+            let mut cache = GIT_INFO_CACHE.lock().unwrap();
+            cache.as_mut().unwrap().get_mut(&child).unwrap().0 = aged;
+        }
+        // Previously every read after 3s launched another three Git probes.
+        // The cached timestamp proves these 20 reads never repopulate it.
+        for _ in 0..20 {
+            assert_eq!(git_info_for(&child).branch.as_deref(), Some("main"));
+        }
+        assert_eq!(
+            GIT_INFO_CACHE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(&child)
+                .unwrap()
+                .0,
+            aged
+        );
+        assert!(git(
+            &dir.0,
+            &["symbolic-ref", "HEAD", "refs/heads/new-branch"]
+        ));
+        assert_eq!(git_info_for(&child).branch.as_deref(), Some("new-branch"));
+        assert!(git(
+            &dir.0,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/acme/second.git"
+            ]
+        ));
+        assert_eq!(git_info_for(&child).repo.as_deref(), Some("second"));
+        assert!(init_git(&child, "nested-main", None));
+        assert_eq!(git_info_for(&child).branch.as_deref(), Some("nested-main"));
+        std::fs::remove_dir_all(child.join(".git")).unwrap();
+        assert_eq!(git_info_for(&child).branch.as_deref(), Some("new-branch"));
+    }
+
+    #[test]
+    fn six_project_git_info_reads_reuse_repository_metadata_after_old_ttl() {
+        let projects: Vec<_> = (0..6).map(|_| tmp("git-info-work-count")).collect();
+        for project in &projects {
+            assert!(init_git(
+                &project.0,
+                "main",
+                Some("https://github.com/acme/widget.git")
+            ));
+            git_info_for(&project.0);
+        }
+        let aged = Instant::now() - Duration::from_secs(4);
+        {
+            let mut cache = GIT_INFO_CACHE.lock().unwrap();
+            for project in &projects {
+                cache.as_mut().unwrap().get_mut(&project.0).unwrap().0 = aged;
+            }
+        }
+        GIT_PROBE_COUNT.with(|count| count.set(0));
+        for project in &projects {
+            assert_eq!(git_info_for(&project.0).repo.as_deref(), Some("widget"));
+        }
+        GIT_PROBE_COUNT.with(|count| {
+            println!("six_project_git_info_subprocesses={}", count.get());
+            if let Some(directory) = std::env::var_os("MONOCODE_PERF_OUTPUT_DIR") {
+                let directory = PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join("perf-native-git.json"),
+                    format!(
+                        "{{\"probes\":{},\"projects\":{},\"cacheAgeSeconds\":4}}\n",
+                        count.get(),
+                        projects.len()
+                    ),
+                )
+                .unwrap();
+            }
+            assert_eq!(count.get(), 0);
+        });
+        let cache = GIT_INFO_CACHE.lock().unwrap();
+        // Six old-TTL cache misses would run 18 Git probes. All six timestamps
+        // survive, proving this fixture performed zero metadata refetches.
+        for project in &projects {
+            assert_eq!(cache.as_ref().unwrap().get(&project.0).unwrap().0, aged);
+        }
     }
 
     fn git(dir: &Path, args: &[&str]) -> bool {

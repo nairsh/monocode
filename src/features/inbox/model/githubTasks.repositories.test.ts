@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInboxCache,
   githubPrDiff,
   githubRepositories,
+  githubRepo,
   githubWorkItemComment,
   githubWorkItemDetails,
   githubWorkItemThread,
@@ -35,6 +38,46 @@ function workItem(repo: string, kind: "issue" | "pr"): GithubWorkItem {
 }
 
 describe("GitHub fork repositories", () => {
+  it("shares concurrent routing probes across Inbox consumers", async () => {
+    let resolve!: (value: string[]) => void;
+    vi.mocked(invoke).mockImplementation(() => new Promise<string[]>((done) => { resolve = done; }) as never);
+    const requests = Array.from({ length: 6 }, () => githubRepositories("/tmp/web"));
+    const primary = githubRepo("/tmp/web/");
+    expect(invoke).toHaveBeenCalledTimes(1);
+    resolve(["maya/web", "acme/web"]);
+    await expect(Promise.all(requests)).resolves.toHaveLength(6);
+    await expect(primary).resolves.toBe("maya/web");
+    const directory = process.env.MONOCODE_PERF_OUTPUT_DIR;
+    if (directory) {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "perf-inbox-routing.json"), JSON.stringify({
+        probes: vi.mocked(invoke).mock.calls.length,
+        overlappingConsumers: requests.length,
+      }, null, 2) + "\n");
+    }
+  });
+
+  it("does not repopulate routing caches after account or repository invalidation", async () => {
+    let resolveOld!: (value: string[]) => void;
+    vi.mocked(invoke)
+      .mockImplementationOnce(() => new Promise<string[]>((done) => { resolveOld = done; }) as never)
+      .mockResolvedValueOnce(["new/repo"] as never);
+    const old = githubRepositories("/tmp/web");
+    clearInboxCache();
+    await expect(githubRepositories("/tmp/web")).resolves.toEqual(["new/repo"]);
+    resolveOld(["old/repo"]);
+    await old;
+    await expect(githubRepositories("/tmp/web")).resolves.toEqual(["new/repo"]);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache routing misses", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(["new/repo"] as never);
+    await expect(githubRepositories("/tmp/web")).rejects.toThrow("offline");
+    await expect(githubRepositories("/tmp/web")).resolves.toEqual(["new/repo"]);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
   it("caches the local repository and parent metadata", async () => {
     vi.mocked(invoke).mockResolvedValue(["maya/web", "acme/web"] as never);
 
