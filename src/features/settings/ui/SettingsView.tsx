@@ -41,6 +41,7 @@ import {
 import { Popover } from "../../../shared/ui/Popover";
 import { SecondaryButton } from "../../../shared/ui/SecondaryButton";
 import { JiraSettings } from "./JiraSettings";
+import { TaskModelSettings } from "./TaskModelSettings";
 import { GradientBlurBackground } from "./GradientBlurBackground";
 import { McpSettings } from "./McpSettings";
 import { InboxProviderMark } from "../../inbox/ui/InboxProviderMark";
@@ -1191,6 +1192,13 @@ function InboxPage({
           highlighted={revealed === "project-notifications"}
         />
       </div>
+      <Group
+        id="task-model"
+        title="Task model"
+        description="An OpenAI-compatible endpoint for issue creation."
+      >
+        <TaskModelSettings />
+      </Group>
       <Group
         id="github"
         title={

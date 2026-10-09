@@ -907,21 +907,11 @@ button.it-chip:hover {
 .it-create-fields {
   padding: 8px 16px 10px;
 }
-.it-create-title {
-  width: 100%;
-  display: block;
-  font-size: 17px !important;
-  font-weight: 550 !important;
-  background: transparent;
-  border: 0;
-  padding: 4px 0;
-  outline: none !important;
-}
 .it-description {
   display: block;
   resize: vertical;
   width: 100%;
-  min-height: 68px;
+  min-height: 100px;
   max-height: 240px;
   margin-top: 7px;
   padding: 3px 0;

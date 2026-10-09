@@ -44,6 +44,7 @@ mod search;
 mod session_store;
 mod skills;
 pub mod ssh_askpass;
+mod task_model;
 #[cfg(target_os = "windows")]
 mod tray;
 mod window;
@@ -373,6 +374,10 @@ pub fn run() {
             linear::linear_issue_thread,
             linear::linear_issue_comment,
             jira::jira_status,
+            task_model::task_model_config,
+            task_model::task_model_save,
+            task_model::task_model_models,
+            task_model::task_model_polish_issue,
             jira::jira_set_config,
             jira::jira_list_projects,
             jira::jira_list_issues,

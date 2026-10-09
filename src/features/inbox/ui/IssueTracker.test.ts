@@ -10,6 +10,9 @@ import {
 } from "../model/localIssues";
 import { IssueTracker } from "./IssueTracker";
 import type { Session } from "../../sessions/model/session";
+import { polishIssue } from "../../settings/model/taskModel";
+
+vi.mock("../../settings/model/taskModel", () => ({ polishIssue: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -24,6 +27,11 @@ let container: HTMLDivElement;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.clear();
+  vi.mocked(polishIssue).mockReset();
+  vi.mocked(polishIssue).mockResolvedValue({
+    title: "Generated title",
+    description: "Polished details",
+  });
   container = document.createElement("div");
   container.id = "root";
   document.body.append(container);
@@ -71,7 +79,7 @@ function type(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
   field.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-it("opens issue creation with C, focuses the title, and closes with Escape", async () => {
+it("opens issue creation with C, focuses the description, and closes with Escape", async () => {
   await render();
   act(() =>
     window.dispatchEvent(
@@ -82,8 +90,9 @@ it("opens issue creation with C, focuses the title, and closes with Escape", asy
     document.querySelector('[role="dialog"]')?.getAttribute("aria-label"),
   ).toBe("Create issue");
   expect(document.activeElement?.getAttribute("aria-label")).toBe(
-    "Issue title",
+    "Issue description",
   );
+  expect(document.querySelector('[aria-label="Issue title"]')).toBeNull();
   expect(document.querySelector('[aria-label="Agent prompt"]')).toBeNull();
   expect(document.querySelector('[aria-label="Assign agent"]')).toBeNull();
   expect(document.body.textContent).not.toContain("GitHub");
@@ -95,6 +104,76 @@ it("opens issue creation with C, focuses the title, and closes with Escape", asy
   );
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(container.inert).toBe(false);
+});
+
+it("preserves the draft and creates nothing when polishing fails, then retries", async () => {
+  vi.mocked(polishIssue).mockRejectedValueOnce(new Error("Endpoint offline"));
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  const description = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Issue description"]',
+  )!;
+  act(() => type(description, "Please fix the spacing"));
+  const submit = document.querySelector<HTMLButtonElement>(
+    '.it-create-footer button[type="submit"]',
+  )!;
+  await act(async () => submit.click());
+  expect(loadLocalIssues()).toHaveLength(0);
+  expect(description.value).toBe("Please fix the spacing");
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+    "Endpoint offline",
+  );
+  await act(async () => submit.click());
+  expect(polishIssue).toHaveBeenLastCalledWith("Please fix the spacing");
+  expect(loadLocalIssues()).toHaveLength(1);
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+it("prevents duplicate creation and closing while polishing is pending", async () => {
+  let resolve!: (value: { title: string; description: string }) => void;
+  vi.mocked(polishIssue).mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  const description = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Issue description"]',
+  )!;
+  act(() => type(description, "Draft"));
+  await act(async () => {
+    const form = document.querySelector(".it-dialog form")!;
+    form.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+    form.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+  });
+  act(() =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(
+    document.querySelector<HTMLFieldSetElement>(".it-create-fields")?.disabled,
+  ).toBe(true);
+  expect(polishIssue).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    resolve({ title: "Generated title", description: "Polished details" }),
+  );
+  expect(loadLocalIssues()).toHaveLength(1);
 });
 
 it("switches between Kanban and list layouts without changing issues", async () => {

@@ -451,6 +451,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     keywords: "azure devops boards repos pull request pat organization connect",
   },
   {
+    id: "task-model",
+    section: "inbox",
+    label: "Task model",
+    keywords:
+      "issue title polish prompt openai endpoint model reasoning effort api key",
+  },
+  {
     id: "jira",
     section: "inbox",
     label: "Jira",

@@ -50,6 +50,7 @@ import {
 import { ModelPicker } from "../../sessions/ui/ModelPicker";
 import { HarnessIcon } from "../../sessions/ui/HarnessIcon";
 import { IssueImages, useIssueImages } from "./IssueImages";
+import { polishIssue } from "../../settings/model/taskModel";
 import {
   createLocalIssue,
   ISSUE_PRIORITIES,
@@ -430,19 +431,26 @@ function NewIssue({
   const [busy, setBusy] = useState(false);
   const [imagesBusy, setImagesBusy] = useState(false);
   const [error, setError] = useState("");
-  const titleRef = useRef<HTMLInputElement>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  const submitting = useRef(false);
+  useEffect(() => {
+    if (!busy) descriptionRef.current?.focus();
+  }, [busy]);
   const change = <K extends keyof IssueDraft>(key: K, value: IssueDraft[K]) =>
     setDraft((previous) => ({ ...previous, [key]: value }));
   const dismiss = () => {
+    if (submitting.current) return;
     if (imagesBusy) setError("Wait for the images to finish saving.");
     else onClose();
   };
   const submit = async () => {
-    if (busy || imagesBusy || !draft.title.trim()) return;
+    if (submitting.current || imagesBusy || !draft.description.trim()) return;
+    submitting.current = true;
     setBusy(true);
     setError("");
     try {
-      await onCreate(draft);
+      const polished = await polishIssue(draft.description);
+      await onCreate({ ...draft, ...polished });
       if (more) {
         setDraft((previous) => ({
           ...previous,
@@ -450,11 +458,11 @@ function NewIssue({
           description: "",
           images: [],
         }));
-        titleRef.current?.focus();
       } else onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   };
@@ -484,29 +492,27 @@ function NewIssue({
             type="button"
             className="it-icon-button it-push"
             aria-label="Close create issue"
+            disabled={busy}
             onClick={dismiss}
           >
             <X className="it-icon" />
           </button>
         </header>
-        <div className="it-create-fields">
-          <input
-            autoFocus
-            ref={titleRef}
-            className="it-create-title"
-            placeholder="Issue title"
-            aria-label="Issue title"
-            value={draft.title}
-            onChange={(event) => change("title", event.target.value)}
-            required
-          />
+        <fieldset className="it-create-fields" disabled={busy}>
           <textarea
+            autoFocus
+            ref={descriptionRef}
             className="it-description"
-            placeholder="Add description…"
+            placeholder="Describe the issue…"
             aria-label="Issue description"
             value={draft.description}
             onChange={(event) => change("description", event.target.value)}
+            required
           />
+          <p className="it-muted">
+            Your task model generates a title and polishes this description on
+            creation. Configure it in Settings → Inbox → Task model.
+          </p>
           <IssueImages
             images={draft.images}
             onChange={(value) => change("images", value)}
@@ -544,7 +550,7 @@ function NewIssue({
               {error}
             </p>
           ) : null}
-        </div>
+        </fieldset>
         <footer className="it-create-footer">
           <span className="it-muted">Saved on this device</span>
           <label className="it-create-more">
@@ -553,6 +559,7 @@ function NewIssue({
                 type="checkbox"
                 role="switch"
                 checked={more}
+                disabled={busy}
                 onChange={(event) => setMore(event.target.checked)}
               />
               <span className="it-create-more-track" aria-hidden="true" />
@@ -562,10 +569,10 @@ function NewIssue({
           <button
             className="it-primary"
             type="submit"
-            disabled={busy || imagesBusy || !draft.title.trim()}
+            disabled={busy || imagesBusy || !draft.description.trim()}
           >
             {busy ? <LoaderCircle className="it-icon animate-spin" /> : null}
-            Create issue
+            {busy ? "Polishing issue…" : "Create issue"}
           </button>
         </footer>
       </form>
