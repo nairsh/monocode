@@ -42,28 +42,52 @@ jobs:
           fi
           branch="codex/upstream-${upstream:0:12}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            echo "Existing proposal: $branch. Review it before retrying." >> "$GITHUB_STEP_SUMMARY"
+            pr=$(gh pr list --base main --head "$branch" --state all --json url --jq '.[0].url // empty')
+            if [[ -z "$pr" ]]; then
+              # Recover a push that succeeded before PR creation failed, without
+              # rewriting the branch or claiming its contents were validated.
+              printf '%s\n' 'Recovered upstream proposal. Review this existing branch, resolve any conflicts against fork main, and run PR checks before marking it ready. This PR is never automatically merged.' > "$RUNNER_TEMP/upstream-pr.md"
+              pr=$(gh pr create --base main --head "$branch" --draft --title "Review upstream update ${upstream:0:12}" --body-file "$RUNNER_TEMP/upstream-pr.md")
+            fi
+            echo "Existing proposal: $pr. Review it before retrying." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch -c "$branch"
-          if ! git merge --no-ff --no-edit "$upstream"; then
-            echo 'Upstream conflicts with the fork. Main was not changed. Conflicted paths:' >> "$GITHUB_STEP_SUMMARY"
-            git diff --name-only --diff-filter=U >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort
-            exit 1
-          fi
-          git push origin "HEAD:refs/heads/$branch"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          pr_args=(--base main --head "$branch")
+          merged=true
           cat > "$RUNNER_TEMP/upstream-pr.md" <<'BODY'
           Merge upstream main into this fork while preserving both histories.
 
-          The **Propose upstream update** run builds and tests this exact merge commit. GitHub does not start normal push/PR workflows for events created with GITHUB_TOKEN; inspect that run's macOS build before merging.
-
           Review workspace navigation, composer, transcript grouping, fork build configuration, and update behavior. A clean Git merge does not prove that custom behavior is preserved. This PR is never automatically merged.
           BODY
-          gh pr create --base main --head "$branch" --title "Review upstream update ${upstream:0:12}" --body-file "$RUNNER_TEMP/upstream-pr.md"
+          if ! git merge --no-ff --no-edit "$upstream"; then
+            # A failed merge without unmerged paths is an operational error.
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [[ -z "$conflicts" ]]; then
+              exit 1
+            fi
+            echo 'Upstream conflicts with the fork. Main was not changed. Conflicted paths:' >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$conflicts" >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            # Git cannot commit an unresolved merge. Propose the upstream tip
+            # instead, so GitHub exposes the conflicts for manual resolution.
+            git switch -C "$branch" "$upstream"
+            pr_args+=(--draft)
+            merged=false
+            {
+              printf '\nThis draft requires manual conflict resolution against fork main. No merged commit was produced or validated. Resolve the conflicts while preserving fork changes, then run the PR checks before marking it ready.\n\nConflicted paths:\n```text\n%s\n```\n' "$conflicts"
+            } >> "$RUNNER_TEMP/upstream-pr.md"
+          else
+            echo 'The **Propose upstream update** run builds and tests this exact merge commit. GitHub does not start normal push/PR workflows for events created with GITHUB_TOKEN; inspect that run before merging.' >> "$RUNNER_TEMP/upstream-pr.md"
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          pr=$(gh pr create "${pr_args[@]}" --title "Review upstream update ${upstream:0:12}" --body-file "$RUNNER_TEMP/upstream-pr.md")
+          echo "Proposal: $pr" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$merged" == true ]]; then
+            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
 
   validate:
     needs: merge

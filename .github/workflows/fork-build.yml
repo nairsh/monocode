@@ -45,15 +45,15 @@ jobs:
           NODE_OPTIONS: --no-experimental-webstorage
       - run: npm run test:host
       - run: cargo test --locked
-      - run: node --test scripts/fork-updater.test.mjs
+      - run: node --test scripts/fork-updater.test.mjs scripts/upstream-sync.test.mjs
       - name: Configure fork version and signing
         env:
-          FORK_SIGNED: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
+          FORK_SIGNED: ${{ inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
         run: node scripts/fork-updater.mjs configure "$RUNNER_TEMP/fork-build.json"
       - name: Build Apple Silicon installer
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.FORK_UPDATER_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.fork.conf.json --config "$RUNNER_TEMP/fork-build.json"
       - name: Verify app and record source
@@ -68,7 +68,7 @@ jobs:
           cd target/aarch64-apple-darwin/release/bundle/dmg
           shasum -a 256 ./*.dmg > SHA256SUMS.txt
       - name: Stage signed updater and feed
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: node scripts/fork-updater.mjs manifest "$RUNNER_TEMP/fork-build.json" target/aarch64-apple-darwin/release/bundle/dmg
       - uses: actions/upload-artifact@v4
         with:
@@ -79,7 +79,7 @@ jobs:
 
   publish:
     needs: macos
-    if: github.repository == 'nairsh/monocode' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.repository == 'nairsh/monocode' && inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: write
