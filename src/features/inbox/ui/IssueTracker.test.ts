@@ -140,11 +140,17 @@ it("dispatches an issue dropped on the hidden To Do column with its full saved d
       ".it-hidden-columns button",
     ),
   ].find((button) => button.textContent?.includes("To Do"))!;
-  const drop = new Event("drop", { bubbles: true, cancelable: true });
-  Object.defineProperty(drop, "dataTransfer", {
-    value: { getData: () => issue.id },
-  });
-  await act(async () => target.dispatchEvent(drop));
+  const fire = (el: Element, type: string) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { setData: () => {}, getData: () => "" },
+    });
+    return act(async () => el.dispatchEvent(event));
+  };
+  await fire(container.querySelector(".it-card")!, "dragstart");
+  await fire(target, "dragover");
+  expect(target.classList.contains("it-drop-target")).toBe(true);
+  await fire(target, "drop");
   expect(launch).toHaveBeenCalledTimes(1);
   expect(launch.mock.calls[0][0]).toMatchObject({
     description: "Old details",

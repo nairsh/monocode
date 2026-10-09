@@ -1300,6 +1300,9 @@ export function IssueTracker({
     const saved = readSetting(SORT_KEY);
     return saved === "oldest" || saved === "priority" ? saved : "newest";
   });
+  // WKWebView drops custom dataTransfer types, so the dragged id lives in state.
+  const [dragId, setDragId] = useState("");
+  const [dropStatus, setDropStatus] = useState<IssueStatus | null>(null);
   const [showEmpty, setShowEmpty] = useState(
     () => readSetting(SHOW_EMPTY_KEY) === "1",
   );
@@ -1486,8 +1489,13 @@ export function IssueTracker({
       }}
       draggable={!issue.archived}
       onDragStart={(event) => {
-        event.dataTransfer.setData("application/x-monocode-issue", issue.id);
+        event.dataTransfer.setData("text/plain", issue.id);
         event.dataTransfer.effectAllowed = "move";
+        setDragId(issue.id);
+      }}
+      onDragEnd={() => {
+        setDragId("");
+        setDropStatus(null);
       }}
     >
       <button
@@ -1561,21 +1569,26 @@ export function IssueTracker({
   );
   const dropProps = (status: IssueStatus) => ({
     onDragOver: (event: React.DragEvent) => {
-      if (event.dataTransfer.types.includes("application/x-monocode-issue")) {
-        event.preventDefault();
-        event.currentTarget.classList.add("it-drop-target");
-      }
+      if (!dragId) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDropStatus(status);
     },
     onDragLeave: (event: React.DragEvent) => {
-      event.currentTarget.classList.remove("it-drop-target");
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+        setDropStatus((current) => (current === status ? null : current));
     },
     onDrop: (event: React.DragEvent) => {
+      if (!dragId) return;
       event.preventDefault();
-      event.currentTarget.classList.remove("it-drop-target");
-      const id = event.dataTransfer.getData("application/x-monocode-issue");
-      if (id) void move(id, status).catch(showError);
+      const id = dragId;
+      setDragId("");
+      setDropStatus(null);
+      void move(id, status).catch(showError);
     },
   });
+  const dropClass = (status: IssueStatus) =>
+    dropStatus === status ? " it-drop-target" : "";
   const viewTitle = view === "archive" ? "Archived issues" : "Issues";
   return (
     <div
@@ -1932,7 +1945,7 @@ export function IssueTracker({
           ) : null}
           {columns.map((status) => (
             <section
-              className="it-column"
+              className={`it-column${dropClass(status)}`}
               key={status}
               aria-label={`${ISSUE_STATUS_LABELS[status]} issues`}
               {...dropProps(status)}
@@ -1985,6 +1998,7 @@ export function IssueTracker({
               {collapsed.map((status) => (
                 <button
                   key={status}
+                  className={dropClass(status).trim()}
                   {...dropProps(status)}
                   onClick={() => {
                     setHidden((previous) =>
