@@ -500,6 +500,10 @@ button.it-chip:hover {
   box-shadow: 0 3px 8px #00000007;
   transform: translateY(-1px);
 }
+.it-card.is-checked {
+  border-color: var(--it-accent, #5e6ad2);
+  background: color-mix(in srgb, var(--it-accent, #5e6ad2) 10%, var(--it-panel));
+}
 .it-card[draggable="true"] {
   cursor: grab;
 }
@@ -882,12 +886,13 @@ button.it-chip:hover {
   align-items: flex-start;
   padding: clamp(28px, 14dvh, 140px) 20px;
   overflow: auto;
+  animation: it-dialog-backdrop-in 180ms ease-out both;
 }
 .it-dialog-backdrop-wide {
   padding-top: max(28px, 10dvh);
 }
 .it-dialog {
-  animation: it-dialog-in 140ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  animation: it-dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .it-dialog-header {
   display: flex;
@@ -954,13 +959,58 @@ button.it-chip:hover {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--it-muted);
+  cursor: pointer;
 }
-.it-create-more input {
-  accent-color: var(--it-accent);
-  width: 12px;
-  height: 12px;
+.it-create-more-control {
+  position: relative;
+  display: inline-flex;
+  width: 22px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.it-create-more-control input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.it-create-more-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--it-text) 22%, transparent);
+  transition: background-color 120ms ease;
+}
+.it-create-more-track::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--it-bg);
+  content: "";
+  transition: transform 120ms ease;
+}
+.it-create-more-control input:checked + .it-create-more-track {
+  background: var(--it-accent);
+}
+.it-create-more-control input:checked + .it-create-more-track::after {
+  transform: translateX(8px);
+}
+.it-create-more-control input:focus-visible + .it-create-more-track {
+  outline: 2px solid var(--it-accent);
+  outline-offset: 2px;
+}
+.it-create-more-control input:focus-visible {
+  outline: none;
 }
 .it-dispatch-note {
   display: flex;
@@ -1206,6 +1256,14 @@ button.it-chip:hover {
     transform: none;
   }
 }
+@keyframes it-dialog-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 @media (max-width: 1100px) {
   .it-sidebar {
     width: 184px;
@@ -1282,7 +1340,8 @@ button.it-chip:hover {
 }
 @media (prefers-reduced-motion: reduce) {
   .issue-surface *,
-  .it-dialog[open] {
+  .it-dialog,
+  .it-dialog-backdrop {
     animation: none !important;
     transition: none !important;
   }
@@ -1293,6 +1352,10 @@ button.it-chip:hover {
 
 html.theme-light .issue-surface {
   --it-panel: color-mix(in srgb, var(--color-background-base) 35%, white);
+}
+html.theme-light .it-dialog {
+  background: var(--it-panel);
+  backdrop-filter: none;
 }
 html.theme-light .it-status-todo,
 html.theme-light .it-status-backlog {

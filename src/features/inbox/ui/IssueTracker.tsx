@@ -548,12 +548,16 @@ function NewIssue({
         <footer className="it-create-footer">
           <span className="it-muted">Saved on this device</span>
           <label className="it-create-more">
-            <input
-              type="checkbox"
-              checked={more}
-              onChange={(event) => setMore(event.target.checked)}
-            />
-            Create more
+            <span className="it-create-more-control">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={more}
+                onChange={(event) => setMore(event.target.checked)}
+              />
+              <span className="it-create-more-track" aria-hidden="true" />
+            </span>
+            <span>Create more</span>
           </label>
           <button
             className="it-primary"
@@ -1325,6 +1329,8 @@ export function IssueTracker({
   useEffect(() => writeSetting(HIDDEN_KEY, JSON.stringify(hidden)), [hidden]);
   const [createStatus, setCreateStatus] = useState<IssueStatus | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [checked, setChecked] = useState<string[]>([]);
+  const anchor = useRef<string | null>(null);
   const [context, setContext] = useState<{
     id: string;
     x: number;
@@ -1377,6 +1383,7 @@ export function IssueTracker({
           ))
       )
         return;
+      if (event.key === "Escape" && !selectedId) setChecked([]);
       if (
         event.key.toLowerCase() === "c" &&
         !event.metaKey &&
@@ -1393,11 +1400,12 @@ export function IssueTracker({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [scope]);
+  }, [scope, selectedId]);
 
   const navigate = (next: View) => {
     setView(next);
     setSelectedId(null);
+    setChecked([]);
     setQuery("");
     setFilter("");
     setScope("all");
@@ -1479,9 +1487,40 @@ export function IssueTracker({
         visible.some((issue) => issue.status === status)),
   );
   const collapsed = statuses.filter((status) => !columns.includes(status));
+  // Visual order (column by column), so shift-click ranges match what's on screen.
+  const ordered = columns.flatMap((status) =>
+    visible.filter((issue) => issue.status === status),
+  );
+  const clickIssue = (event: React.MouseEvent, id: string) => {
+    if (event.shiftKey && anchor.current) {
+      const ids = ordered.map((issue) => issue.id);
+      const [a, b] = [ids.indexOf(anchor.current), ids.indexOf(id)];
+      if (a >= 0 && b >= 0) {
+        setChecked(ids.slice(Math.min(a, b), Math.max(a, b) + 1));
+        return;
+      }
+    }
+    if (event.shiftKey || event.metaKey || event.ctrlKey) {
+      anchor.current = id;
+      setChecked((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+      );
+      return;
+    }
+    setChecked([]);
+    anchor.current = id;
+    setSelectedId(id);
+  };
+  // Right-clicking inside a multi-selection acts on all of it.
+  const targets =
+    context && checked.length > 1 && checked.includes(context.id)
+      ? checked
+      : context
+        ? [context.id]
+        : [];
   const issueRow = (issue: LocalIssue) => (
     <div
-      className={`it-card ${layout === "list" ? "it-list-row" : ""}`}
+      className={`it-card ${layout === "list" ? "it-list-row" : ""} ${checked.includes(issue.id) ? "is-checked" : ""}`}
       key={issue.id}
       onContextMenu={(event) => {
         event.preventDefault();
@@ -1500,7 +1539,8 @@ export function IssueTracker({
     >
       <button
         className="it-card-open"
-        onClick={() => setSelectedId(issue.id)}
+        onClick={(event) => clickIssue(event, issue.id)}
+        aria-pressed={checked.includes(issue.id)}
         aria-label={`Open MC-${issue.number}: ${issue.title}`}
       >
         <span className="it-card-id">MC-{issue.number}</span>
@@ -2095,7 +2135,8 @@ export function IssueTracker({
               issues.find((issue) => issue.id === context.id) ?? {},
             )}
             onChange={(value) => {
-              void move(context.id, value as IssueStatus).catch(showError);
+              for (const id of targets)
+                void move(id, value as IssueStatus).catch(showError);
               setContext(null);
             }}
           >
@@ -2111,7 +2152,8 @@ export function IssueTracker({
             options={PRIORITY_OPTIONS}
             onChange={(value) => {
               try {
-                updateLocalIssue(context.id, { priority: Number(value) });
+                for (const id of targets)
+                  updateLocalIssue(id, { priority: Number(value) });
                 setContext(null);
               } catch (reason) {
                 showError(reason);
@@ -2140,12 +2182,18 @@ export function IssueTracker({
             )}
             onClick={() => {
               try {
-                const issue = issues.find((issue) => issue.id === context.id)!;
-                updateLocalIssue(
-                  issue.id,
-                  { archived: !issue.archived },
-                  issue.archived ? "Restored the issue" : "Archived the issue",
-                );
+                for (const id of targets) {
+                  const issue = issues.find((issue) => issue.id === id)!;
+                  if (isIssueRunning(issue)) continue;
+                  updateLocalIssue(
+                    id,
+                    { archived: !issue.archived },
+                    issue.archived
+                      ? "Restored the issue"
+                      : "Archived the issue",
+                  );
+                }
+                setChecked([]);
                 setContext(null);
               } catch (reason) {
                 showError(reason);
