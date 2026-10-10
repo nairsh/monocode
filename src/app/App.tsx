@@ -26,8 +26,8 @@ import {
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
-import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
-import { gitHistory } from "../platform/tauri/fs";
+import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
 import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
 import { taskModelConfig } from "../features/settings/model/taskModel";
 import { issueProofPaths, loadIssueImages, saveIssueImages, type IssueImage } from "../features/inbox/model/localIssueImages";
@@ -644,6 +644,7 @@ import type { QuickLaunch } from "../features/quick-composer/model/quickComposer
 import { claimInboxAutomationRuns } from "../features/automations/model/automationEvents";
 import {
   SECOND_OPINION_TITLE,
+  buildSecondOpinionCard,
   buildSecondOpinionRequest,
   harnessForTurn,
   turnEditedFiles,
@@ -8265,6 +8266,49 @@ function Workspace({
     if (!accepted) throw new Error("The selected agent could not start this issue. Open its thread for details, or retry.");
   }, [ensureOpenSession, sessionDefaults?.runtimeMode, submitSession]);
 
+  // A peer review runs in its own thread and never touches the issue's session, status, or run state.
+  const onReviewLocalIssue = useCallback(async (issue: LocalIssue, target: ModelTarget): Promise<{ text: string; sessionId: string }> => {
+    const source = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
+    if (!source || source.worktreeRemoved) throw new Error("The issue thread or its worktree is gone, so there is nothing to review.");
+    const { harness, model, modelSettings } = target;
+    const reviewer = resolveModel(harness, model);
+    const diff = await gitStagedContext(sessionWorkCwd(source)).then(
+      context => ({ summary: context.summary, patch: context.patch }),
+      reason => ({ summary: "", patch: `(${reason instanceof Error ? reason.message : String(reason)}; if the work was already committed, inspect git log)` }),
+    );
+    const session = {
+      ...newSession(harness, source.cwd, model, source.runtimeMode),
+      worktreeCwd: source.worktreeCwd,
+      branch: source.branch,
+      modelSettings: mergeModelSettings(reviewer, modelSettings),
+      title: `Review MC-${issue.number} · ${reviewer.name}`,
+    };
+    // Persisted without a tab, like the issue thread; the comment links to it.
+    if (!(await upsertSession(session))) throw new Error("The review thread could not be saved.");
+    sessionsRef.current = [...sessionsRef.current, session];
+    setSessions(sessionsRef.current);
+    return new Promise((resolve, reject) => {
+      void submitWithSettlement({
+        submit: onSettled => submitSession(session.id, peerReviewPrompt(issue, diff), [], {
+          managed: true,
+          onSettled,
+          secondOpinion: buildSecondOpinionCard({ from: source.harness, to: harness, userRequest: `MC-${issue.number} ${issue.title}`, files: [] }),
+        }),
+        rejectionMessage: "The selected model could not start the review.",
+        onSettled: async outcome => {
+          // Let the final transcript flush reach React before reading the reply.
+          await new Promise<void>(done => window.setTimeout(done, 0));
+          if (outcome.status !== "completed") {
+            reject(new Error(outcome.error || (outcome.status === "cancelled" ? "The review was stopped before it finished." : "The review failed.")));
+            return;
+          }
+          const replies = sessionsRef.current.find(entry => entry.id === session.id)?.blocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim()) ?? [];
+          resolve({ text: replies[replies.length - 1]?.text || outcome.text || "", sessionId: session.id });
+        },
+      });
+    });
+  }, [ensureOpenSession, submitSession]);
+
   const onReadIssueSession = useCallback(async (id: string) => sessionsRef.current.find(session => session.id === id) ?? await getSession(id), []);
 
   const launchAutomation = useCallback(
@@ -12338,6 +12382,7 @@ function Workspace({
             recents={recents}
             onStart={onStartInboxItem}
             onLaunchLocalIssue={onLaunchLocalIssue}
+            onReviewLocalIssue={onReviewLocalIssue}
             onReadIssueSession={onReadIssueSession}
             onIssueApproval={onApproval}
             onAsk={onAskInboxItem}
@@ -12373,6 +12418,7 @@ function Workspace({
       sectionRepairSessions,
       onStartInboxItem,
       onLaunchLocalIssue,
+      onReviewLocalIssue,
       onReadIssueSession,
       onApproval,
       onAskInboxItem,

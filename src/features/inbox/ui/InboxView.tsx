@@ -378,6 +378,10 @@ type Props = {
   recents: RecentProject[];
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
   onLaunchLocalIssue?: (issue: LocalIssue) => Promise<void>;
+  onReviewLocalIssue?: (
+    issue: LocalIssue,
+    target: import("../../sessions/model/session").ModelTarget,
+  ) => Promise<{ text: string; sessionId: string }>;
   onReadIssueSession?: (
     id: string,
   ) => Promise<
@@ -424,6 +428,7 @@ export function InboxView(props: Props) {
       cwd={props.cwd}
       recents={props.recents}
       onLaunch={props.onLaunchLocalIssue}
+      onReview={props.onReviewLocalIssue}
       onOpenGithub={() => setMode("github")}
       onReadSession={props.onReadIssueSession}
       onApproval={props.onIssueApproval}

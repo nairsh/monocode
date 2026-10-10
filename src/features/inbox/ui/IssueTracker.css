@@ -1470,3 +1470,9 @@ html.theme-light .it-status-backlog {
   font-size: 11px;
   overflow-wrap: anywhere;
 }
+.it-review-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}

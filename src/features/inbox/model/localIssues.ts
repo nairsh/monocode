@@ -1,3 +1,4 @@
+import { limitSection } from "../../../shared/lib/jsonText";
 import { HARNESSES, type HarnessId } from "../../sessions/model/session";
 
 export const ISSUE_STATUSES = [
@@ -56,7 +57,11 @@ export type LocalIssue = {
     id: string;
     text: string;
     at: string;
-    kind: "work" | "commit";
+    /** "peer" is another model's review; it never counts as the agent's own work. */
+    kind: "work" | "commit" | "peer";
+    /** Reviewer model name and thread, for kind "peer". */
+    model?: string;
+    sessionId?: string;
     images?: import("./localIssueImages").IssueImage[];
     evidenceError?: string;
   }[];
@@ -199,7 +204,10 @@ function validIssue(value: unknown): value is LocalIssue {
             typeof review.id === "string" &&
             typeof review.text === "string" &&
             typeof review.at === "string" &&
-            ["work", "commit"].includes(review.kind) &&
+            ["work", "commit", "peer"].includes(review.kind) &&
+            (review.model === undefined || typeof review.model === "string") &&
+            (review.sessionId === undefined ||
+              typeof review.sessionId === "string") &&
             (review.images === undefined || validImages(review.images)),
         ))) &&
     (issue.modelSettings === undefined ||
@@ -341,7 +349,7 @@ export function localIssuePrompt(issue: LocalIssue): string {
 export const localIssueFeedbackPrompt = (issue: LocalIssue, feedback: string) =>
   `Continue local issue MC-${issue.number}: ${issue.title} in this same thread.\n\nReview feedback:\n${feedback}\n\nAddress the feedback and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths; never claim evidence you did not produce. ${COMMIT_PLAN_PROMPT}`;
 
-const hasWorkReview = (issue: LocalIssue) =>
+export const hasWorkReview = (issue: Pick<LocalIssue, "reviews">) =>
   issue.reviews?.some((review) => review.kind === "work") ?? false;
 
 /** Ends a run without stranding the issue: reviewed work returns to In Review. */
@@ -361,6 +369,94 @@ export function issueRunFailurePatch(
         ? ("in_review" as const)
         : ("todo" as const),
   };
+}
+
+export type PeerReviewState = {
+  state: "running" | "failed";
+  model: string;
+  error?: string;
+};
+// In memory on purpose: a review is not a run. It has no lease, so it must not
+// touch runState/status (recovery would fail it), and a restart simply forgets it.
+const peerReviews = new Map<string, PeerReviewState>();
+export const peerReviewOf = (id: string) => peerReviews.get(id);
+function setPeerReview(id: string, state?: PeerReviewState) {
+  if (state) peerReviews.set(id, state);
+  else peerReviews.delete(id);
+  window.dispatchEvent(new Event(CHANGE_EVENT));
+}
+
+/** Another model can review once the agent has produced work and is idle. */
+export const canPeerReview = (
+  issue: Pick<LocalIssue, "sessionId" | "reviews" | "runState">,
+) => !!issue.sessionId && hasWorkReview(issue) && !isIssueRunning(issue);
+
+/** Compact and self-contained: the reviewer never sees the original transcript. */
+export function peerReviewPrompt(
+  issue: LocalIssue,
+  diff: { summary: string; patch: string },
+): string {
+  const work = [...(issue.reviews ?? [])]
+    .reverse()
+    .find((review) => review.kind === "work");
+  return [
+    `Review the work another agent did for local issue MC-${issue.number} in this working copy. This is read-only: do not modify, stage, or commit any files.`,
+    `## Issue\n${issue.title}\n\n${limitSection(issue.description.trim() || "(no description)", 1_500)}`,
+    `## The agent's summary of its work\n${limitSection(work?.text.trim() || "(none)", 2_000)}`,
+    `## Changed files\n${limitSection(diff.summary.trim() || "(none)", 1_500)}`,
+    `## Diff\nUntracked files appear by name only; read them if needed.\n\`\`\`diff\n${limitSection(diff.patch.trim() || "(no uncommitted changes)", 12_000)}\n\`\`\``,
+    'Reply with a concise review. First line: "Verdict: approve" or "Verdict: needs changes". Then at most 10 bullets, most severe first, each with file:line and the concrete fix. No praise and no restating the diff. Open other files only when the diff is not enough.',
+  ].join("\n\n");
+}
+
+/**
+ * Runs `review` and posts its text as a "peer" review. Only `reviews` is
+ * patched: sessionId (the original work thread), status, and run fields stay.
+ */
+export async function startPeerReview(
+  id: string,
+  model: string,
+  review: (issue: LocalIssue) => Promise<{ text: string; sessionId: string }>,
+): Promise<void> {
+  const issue = loadLocalIssues().find((issue) => issue.id === id);
+  if (!issue) throw new Error("This issue no longer exists.");
+  if (peerReviews.get(id)?.state === "running") return;
+  if (!canPeerReview(issue))
+    throw new Error("Review is available once the agent has finished work.");
+  setPeerReview(id, { state: "running", model });
+  try {
+    const result = await review(issue);
+    const current = loadLocalIssues().find((issue) => issue.id === id);
+    if (!current) throw new Error("This issue no longer exists.");
+    updateLocalIssue(
+      id,
+      {
+        reviews: [
+          ...(current.reviews ?? []),
+          {
+            id: crypto.randomUUID(),
+            text:
+              result.text.trim() ||
+              "The reviewer finished without a written review. Open its thread for details.",
+            at: new Date().toISOString(),
+            kind: "peer",
+            model,
+            sessionId: result.sessionId,
+          },
+        ],
+      },
+      `Review by ${model} posted`,
+    );
+    setPeerReview(id);
+  } catch (reason) {
+    const error = reason instanceof Error ? reason.message : String(reason);
+    setPeerReview(id, { state: "failed", model, error });
+    try {
+      updateLocalIssue(id, {}, `Review with ${model} failed: ${error}`);
+    } catch {
+      // The issue is gone or storage is unavailable; the failure state above still shows.
+    }
+  }
 }
 
 // Synchronous reservation is persisted before any async work to prevent duplicate launches.
