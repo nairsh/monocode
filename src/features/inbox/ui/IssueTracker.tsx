@@ -29,6 +29,7 @@ import {
 } from "../../../shared/ui/icons";
 import { Popover } from "../../../shared/ui/Popover";
 import { copyText } from "../../../platform/tauri/clipboard";
+import { suppressTextSelection } from "../../../shared/lib/drag";
 import { LAYER } from "../../../shared/lib/layers";
 import { projectName } from "../../../shared/lib/paths";
 import {
@@ -88,6 +89,48 @@ const writeSetting = (key: string, value: string) => {
   } catch {}
 };
 
+/** CSS owns the exit timing; 0 (reduced motion, tests) unmounts at once. */
+function dialogExitMs() {
+  const value = window
+    .getComputedStyle(document.documentElement)
+    .getPropertyValue("--it-dialog-exit")
+    .trim();
+  const ms = parseFloat(value) * (value.endsWith("ms") ? 1 : 1000);
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+/** Keeps the last value mounted while its exit animation plays. */
+function useExit<T>(value: T | null): [T | null, boolean] {
+  const [kept, setKept] = useState(value);
+  useEffect(() => {
+    if (value != null) {
+      setKept(value);
+      return;
+    }
+    const timer = window.setTimeout(() => setKept(null), dialogExitMs());
+    return () => window.clearTimeout(timer);
+  }, [value]);
+  const leaving = value == null && kept != null && dialogExitMs() > 0;
+  return [leaving ? kept : value, leaving];
+}
+/** Next card to focus, or undefined at an edge. Board: arrows stay in a column or hop columns; list: one flat run. */
+function stepFocus(
+  groups: string[][],
+  layout: "board" | "list",
+  from: string | undefined,
+  dx: number,
+  dy: number,
+) {
+  const flat = groups.flat();
+  const at = from ? flat.indexOf(from) : -1;
+  if (at < 0) return flat[0];
+  if (layout === "list") return dx ? undefined : flat[at + dy];
+  const column = groups.findIndex((group) => group.includes(from!));
+  const row = groups[column].indexOf(from!);
+  if (dy) return groups[column][row + dy];
+  const next = groups[column + dx];
+  return next?.[Math.min(row, next.length - 1)];
+}
+
 type View = "issues" | "archive";
 type Scope = "active" | "backlog" | "all";
 type Option = {
@@ -141,6 +184,7 @@ const CREATE_STATUS_OPTIONS = STATUS_OPTIONS.filter(
 const PRIORITY_OPTIONS: Option[] = ISSUE_PRIORITIES.map((label, value) => ({
   value: String(value),
   label,
+  hint: String(value),
   icon:
     value === 0 ? (
       <MoreHorizontal className="it-icon it-priority" />
@@ -323,16 +367,21 @@ function IssueDialog({
   onClose,
   children,
   wide = false,
+  leaving = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** Plays the exit animation; the parent unmounts once it has finished. */
+  leaving?: boolean;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
   const previousFocus = useRef(document.activeElement);
   const close = useRef(onClose);
   close.current = onClose;
+  const exiting = useRef(leaving);
+  exiting.current = leaving;
   useEffect(() => {
     const root = document.getElementById("root");
     const wasInert = root?.inert;
@@ -344,6 +393,7 @@ function IssueDialog({
     const key = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
+        exiting.current ||
         document.querySelector("[data-dialog-popover]")
       )
         return;
@@ -378,7 +428,8 @@ function IssueDialog({
   }, []);
   return createPortal(
     <div
-      className={`it-dialog-backdrop ${wide ? "it-dialog-backdrop-wide" : ""}`}
+      className={`it-dialog-backdrop ${wide ? "it-dialog-backdrop-wide" : ""} ${leaving ? "is-leaving" : ""}`}
+      inert={leaving}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -403,12 +454,14 @@ function NewIssue({
   status,
   onClose,
   onCreate,
+  leaving,
 }: {
   project: string;
   projects: string[];
   status: IssueStatus;
   onClose: () => void;
   onCreate: (draft: IssueDraft) => Promise<void>;
+  leaving?: boolean;
 }) {
   const [draft, setDraft] = useState<IssueDraft>(() => {
     const choice = defaultSessionChoice(project);
@@ -467,7 +520,7 @@ function NewIssue({
     }
   };
   return (
-    <IssueDialog title="Create issue" onClose={dismiss}>
+    <IssueDialog title="Create issue" onClose={dismiss} leaving={leaving}>
       <form
         data-session-drop
         onSubmit={(event) => {
@@ -694,7 +747,9 @@ function IssueDetail({
   onApproval,
   onOpenSession,
   onError: reportGlobalError,
+  leaving,
 }: {
+  leaving?: boolean;
   issue: LocalIssue;
   projects: string[];
   onClose: () => void;
@@ -813,6 +868,7 @@ function IssueDetail({
     <IssueDialog
       title={`MC-${issue.number} ${issue.title}`}
       onClose={saveAndClose}
+      leaving={leaving}
       wide
     >
       <header className="it-detail-header">
@@ -1311,9 +1367,15 @@ export function IssueTracker({
     const saved = readSetting(SORT_KEY);
     return saved === "oldest" || saved === "priority" ? saved : "newest";
   });
-  // WKWebView drops custom dataTransfer types, so the dragged id lives in state.
-  const [dragId, setDragId] = useState("");
+  // Cards are dragged with pointer events: Tauri's native drag-drop handler
+  // swallows HTML5 dragover/drop in the webview (see startDrag).
+  const [dragIds, setDragIds] = useState<string[]>([]);
   const [dropStatus, setDropStatus] = useState<IssueStatus | null>(null);
+  const skipClickUntil = useRef(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const lastFocus = useRef<string | undefined>(undefined);
+  const pendingFocus = useRef<string | undefined>(undefined);
+  const prioritySince = useRef(0);
   const [showEmpty, setShowEmpty] = useState(
     () => readSetting(SHOW_EMPTY_KEY) === "1",
   );
@@ -1379,35 +1441,40 @@ export function IssueTracker({
     const timer = window.setTimeout(() => setNotice(""), 4500);
     return () => clearTimeout(timer);
   }, [notice]);
+  // Window listeners outlive renders, so they read the latest closures here.
+  const live = useRef({
+    key: (_event: KeyboardEvent) => {},
+    issues: [] as LocalIssue[],
+    move: (async () => {}) as (
+      id: string,
+      status: IssueStatus,
+    ) => Promise<void>,
+    showError: (_reason: unknown) => {},
+  });
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        document.querySelector("[role=dialog]") ||
-        (event.target instanceof Element &&
-          event.target.closest(
-            "input, textarea, [contenteditable=true], [role=menu]",
-          ))
-      )
-        return;
-      if (event.key === "Escape" && !selectedId) setChecked([]);
-      if (
-        event.key.toLowerCase() === "c" &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey
-      ) {
-        event.preventDefault();
-        setCreateStatus("backlog");
-      }
-      if (event.key === "/") {
-        event.preventDefault();
-        search.current?.focus();
-      }
-    };
+    const onKey = (event: KeyboardEvent) => live.current.key(event);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [scope, selectedId]);
+  }, []);
+  const [detail, detailLeaving] = useExit(selectedId);
+  const [createShown, createLeaving] = useExit(createStatus);
+  // Closing a dialog hands focus back to the card that was last in use.
+  const detailOpen = useRef(false);
+  useEffect(() => {
+    if (detail) {
+      detailOpen.current = true;
+      return;
+    }
+    if (!detailOpen.current) return;
+    detailOpen.current = false;
+    const active = document.activeElement;
+    if (!active || active === document.body) focusCard(lastFocus.current);
+  }, [detail]);
+  // A moved card remounts in its new column; put focus back on it.
+  useEffect(() => {
+    if (pendingFocus.current && focusCard(pendingFocus.current))
+      pendingFocus.current = undefined;
+  });
 
   const navigate = (next: View) => {
     setView(next);
@@ -1484,7 +1551,7 @@ export function IssueTracker({
           ? a.number - b.number
           : b.number - a.number,
     );
-  const selected = issues.find((issue) => issue.id === selectedId);
+  const selected = issues.find((issue) => issue.id === detail);
   const columns = statuses.filter(
     (status) =>
       !hidden.includes(status) &&
@@ -1499,6 +1566,9 @@ export function IssueTracker({
     visible.filter((issue) => issue.status === status),
   );
   const clickIssue = (event: React.MouseEvent, id: string) => {
+    // The click that ends a drag must not open the card it started on.
+    if (performance.now() < skipClickUntil.current) return;
+    lastFocus.current = id;
     if (event.shiftKey && anchor.current) {
       const ids = ordered.map((issue) => issue.id);
       const [a, b] = [ids.indexOf(anchor.current), ids.indexOf(id)];
@@ -1525,28 +1595,289 @@ export function IssueTracker({
       : context
         ? [context.id]
         : [];
+  const cardOf = (id?: string) =>
+    id
+      ? [
+          ...(rootRef.current?.querySelectorAll<HTMLElement>(
+            "[data-issue-id]",
+          ) ?? []),
+        ].find((card) => card.dataset.issueId === id)
+      : undefined;
+  const focusCard = (id?: string) => {
+    const open = cardOf(id)?.querySelector<HTMLElement>(".it-card-open");
+    if (!open) return false;
+    open.focus();
+    open.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    return true;
+  };
+  const groups = columns
+    .map((status) =>
+      visible.filter((issue) => issue.status === status).map(({ id }) => id),
+    )
+    .filter((group) => group.length);
+  live.current.issues = issues;
+  live.current.move = move;
+  live.current.showError = showError;
+  live.current.key = (event) => {
+    const root = rootRef.current;
+    const target = event.target;
+    if (
+      event.defaultPrevented ||
+      !root ||
+      root.closest('[aria-hidden="true"]') ||
+      // The tracker stays mounted while its tab is hidden; keys elsewhere are not ours.
+      (target instanceof Node &&
+        target !== document.body &&
+        target !== document.documentElement &&
+        !root.contains(target)) ||
+      document.querySelector("[role=dialog]") ||
+      (target instanceof Element &&
+        target.closest("input, textarea, [contenteditable=true], [role=menu]"))
+    )
+      return;
+    if (event.key === "Escape") {
+      prioritySince.current = 0;
+      setChecked([]);
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const key = event.key.toLowerCase();
+    // `p` arms the priority chord: the next digit (0-4) sets it.
+    const chord = Date.now() - prioritySince.current < 1500;
+    prioritySince.current = 0;
+    if (key === "c") {
+      event.preventDefault();
+      setCreateStatus("backlog");
+      return;
+    }
+    if (key === "/") {
+      event.preventDefault();
+      search.current?.focus();
+      return;
+    }
+    const idle =
+      !(target instanceof Element) ||
+      target === document.body ||
+      target === document.documentElement;
+    if (!idle && !(target as Element).closest(".it-board")) return;
+    const flat = groups.flat();
+    const focused =
+      target instanceof Element
+        ? target.closest<HTMLElement>("[data-issue-id]")?.dataset.issueId
+        : undefined;
+    const current = [focused, idle ? lastFocus.current : undefined].find(
+      (id) => id && flat.includes(id),
+    );
+    const step = {
+      arrowdown: [0, 1],
+      j: [0, 1],
+      arrowup: [0, -1],
+      k: [0, -1],
+      arrowright: [1, 0],
+      l: [1, 0],
+      arrowleft: [-1, 0],
+      h: [-1, 0],
+    }[key];
+    if (step) {
+      event.preventDefault();
+      const next = stepFocus(groups, layout, current, step[0], step[1]);
+      if (!next || !focusCard(next)) return;
+      lastFocus.current = next;
+      if (event.shiftKey && current)
+        setChecked((previous) => [...new Set([...previous, current, next])]);
+      return;
+    }
+    if (!current) return;
+    // Actions apply to the whole selection when the focused card is part of it.
+    const ids = checked.includes(current) ? checked : [current];
+    if (key === "x" || key === " ") {
+      event.preventDefault();
+      anchor.current = current;
+      setChecked((previous) =>
+        previous.includes(current)
+          ? previous.filter((id) => id !== current)
+          : [...previous, current],
+      );
+    } else if (key === "e" || (key === "enter" && idle)) {
+      event.preventDefault();
+      setSelectedId(current);
+    } else if (key === "p") {
+      event.preventDefault();
+      prioritySince.current = Date.now();
+    } else if (chord && /^[0-4]$/.test(key)) {
+      event.preventDefault();
+      try {
+        for (const id of ids) updateLocalIssue(id, { priority: Number(key) });
+      } catch (reason) {
+        showError(reason);
+      }
+    } else if (!chord && /^[1-5]$/.test(key) && view === "issues") {
+      event.preventDefault();
+      const status = ISSUE_STATUSES[Number(key) - 1];
+      for (const id of ids) {
+        const issue = issues.find((entry) => entry.id === id);
+        if (!issue || isIssueRunning(issue) || issue.status === status)
+          continue;
+        pendingFocus.current = current;
+        void move(id, status).catch(showError);
+      }
+    }
+  };
+  // Tauri's native drag-drop handler (on by default, and needed for file
+  // drops elsewhere in the app) intercepts HTML5 dragover/drop inside the
+  // webview, so `draggable` cards never reach a drop. Like the sidebar and
+  // tabs, drag with pointer events and hit-test columns by coordinates.
+  const cancelDrag = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => cancelDrag.current?.(), []);
+  const startDrag = (
+    event: React.PointerEvent<HTMLElement>,
+    issue: LocalIssue,
+  ) => {
+    if (
+      event.button !== 0 ||
+      event.pointerType === "touch" ||
+      issue.archived ||
+      isIssueRunning(issue) ||
+      (event.target as Element).closest(".it-card-action")
+    )
+      return;
+    const card = event.currentTarget;
+    const dragged = (checked.includes(issue.id) ? checked : [issue.id]).filter(
+      (id) => {
+        const entry = issues.find((candidate) => candidate.id === id);
+        return entry && !entry.archived && !isIssueRunning(entry);
+      },
+    );
+    const { pointerId, clientX: startX, clientY: startY } = event;
+    const rect = card.getBoundingClientRect();
+    let ghost: HTMLElement | undefined;
+    let target: IssueStatus | null = null;
+    let restoreSelection: (() => void) | undefined;
+    let x = startX;
+    let y = startY;
+    // In Progress is agent-owned, and a column every dragged card is already in is no target.
+    const hit = () => {
+      const status = document
+        .elementFromPoint(x, y)
+        ?.closest<HTMLElement>("[data-drop-status]")?.dataset.dropStatus as
+        IssueStatus | undefined;
+      return status &&
+        status !== "in_progress" &&
+        dragged.some(
+          (id) =>
+            live.current.issues.find((entry) => entry.id === id)?.status !==
+            status,
+        )
+        ? status
+        : null;
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      // The button is up but its pointerup never reached us: drop the drag.
+      if (ev.pointerType === "mouse" && ev.buttons === 0) return finish(false);
+      x = ev.clientX;
+      y = ev.clientY;
+      if (!ghost) {
+        if (Math.hypot(x - startX, y - startY) < 5) return;
+        restoreSelection = suppressTextSelection();
+        document.documentElement.classList.add("is-issue-dragging");
+        ghost = document.createElement("div");
+        ghost.className = "issue-surface it-drag-ghost";
+        ghost.style.width = `${rect.width}px`;
+        const copy = card.cloneNode(true) as HTMLElement;
+        copy.removeAttribute("data-issue-id");
+        copy.setAttribute("aria-hidden", "true");
+        copy.classList.remove("is-dragging");
+        ghost.append(copy);
+        if (dragged.length > 1) {
+          const count = document.createElement("span");
+          count.className = "it-drag-count";
+          count.textContent = String(dragged.length);
+          ghost.append(count);
+        }
+        document.body.append(ghost);
+        try {
+          card.setPointerCapture(pointerId);
+        } catch {
+          /* synthetic or already-released pointer */
+        }
+        setDragIds(dragged);
+      }
+      ghost.style.transform = `translate3d(${x - startX + rect.left}px, ${y - startY + rect.top}px, 0)`;
+      const next = hit();
+      if (next !== target) {
+        target = next;
+        setDropStatus(next);
+      }
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      x = ev.clientX;
+      y = ev.clientY;
+      finish(ev.type === "pointerup");
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      // Cancel the drag without also clearing the selection.
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+    function finish(commit: boolean) {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("keydown", onKey, true);
+      cancelDrag.current = undefined;
+      try {
+        card.releasePointerCapture(pointerId);
+      } catch {
+        /* already released */
+      }
+      if (!ghost) return;
+      const status = commit ? hit() : null;
+      ghost.remove();
+      ghost = undefined;
+      restoreSelection?.();
+      document.documentElement.classList.remove("is-issue-dragging");
+      setDragIds([]);
+      setDropStatus(null);
+      skipClickUntil.current = performance.now() + 400;
+      if (!status) return;
+      for (const id of dragged) {
+        const entry = live.current.issues.find((issue) => issue.id === id);
+        if (entry && entry.status !== status && !isIssueRunning(entry))
+          void live.current.move(id, status).catch(live.current.showError);
+      }
+    }
+    cancelDrag.current = () => finish(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("keydown", onKey, true);
+  };
   const issueRow = (issue: LocalIssue) => (
     <div
-      className={`it-card ${layout === "list" ? "it-list-row" : ""} ${checked.includes(issue.id) ? "is-checked" : ""}`}
+      className={`it-card ${layout === "list" ? "it-list-row" : ""} ${checked.includes(issue.id) ? "is-checked" : ""} ${dragIds.includes(issue.id) ? "is-dragging" : ""}`}
       key={issue.id}
+      data-issue-id={issue.id}
       onContextMenu={(event) => {
         event.preventDefault();
         setContext({ id: issue.id, x: event.clientX, y: event.clientY });
       }}
-      draggable={!issue.archived}
-      onDragStart={(event) => {
-        event.dataTransfer.setData("text/plain", issue.id);
-        event.dataTransfer.effectAllowed = "move";
-        setDragId(issue.id);
-      }}
-      onDragEnd={() => {
-        setDragId("");
-        setDropStatus(null);
-      }}
+      onPointerDown={(event) => startDrag(event, issue)}
+      onDragStart={(event) => event.preventDefault()}
     >
       <button
         className="it-card-open"
         onClick={(event) => clickIssue(event, issue.id)}
+        onFocus={() => {
+          lastFocus.current = issue.id;
+        }}
+        // Space toggles the check (handled on keydown); a button would also click on keyup.
+        onKeyUp={(event) => {
+          if (event.key === " ") event.preventDefault();
+        }}
         aria-pressed={checked.includes(issue.id)}
         aria-label={`Open MC-${issue.number}: ${issue.title}`}
       >
@@ -1614,31 +1945,12 @@ export function IssueTracker({
       </span>
     </div>
   );
-  const dropProps = (status: IssueStatus) => ({
-    onDragOver: (event: React.DragEvent) => {
-      if (!dragId) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      setDropStatus(status);
-    },
-    onDragLeave: (event: React.DragEvent) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-        setDropStatus((current) => (current === status ? null : current));
-    },
-    onDrop: (event: React.DragEvent) => {
-      if (!dragId) return;
-      event.preventDefault();
-      const id = dragId;
-      setDragId("");
-      setDropStatus(null);
-      void move(id, status).catch(showError);
-    },
-  });
   const dropClass = (status: IssueStatus) =>
     dropStatus === status ? " it-drop-target" : "";
   const viewTitle = view === "archive" ? "Archived issues" : "Issues";
   return (
     <div
+      ref={rootRef}
       className="issue-surface issue-tracker"
       data-app-inbox
       data-local-issue-tracker
@@ -1995,7 +2307,7 @@ export function IssueTracker({
               className={`it-column${dropClass(status)}`}
               key={status}
               aria-label={`${ISSUE_STATUS_LABELS[status]} issues`}
-              {...dropProps(status)}
+              data-drop-status={status}
             >
               <div className="it-column-header">
                 <StatusIcon status={status} />
@@ -2046,7 +2358,7 @@ export function IssueTracker({
                 <button
                   key={status}
                   className={dropClass(status).trim()}
-                  {...dropProps(status)}
+                  data-drop-status={status}
                   onClick={() => {
                     setHidden((previous) =>
                       previous.filter((value) => value !== status),
@@ -2065,13 +2377,14 @@ export function IssueTracker({
           ) : null}
         </div>
       </main>
-      {createStatus ? (
+      {createShown ? (
         <NewIssue
           project={project || (cwd !== "~" ? cwd : "")}
           projects={projects}
-          status={createStatus}
+          status={createShown}
           onClose={() => setCreateStatus(null)}
           onCreate={create}
+          leaving={createLeaving}
         />
       ) : null}
       {selected ? (
@@ -2087,6 +2400,7 @@ export function IssueTracker({
           onApproval={onApproval}
           onOpenSession={onOpenSession}
           onError={showError}
+          leaving={detailLeaving}
         />
       ) : null}
       {notice ? (

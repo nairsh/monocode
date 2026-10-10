@@ -242,7 +242,51 @@ it("saves pending detail edits when the user leaves with Escape", async () => {
   expect(document.querySelector('[role="dialog"]')).toBeNull();
 });
 
-it("dispatches an issue dropped on the hidden To Do column with its full saved details", async () => {
+// Cards drag with pointer events (Tauri's native drag-drop handler swallows
+// HTML5 dragover/drop), so the tests drive pointer events and stub the
+// coordinate hit-test, which happy-dom has no layout for.
+function pointer(el: Element | Window, type: string, x: number, y: number) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    button: 0,
+    buttons: type === "pointerup" ? 0 : 1,
+  });
+  Object.defineProperties(event, {
+    pointerId: { value: 1 },
+    pointerType: { value: "mouse" },
+  });
+  return act(async () => el.dispatchEvent(event));
+}
+function hiddenColumn(label: string) {
+  return [
+    ...container.querySelectorAll<HTMLButtonElement>(
+      ".it-hidden-columns button",
+    ),
+  ].find((button) => button.textContent?.includes(label))!;
+}
+function key(name: string, init: KeyboardEventInit = {}) {
+  return act(async () =>
+    (document.activeElement ?? document.body).dispatchEvent(
+      new KeyboardEvent("keydown", { key: name, bubbles: true, ...init }),
+    ),
+  );
+}
+function extra(title: string) {
+  return createLocalIssue({
+    title,
+    description: "",
+    status: "backlog",
+    priority: 0,
+    projectPath: "/tmp/web",
+    agent: "",
+    labels: [],
+  });
+}
+
+it("dispatches an issue dragged onto the hidden To Do column with its full saved details", async () => {
   const issue = seed();
   const launch = vi.fn(async (assigned: LocalIssue) => {
     updateLocalIssue(assigned.id, {
@@ -252,24 +296,22 @@ it("dispatches an issue dropped on the hidden To Do column with its full saved d
     });
   });
   await render(launch);
-  const target = [
-    ...container.querySelectorAll<HTMLButtonElement>(
-      ".it-hidden-columns button",
-    ),
-  ].find((button) => button.textContent?.includes("To Do"))!;
-  const fire = (el: Element, type: string) => {
-    const event = new Event(type, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", {
-      value: { setData: () => {}, getData: () => "" },
-    });
-    return act(async () => el.dispatchEvent(event));
-  };
-  await fire(container.querySelector(".it-card")!, "dragstart");
-  await fire(target, "dragover");
+  const target = hiddenColumn("To Do");
+  const over = vi.spyOn(document, "elementFromPoint").mockReturnValue(target);
+  const card = container.querySelector(".it-card")!;
+  await pointer(card, "pointerdown", 10, 10);
+  // Below the threshold nothing is dragged yet.
+  await pointer(window, "pointermove", 12, 12);
+  expect(document.querySelector(".it-drag-ghost")).toBeNull();
+  await pointer(window, "pointermove", 60, 40);
+  expect(document.querySelector(".it-drag-ghost")).not.toBeNull();
+  expect(card.classList.contains("is-dragging")).toBe(true);
   expect(target.classList.contains("it-drop-target")).toBe(true);
-  await fire(target, "drop");
+  await pointer(window, "pointerup", 60, 40);
+  expect(document.querySelector(".it-drag-ghost")).toBeNull();
   expect(launch).toHaveBeenCalledTimes(1);
   expect(launch.mock.calls[0][0]).toMatchObject({
+    id: issue.id,
     description: "Old details",
     labels: ["ui"],
     status: "todo",
@@ -278,6 +320,108 @@ it("dispatches an issue dropped on the hidden To Do column with its full saved d
     container.querySelector('[aria-label="In Progress issues"]'),
   ).not.toBeNull();
   expect(loadLocalIssues()[0].sessionId).toBe("issue-thread");
+  over.mockRestore();
+});
+
+it("cancels a drag with Escape and does not open the card after a drag", async () => {
+  const issue = seed();
+  const launch = vi.fn(async () => {});
+  await render(launch);
+  const target = hiddenColumn("To Do");
+  const over = vi.spyOn(document, "elementFromPoint").mockReturnValue(target);
+  await pointer(container.querySelector(".it-card")!, "pointerdown", 10, 10);
+  await pointer(window, "pointermove", 80, 40);
+  await act(async () =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(document.querySelector(".it-drag-ghost")).toBeNull();
+  await pointer(window, "pointerup", 80, 40);
+  expect(launch).not.toHaveBeenCalled();
+  expect(loadLocalIssues()[0].status).toBe("backlog");
+  // The click that follows a drag must not open the detail dialog.
+  await act(async () =>
+    button(`Open MC-${issue.number}: Fix clipping`).click(),
+  );
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  over.mockRestore();
+});
+
+it("drags every checked card together", async () => {
+  const first = seed();
+  const second = extra("Second");
+  await render();
+  for (const [issue, title] of [
+    [first, "Fix clipping"],
+    [second, "Second"],
+  ] as const)
+    await act(async () =>
+      button(`Open MC-${issue.number}: ${title}`).dispatchEvent(
+        new MouseEvent("click", { bubbles: true, metaKey: true }),
+      ),
+    );
+  const target = hiddenColumn("In Review");
+  const over = vi.spyOn(document, "elementFromPoint").mockReturnValue(target);
+  await pointer(container.querySelector(".it-card")!, "pointerdown", 5, 5);
+  await pointer(window, "pointermove", 90, 50);
+  expect(document.querySelector(".it-drag-count")?.textContent).toBe("2");
+  await pointer(window, "pointerup", 90, 50);
+  expect(loadLocalIssues().map((entry) => entry.status)).toEqual([
+    "in_review",
+    "in_review",
+  ]);
+  over.mockRestore();
+});
+
+it("moves card focus with arrows and j/k, hops columns, toggles, and returns focus after the detail closes", async () => {
+  const first = seed();
+  const second = extra("Second");
+  updateLocalIssue(first.id, { status: "in_review" });
+  await render();
+  // Newest first: Second (Backlog), then Fix clipping (In Review).
+  await key("j");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    `Open MC-${second.number}: Second`,
+  );
+  await key("ArrowRight");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    `Open MC-${first.number}: Fix clipping`,
+  );
+  await key("h");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    `Open MC-${second.number}: Second`,
+  );
+  await key("x");
+  expect(
+    button(`Open MC-${second.number}: Second`).getAttribute("aria-pressed"),
+  ).toBe("true");
+  await key("e");
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  act(() =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    `Open MC-${second.number}: Second`,
+  );
+});
+
+it("sets priority with p then 0-4 and status with 1-5 on the focused card, keeping focus", async () => {
+  const issue = seed();
+  await render();
+  await key("j");
+  await key("p");
+  await key("1");
+  expect(loadLocalIssues()[0].priority).toBe(1);
+  expect(loadLocalIssues()[0].status).toBe("backlog");
+  await key("4");
+  expect(loadLocalIssues()[0].status).toBe("in_review");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    `Open MC-${issue.number}: Fix clipping`,
+  );
 });
 
 it("shows and clears an empty search state without losing the issue", async () => {
@@ -680,4 +824,37 @@ it("cannot create an issue directly in the agent-owned In Progress status", asyn
   );
   expect(labels.some((label) => label?.includes("In Progress"))).toBe(false);
   expect(labels.some((label) => label?.includes("To Do"))).toBe(true);
+});
+
+it("submits with Cmd+Enter and refocuses the description when Create more is on", async () => {
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  act(() =>
+    document
+      .querySelector<HTMLInputElement>('.it-create-more input[role="switch"]')!
+      .click(),
+  );
+  for (const text of ["First", "Second"]) {
+    const description = document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Issue description"]',
+    )!;
+    act(() => type(description, text));
+    await act(async () =>
+      description.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          metaKey: true,
+          bubbles: true,
+        }),
+      ),
+    );
+    expect(document.activeElement).toBe(description);
+    expect(description.value).toBe("");
+  }
+  expect(loadLocalIssues()).toHaveLength(2);
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
 });

@@ -459,6 +459,9 @@ button.it-chip:hover {
   flex-direction: column;
   max-height: 100%;
   border: 1px solid transparent;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
 }
 .it-column-header {
   display: flex;
@@ -504,8 +507,59 @@ button.it-chip:hover {
   border-color: var(--it-accent, #5e6ad2);
   background: color-mix(in srgb, var(--it-accent, #5e6ad2) 10%, var(--it-panel));
 }
-.it-card[draggable="true"] {
+.it-card {
   cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
+  animation: it-card-in 180ms var(--motion-ease-out, ease-out) backwards;
+}
+.it-card img {
+  -webkit-user-drag: none;
+}
+/* Keyboard focus rings the whole card, not just the button inside it. */
+.it-card:has(> .it-card-open:focus-visible) {
+  border-color: var(--it-accent);
+  box-shadow: 0 0 0 1px var(--it-accent);
+}
+@supports selector(:has(*)) {
+  .it-card-open:focus-visible {
+    outline: none;
+  }
+}
+.it-card.is-dragging {
+  opacity: 0.4;
+}
+html.is-issue-dragging,
+html.is-issue-dragging * {
+  cursor: grabbing !important;
+}
+.it-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  pointer-events: none;
+}
+.it-drag-ghost .it-card {
+  margin: 0;
+  cursor: grabbing;
+  animation: it-ghost-lift 140ms var(--motion-ease-out, ease-out) both;
+  box-shadow: 0 12px 28px #00000033;
+}
+.it-drag-count {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--it-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
 }
 .it-card-open {
   display: flex;
@@ -894,6 +948,16 @@ button.it-chip:hover {
 .it-dialog {
   animation: it-dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+/* The tracker reads this to keep a closing dialog mounted until it finishes. */
+:root {
+  --it-dialog-exit: 140ms;
+}
+.it-dialog-backdrop.is-leaving {
+  animation: it-dialog-backdrop-out var(--it-dialog-exit) ease-in forwards;
+}
+.it-dialog-backdrop.is-leaving .it-dialog {
+  animation: it-dialog-out var(--it-dialog-exit) ease-in forwards;
+}
 .it-dialog-header {
   display: flex;
   align-items: center;
@@ -1254,6 +1318,31 @@ button.it-chip:hover {
     opacity: 1;
   }
 }
+@keyframes it-dialog-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+}
+@keyframes it-dialog-backdrop-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes it-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@keyframes it-ghost-lift {
+  from {
+    transform: none;
+  }
+  to {
+    transform: scale(1.02) rotate(1.5deg);
+  }
+}
 @media (max-width: 1100px) {
   .it-sidebar {
     width: 184px;
@@ -1329,6 +1418,9 @@ button.it-chip:hover {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --it-dialog-exit: 0ms;
+  }
   .issue-surface *,
   .it-dialog,
   .it-dialog-backdrop {
