@@ -6,6 +6,8 @@ import { Sidebar } from "./Sidebar";
 import type { SessionSummary } from "../../features/sessions/data/sessionStore";
 import { setSessionArchived, upsertSession } from "../../features/sessions/data/sessionStore";
 import { newSession } from "../../features/sessions/model/session";
+import { takeOpenIssueRequest } from "../../features/inbox/model/issueReference";
+import { createLocalIssue, updateLocalIssue } from "../../features/inbox/model/localIssues";
 import { invoke } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -394,4 +396,55 @@ it("shows the model used by each thread alongside its title", async () => {
   await act(async () => root.render(createElement(Sidebar, props)));
   expect(chatButtons("project")[0].textContent).toContain("GPT-5.4");
   expect(chatButtons("project")[1].textContent).toContain("Opus");
+});
+
+it("does not claim the current project has no chats while its first listing is pending", async () => {
+  props.sessions = [];
+  props.pending = true;
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatList("project")?.textContent).not.toContain("No chats yet");
+
+  props.pending = false;
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatList("project")?.textContent).toContain("No chats yet");
+});
+
+it("keeps a project's chats listed while its stored list loads after switching away", async () => {
+  let resolve!: (rows: SessionSummary[]) => void;
+  listSessionsByProject.mockReturnValue(new Promise<SessionSummary[]>((done) => { resolve = done; }));
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatButtons("project")).toHaveLength(5);
+
+  props.cwd = "/work/other";
+  props.sessions = [chat("other-1", "/work/other", 5)];
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatButtons("project")).toHaveLength(5);
+  expect(chatList("project")?.textContent).not.toContain("No chats yet");
+
+  await act(async () => resolve([chat("c0", "/work/project", 100)]));
+  expect(chatButtons("project")).toHaveLength(1);
+});
+
+it("tags a thread that belongs to an issue and opens that issue from the tag", async () => {
+  const created = createLocalIssue({
+    title: "Fix it", description: "", status: "backlog", priority: 2, projectPath: "/work/project", labels: [], agent: "",
+  });
+  updateLocalIssue(created.id, { sessionId: "c1" });
+  await act(async () => root.render(createElement(Sidebar, props)));
+  expect(chatButtons("project")[0].querySelector('[role="link"]')).toBeNull();
+  const tag = chatButtons("project")[1].querySelector<HTMLElement>('[role="link"]')!;
+  expect(tag.textContent).toContain(`MC-${created.number}`);
+
+  await act(async () => tag.click());
+  expect(takeOpenIssueRequest()).toBe(created.number);
+  expect(props.onSelectSession).not.toHaveBeenCalled();
+});
+
+it("starts a new thread from the button above Search", async () => {
+  props.onNew = vi.fn();
+  await act(async () => root.render(createElement(Sidebar, props)));
+  const button = container.querySelector<HTMLElement>('nav[aria-label="Projects"] button[aria-label^="New thread"]')!;
+  expect(button.nextElementSibling?.nextElementSibling?.getAttribute("aria-label")).toContain("Search");
+  await act(async () => button.click());
+  expect(props.onNew).toHaveBeenCalledOnce();
 });

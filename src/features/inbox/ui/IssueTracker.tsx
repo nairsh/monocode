@@ -73,6 +73,7 @@ import {
   type IssueStatus,
   type LocalIssue,
 } from "../model/localIssues";
+import { subscribeOpenIssue, takeOpenIssueRequest } from "../model/issueReference";
 import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
 import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import type { ApprovalDecision } from "../../../integrations/harness";
@@ -1678,6 +1679,19 @@ export function IssueTracker({
     };
     refresh();
     return subscribeLocalIssues(refresh);
+  }, []);
+  useEffect(() => {
+    const open = () => {
+      const number = takeOpenIssueRequest();
+      try {
+        const id = number && loadLocalIssues().find((issue) => issue.number === number)?.id;
+        if (id) setSelectedId(id);
+      } catch {
+        // The store banner already reports unreadable storage.
+      }
+    };
+    open();
+    return subscribeOpenIssue(open);
   }, []);
   useEffect(() => {
     if (!notice) return;

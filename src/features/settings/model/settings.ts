@@ -1061,6 +1061,7 @@ export const KEYBINDINGS: KeybindingRow[] = [
   { command: "App: Command Palette", keys: `${MOD}${SHIFT}P`, when: "Always" },
   { command: "App: Find in Files", keys: `${MOD}${SHIFT}F`, when: "Always" },
   { command: "App: Open Project", keys: `${MOD}O`, when: "Always" },
+  { command: "App: New Thread", keys: `${MOD}N`, when: "Always" },
   { command: "App: New Window", keys: `${MOD}${SHIFT}N`, when: "Always" },
   ...(IS_MAC
     ? [

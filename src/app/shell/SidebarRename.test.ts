@@ -1661,6 +1661,7 @@ describe("collapsed rail Inbox actions", () => {
       "Sessions",
       "Explorer",
       "Changes",
+      "New thread",
       "Search",
       "Inbox",
       "Notes",
