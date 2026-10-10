@@ -1438,17 +1438,17 @@ const ThreadRow = memo(function ThreadRow({
             setRenameValue(title);
           }
         }}
-        className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md py-1 ${busy ? "pl-10" : "pl-8"} pr-3 text-left text-[13px] ${
+        className={`flex min-h-10 w-full min-w-0 items-center gap-2 rounded-lg py-1 pl-8 pr-3 text-left text-[13px] ${
           active
-            ? "bg-selection-strong text-content"
+            ? "bg-content/4 text-content"
             : "text-content/65 hover:bg-content/5 hover:text-content"
         }`}
       >
-        {busy && !approval ? (
-          <NineDotSpinner className="absolute left-2.5 text-accent" />
-        ) : null}
         <div className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-baseline gap-3">
+          <span className="relative flex min-w-0 items-baseline gap-3">
+            {busy && !approval ? (
+              <NineDotSpinner className="absolute -left-5 top-1 text-accent" />
+            ) : null}
             {busy ? (
               <Shimmer as="span" duration={1.4} className="min-w-0 flex-1 truncate font-medium">
                 {title}

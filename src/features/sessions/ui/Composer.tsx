@@ -2286,10 +2286,10 @@ export function Composer({
                     side="top"
                     align="start"
                     width={MENU_WIDTH}
-                    rounded="rounded-2xl"
+                    bare
                     onDismiss={() => setPlusOpen(false)}
                     data-composer-plus
-                    className="p-1.5 font-sans"
+                    className="composer-menu p-1 font-sans"
                   >
                     <button
                       type="button"
@@ -2306,13 +2306,17 @@ export function Composer({
                         setPlusOpen(false);
                         attachFromPicker();
                       }}
-                      className={MENU_ROW}
+                      className={`${MENU_ROW} min-h-[45px] items-start pt-1.5 pb-0.5`}
                     >
-                      <Paperclip className={MENU_ICON} strokeWidth={1.5} />
-                      <span className="min-w-0 flex-1 truncate">
-                        Upload file
+                      <Paperclip className={`${MENU_ICON} mt-0.5`} strokeWidth={1.5} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">Upload file</span>
+                        <span className="block truncate text-content/60">
+                          Attach files or images
+                        </span>
                       </span>
                     </button>
+                    <div className="-mx-1 mb-1 border-t border-content/10" />
                     {plusModes.map(
                       ({ label, title, Icon, active, available, command, set }) =>
                         available ? (

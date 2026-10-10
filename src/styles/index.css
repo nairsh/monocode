@@ -3214,6 +3214,14 @@ html.theme-light .popover-backdrop {
   background: var(--color-background-base);
 }
 
+/* The composer menus use a flat surface, so transcript text cannot tint them. */
+.composer-menu {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-content) 12%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-background-base) 99.5%, var(--color-content));
+}
+
 /* Animate content only; its sibling glass stays still. Finish at `none` and
    do not retain the animation's transform/opacity compositing state with a
    forwards fill. Hover repaints should happen in the ordinary resting state. */

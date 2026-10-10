@@ -151,7 +151,7 @@ export function AccessPicker({
           anchor={root}
           side={side}
           width={MENU_WIDTH}
-          rounded="rounded-2xl"
+          bare
           autoFocus
           onDismiss={(reason) => dismiss(reason === "escape")}
           role="listbox"
@@ -159,7 +159,7 @@ export function AccessPicker({
           data-access-picker
           tabIndex={-1}
           onKeyDown={onMenuKey}
-          className="p-1.5 font-sans"
+          className="composer-menu p-1 font-sans"
         >
           {RUNTIME_MODES.map((mode, index) => {
             const ModeIcon = ICONS[mode];
@@ -180,7 +180,7 @@ export function AccessPicker({
                 <ModeIcon
                   className={
                     mode === "full-access"
-                      ? "size-4 shrink-0 text-amber-400/90"
+                      ? "size-3.5 shrink-0 text-amber-400/90"
                       : MENU_ICON
                   }
                   strokeWidth={1.5}
