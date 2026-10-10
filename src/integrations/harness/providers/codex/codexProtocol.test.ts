@@ -1023,6 +1023,11 @@ describe("mapCodexNotification thread/tokenUsage/updated", () => {
 });
 
 describe("mapCodexSubagentSteps", () => {
+  it("reports cumulative child tokens rather than the last request's context", () => {
+    expect(mapCodexSubagentSteps("agent-1", "thread/tokenUsage/updated", {
+      tokenUsage: { total: { totalTokens: 380000 }, last: { totalTokens: 12000 } },
+    })).toEqual([{ type: "tool.updated", callId: "agent-1", kind: "agent", agentTokens: 380000 }]);
+  });
   const subagentBash = (status: string, output?: string) =>
     mapCodexSubagentSteps("agent-1", "item/completed", {
       threadId: "thr_1",

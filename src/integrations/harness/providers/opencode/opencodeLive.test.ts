@@ -190,18 +190,25 @@ describe("OpenCode subagent trails", () => {
     sessionCreated("child_a", "session_1");
     message("child_a", "msg_a", "assistant", undefined, "claude-haiku-4-5");
     message("child_b", "msg_b");
+    onSseEvent?.({ type: "message.updated", properties: { info: {
+      sessionID: "child_a", id: "msg_a", role: "assistant", tokens: { input: 100, output: 30, cache: { read: 250 } },
+    } } });
     part("child_b", { id: "prose_b", messageID: "msg_b", type: "text", text: "Second child" });
     for (let i = 0; i < 70; i++) {
       part("child_a", { id: "prose_a", messageID: "msg_a", type: "text", text: `First child ${i}` });
     }
     task("a", "child_a");
     task("b", "child_b");
+    onSseEvent?.({ type: "message.updated", properties: { info: {
+      sessionID: "child_a", id: "msg_a", role: "assistant", tokens: { input: 100, output: 30, cache: { read: 250 } },
+    } } });
     idle("child_a");
     expect(events.some((event) => event.type === "message.completed")).toBe(false);
     idle();
     await done;
     const session = events.reduce(applyHarnessEvent, newSession("opencode", "/repo"));
     expect(session.blocks.find((block) => block.tool?.callId === "a")?.agentRun?.model).toBe("claude-haiku-4-5");
+    expect(session.blocks.find((block) => block.tool?.callId === "a")?.agentRun?.tokens).toBe(380);
     expect(session.blocks.find((block) => block.tool?.callId === "a")?.agentRun?.steps).toEqual([
       expect.objectContaining({ text: "First child 69" }),
     ]);

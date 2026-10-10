@@ -67,6 +67,7 @@ export type HarnessEvent =
   | {
       type: "tool.updated";
       agentModel?: string;
+      agentTokens?: number;
       callId: string;
       title?: string;
       kind?: string;

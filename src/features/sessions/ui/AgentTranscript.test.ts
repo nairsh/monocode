@@ -519,6 +519,7 @@ describe("AgentTranscript collapsed work", () => {
           agentRun: {
             name: "Correctness review",
             model: "claude-haiku-4-5",
+            tokens: 380000,
             steps: [
               {
                 id: "s1",
@@ -550,12 +551,14 @@ describe("AgentTranscript collapsed work", () => {
     expect(markup).toContain("Correctness review");
     expect(markup).toContain("Quality review");
     expect(markup).toContain("Haiku 4.5");
-    expect(markup).toContain("custom-review-model");
+    expect(markup).toContain("Custom Review Model");
     expect(markup).toContain("mascot-active");
     expect(markup).not.toContain("are working");
     // A row counts its agent's work; it does not echo the call in flight,
     // which put a second scrolling command line on every row.
-    expect(markup).toContain("1 step");
+    expect(markup).toContain("380K tokens");
+    expect(markup).toContain("Model: Haiku 4.5");
+    expect(markup).not.toContain("1 step");
     expect(markup).not.toContain("Read src/App.tsx");
     expect(markup).not.toContain("starting up");
     // The name carries the shimmer while the run is live, and each row opens
@@ -697,7 +700,8 @@ describe("AgentTranscript collapsed work", () => {
       },
     ]);
 
-    expect(markup).toContain("3 steps, 1 failed");
+    expect(markup).toContain("Tokens unavailable, 1 failed");
+    expect(markup).not.toContain("3 steps");
   });
 
   it("opens a lone subagent straight into its own transcript", () => {
@@ -730,7 +734,7 @@ describe("AgentTranscript collapsed work", () => {
     // One agent needs no stack header: its own row is the row.
     expect(markup).not.toContain("Show every subagent");
     expect(markup).toContain("Correctness review");
-    expect(markup).toContain("1 step");
+    expect(markup).toContain("Tokens unavailable");
     expect(markup).not.toContain("done");
     expect(markup).toContain("Show Correctness review&#x27;s work");
   });

@@ -1346,6 +1346,9 @@ function sanitizeAgentRun(value: unknown): AgentRunMeta | null {
   if (!name && steps.length === 0) return null;
   return {
     name: name || "Subagent",
+    ...(typeof record.tokens === "number" && Number.isFinite(record.tokens) && record.tokens >= 0
+      ? { tokens: record.tokens }
+      : {}),
     ...(typeof record.model === "string" && record.model.trim()
       ? { model: record.model.trim() }
       : {}),

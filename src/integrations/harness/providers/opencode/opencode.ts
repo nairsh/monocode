@@ -1,4 +1,5 @@
 import { TurnNotReadyError } from "../../core/types";
+import { AgentTokens } from "../../core/agentTokens";
 import {
   modelContextWindow,
   nativeModelId,
@@ -100,6 +101,7 @@ type Live = {
   /** Child session id -> the agent tool row that spawned it. */
   subagentSessions: Map<string, string>;
   subagentModels: Map<string, string>;
+  subagentTokens: AgentTokens;
   /** Child parts that arrived before their row was known. */
   pendingSubagent: Map<string, OpenCodePart[]>;
   partById: Map<string, OpenCodePart>;
@@ -459,6 +461,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       sessionParentById: new Map(),
       subagentSessions: new Map(),
       subagentModels: new Map(),
+      subagentTokens: new AgentTokens(),
       pendingSubagent: new Map(),
       partById: new Map(),
       emittedTextByPartId: new Map(),
@@ -1009,6 +1012,9 @@ function bindSubagentSession(
   if (live.subagentSessions.get(sessionId) === callId) return;
   live.subagentSessions.set(sessionId, callId);
   const model = live.subagentModels.get(sessionId);
+  const tokens = live.subagentTokens.total(sessionId);
+  if (tokens !== undefined)
+    live.onEvent({ type: "tool.updated", callId, kind: "agent", agentTokens: tokens });
   if (model)
     live.onEvent({
       type: "tool.updated",
@@ -1047,6 +1053,12 @@ function handleSubagentEvent(
     const role = stringField(info, "role");
     const agent = stringField(info, "agent");
     const model = stringField(info, "modelID");
+    const tokens = contextUsedFromMessageInfo(info);
+    const callId = live.subagentSessions.get(sessionId);
+    if (role === "assistant" && id && tokens !== undefined && !(agent && KNOWN_HIDDEN_AGENTS.has(agent))) {
+      const total = live.subagentTokens.record(sessionId, id, tokens);
+      if (callId) live.onEvent({ type: "tool.updated", callId, kind: "agent", agentTokens: total });
+    }
     // Nested agents share the outer trail, but have their own model.
     if (
       role === "assistant" &&

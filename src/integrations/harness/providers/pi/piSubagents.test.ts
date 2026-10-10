@@ -25,6 +25,7 @@ describe("Pi subagent snapshots", () => {
               },
               {
                 role: "assistant",
+                usage: { input: 100, cacheRead: 250, output: 30 },
                 content: [
                   { type: "thinking", thinking: "Follow the imports" },
                   { type: "text", text: "Reading auth" },
@@ -56,6 +57,7 @@ describe("Pi subagent snapshots", () => {
     ]);
     expect(session.blocks).toHaveLength(1);
     expect(session.blocks[0].agentRun?.model).toBe("claude-haiku-4-5");
+    expect(session.blocks[0].agentRun?.tokens).toBe(380);
     expect(session.blocks[0].agentRun?.steps).toEqual([
       expect.objectContaining({
         kind: "reasoning",

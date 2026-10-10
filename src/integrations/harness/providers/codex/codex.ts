@@ -1249,6 +1249,7 @@ function handleSubagentNotification(
   if (
     method !== "item/started" &&
     method !== "item/completed" &&
+    method !== "thread/tokenUsage/updated" &&
     method !== "thread/started"
   )
     return;

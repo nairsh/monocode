@@ -287,6 +287,7 @@ describe("persisting a subagent's trail", () => {
       withRun({
         name: "Correctness review",
         agentType: "code-reviewer",
+        tokens: 380000,
         steps: [
           {
             id: "s1",
@@ -302,6 +303,7 @@ describe("persisting a subagent's trail", () => {
     ).toEqual({
       name: "Correctness review",
       agentType: "code-reviewer",
+      tokens: 380000,
       steps: [
         {
           id: "s1",

@@ -19,6 +19,7 @@ import {
   X,
 } from "../../../shared/ui/icons";
 import { formatInteger } from "../../../shared/lib/numbers";
+import { formatTokens } from "../model/contextUsage";
 import {
   memo,
   startTransition,
@@ -92,6 +93,7 @@ import {
   type TurnMetrics,
 } from "../model/session";
 import { HarnessIcon } from "./HarnessIcon";
+import { allModels } from "../model/models";
 import {
   innerScrollerTakes,
   useLockOverscroll,
@@ -3443,6 +3445,14 @@ function SubagentPanel({
   const name = subagentName(block);
   const brief = subagentBrief(block);
   const model = subagentModelName(block);
+  const modelId = block.agentRun?.model ?? "";
+  const modelHarness = /claude|sonnet|opus|haiku|fable/i.test(modelId)
+    ? "claude"
+    : /(?:^|[:/])(gpt|o[134](?:$|-))/i.test(modelId)
+      ? "codex"
+      : /grok/i.test(modelId)
+        ? "grok"
+        : allModels().find((entry) => entry.id === modelId || entry.nativeId === modelId)?.harness;
   const state = toolCallState(block);
   const active = live && state === "pending";
   const steps = block.agentRun?.steps ?? [];
@@ -3479,8 +3489,13 @@ function SubagentPanel({
       {model || status ? (
         <span className="flex min-w-0 max-w-[55%] shrink-0 items-baseline gap-2 font-sans text-[12px] text-content/40">
           {model ? (
-            <span className="truncate" title={`Model: ${model}`}>
-              {model}
+            <span className="flex min-w-0 items-center gap-1.5" title={`Model: ${model}`}>
+              {modelHarness ? (
+                <HarnessIcon harness={modelHarness} className="size-3 shrink-0" />
+              ) : null}
+              <span className="truncate">
+                {model}
+              </span>
             </span>
           ) : null}
           {status ? <span className="shrink-0">{status}</span> : null}
@@ -3623,17 +3638,11 @@ function agentStepBlock(step: AgentStep): Block {
   };
 }
 
-/** What a delegated run is up to: its newest step, or how much it got through. */
-/**
- * A run is counted, never narrated. Echoing the call in flight put a second
- * scrolling command line on every row — the shimmer on the name already says
- * the agent is working, and the count says how far it has got.
- */
+/** Total reported token usage; retain failures without showing step counts. */
 function subagentStatusLine(block: Block, steps: AgentStep[]): string {
-  if (toolCallState(block) === "rejected") return "failed";
-  const tools = steps.filter((step) => step.kind === "tool").length;
-  if (tools === 0) return "";
-  const count = tools === 1 ? "1 step" : `${tools} steps`;
+  const tokens = block.agentRun?.tokens;
+  const count = tokens === undefined ? "Tokens unavailable" : `${formatTokens(tokens)} tokens`;
+  if (toolCallState(block) === "rejected") return `${count}, failed`;
   // A step that failed inside a run that went on to finish still has to say so
   // here, or the row reads clean until someone opens the trail.
   const failed = steps.filter(

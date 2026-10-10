@@ -89,6 +89,7 @@ export function applyHarnessEvent(
         preview: event.preview,
         streaming: event.status !== "completed" && event.status !== "failed",
         agentModel: event.agentModel,
+        agentTokens: event.agentTokens,
       });
     case "agent.step":
       return recordAgentStep(session, event);
@@ -948,6 +949,7 @@ function upsertTool(
     preview?: ToolPreview;
     streaming: boolean;
     agentModel?: string;
+    agentTokens?: number;
     background?: boolean;
   },
 ): Session {
@@ -966,8 +968,8 @@ function upsertTool(
       role: "tool",
       text: label,
       streaming: patch.streaming,
-      ...(patch.agentModel
-        ? { agentRun: { name: label, model: patch.agentModel, steps: [] } }
+      ...(patch.agentModel || patch.agentTokens !== undefined
+        ? { agentRun: { name: label, model: patch.agentModel, tokens: patch.agentTokens, steps: [] } }
         : {}),
       tool: {
         callId: patch.callId,
@@ -1005,6 +1007,7 @@ function upsertTool(
     prev.tool?.status === status &&
     prev.tool?.detail === detail &&
     (!patch.agentModel || prev.agentRun?.model === patch.agentModel) &&
+    (patch.agentTokens === undefined || prev.agentRun?.tokens === patch.agentTokens) &&
     (!prev.agentRun || prev.agentRun.name === agentName) &&
     samePreview(prev.tool?.preview, preview)
   ) {
@@ -1015,13 +1018,14 @@ function upsertTool(
     ...prev,
     text: label,
     streaming: patch.streaming,
-    ...(patch.agentModel || prev.agentRun
+    ...(patch.agentModel || patch.agentTokens !== undefined || prev.agentRun
       ? {
           agentRun: {
             steps: prev.agentRun?.steps ?? [],
             ...prev.agentRun,
             name: agentName,
             ...(patch.agentModel ? { model: patch.agentModel } : {}),
+            ...(patch.agentTokens !== undefined ? { tokens: patch.agentTokens } : {}),
           },
         }
       : {}),
@@ -1144,6 +1148,7 @@ function recordAgentStep(
   }
 
   const next: AgentRunMeta = {
+    ...run,
     ...(run?.model ? { model: run.model } : {}),
     name:
       event.agentName ||

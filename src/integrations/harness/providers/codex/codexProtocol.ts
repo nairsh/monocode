@@ -1121,6 +1121,13 @@ export function mapCodexSubagentSteps(
   method: string,
   params: unknown,
 ): HarnessEvent[] {
+  if (method === "thread/tokenUsage/updated") {
+    const total = asRecord(asRecord(asRecord(params)?.tokenUsage)?.total);
+    const tokens = total?.totalTokens;
+    return typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0
+      ? [{ type: "tool.updated", callId, kind: "agent", agentTokens: tokens }]
+      : [];
+  }
   if (method === "thread/started") {
     const model = stringField(asRecord(asRecord(params)?.thread), "model");
     return model

@@ -1492,6 +1492,7 @@ describe("claude subagents", () => {
       message: {
         id: "msg_sub_1",
         model: "claude-haiku-4-5",
+        usage: { input_tokens: 100, cache_read_input_tokens: 250, output_tokens: 30 },
         content: [
           { type: "thinking", thinking: "Start with the reducer." },
           { type: "text", text: "I will grep for tokens" },
@@ -1526,6 +1527,8 @@ describe("claude subagents", () => {
         .blocks.find((block) => block.tool?.callId === "toolu_agent")?.agentRun
         ?.model,
     ).toBe("claude-haiku-4-5");
+    expect(events.reduce(applyHarnessEvent, newSession("claude", "/repo"))
+      .blocks.find((block) => block.tool?.callId === "toolu_agent")?.agentRun?.tokens).toBe(380);
     const steps = events.filter((event) => event.type === "agent.step");
     expect(steps.every((step) => step.callId === "toolu_agent")).toBe(true);
     expect(

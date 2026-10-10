@@ -1685,7 +1685,7 @@ describe("proseSummary", () => {
 });
 
 describe("subagent model labels", () => {
-  it("keeps unknown model IDs and leaves unspecified models blank", () => {
+  it("cleans model IDs and leaves unspecified models blank", () => {
     const row = (model?: string): Block => ({
       id: "agent",
       role: "tool",
@@ -1693,7 +1693,9 @@ describe("subagent model labels", () => {
       agentRun: { name: "Review", model, steps: [] },
     });
     expect(subagentModelName(row("claude-haiku-4-5"))).toBe("Haiku 4.5");
-    expect(subagentModelName(row("custom-model-v2"))).toBe("custom-model-v2");
+    expect(subagentModelName(row("claude-sonnet-5-5"))).toBe("Sonnet 5.5");
+    expect(subagentModelName(row("anthropic/claude-sonnet-5-5-20261001"))).toBe("Sonnet 5.5");
+    expect(subagentModelName(row("custom-model-v2"))).toBe("Custom Model V2");
     for (const model of [undefined, "", "auto", "inherit", "default"])
       expect(subagentModelName(row(model))).toBeUndefined();
   });

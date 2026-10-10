@@ -753,10 +753,19 @@ export function subagentModelName(block: Block): string | undefined {
   const id = block.agentRun?.model?.trim();
   if (!id || /^(?:auto|default|inherit|unspecified)$/i.test(id))
     return undefined;
-  return (
-    allModels().find((model) => model.id === id || model.nativeId === id)
-      ?.name ?? id
+  const known = allModels().find(
+    (model) => model.id === id || model.nativeId === id,
+  )?.name;
+  if (known && known !== id) return known.replace(/^Claude\s+/i, "");
+  // Runtime catalogs can lag behind the model a provider actually runs.
+  const claude = id.match(
+    /(?:^|[:/])claude-(sonnet|opus|haiku|fable)-(\d+(?:-\d{1,2})?)(?:-\d{8})?(?:$|[-:])/i,
   );
+  if (claude)
+    return `${claude[1][0].toUpperCase()}${claude[1].slice(1)} ${claude[2].replace("-", ".")}`;
+  return id.split(/[/:]/).pop()!
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 /**

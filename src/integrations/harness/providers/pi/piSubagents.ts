@@ -1,6 +1,7 @@
 import type { HarnessEvent } from "../../core/types";
 import {
   asRecord,
+  contextFromUsage,
   previewFromTool,
   stringField,
   textFromContent,
@@ -79,6 +80,12 @@ export function piSubagentEvents(
       (failed
         ? (stringField(final, "stderr") ?? "Subagent failed.")
         : undefined);
+    const assistantMessages = records(final.messages).filter((message) => message.role === "assistant");
+    const reported = contextFromUsage(entry)?.used ?? contextFromUsage(final)?.used;
+    const messageTokens = assistantMessages.map((message) => contextFromUsage(message)?.used);
+    const tokens = reported ?? (messageTokens.some((value) => value !== undefined)
+      ? messageTokens.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+      : undefined);
     events.push({
       type: "tool.updated",
       callId: rowId,
@@ -86,6 +93,7 @@ export function piSubagentEvents(
       title: name,
       status,
       ...(model ? { agentModel: model } : {}),
+      ...(tokens !== undefined ? { agentTokens: tokens } : {}),
       ...(report ? { detail: report } : {}),
     });
     const emit = (

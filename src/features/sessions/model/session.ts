@@ -230,6 +230,8 @@ export type AgentRunMeta = {
   agentType?: string;
   /** Model reported for the child, which may differ from its parent. */
   model?: string;
+  /** Cumulative input (including cached input) and output tokens. */
+  tokens?: number;
   steps: AgentStep[];
 };
 

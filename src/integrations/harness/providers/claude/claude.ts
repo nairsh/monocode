@@ -72,6 +72,7 @@ import {
   type ClaudeControlRequest,
 } from "./claudeProtocol";
 import { isAgentToolName } from "../../core/preview";
+import { AgentTokens } from "../../core/agentTokens";
 import { joinStreamText, snapshotRemainder } from "../../core/streamText";
 import {
   questionPromptTitle,
@@ -142,6 +143,7 @@ type Live = {
   toolsByIndex: Map<number, InFlightTool>;
   toolsById: Map<string, InFlightTool>;
   agentTasks: Map<string, LiveAgentTask>;
+  agentTokens: AgentTokens;
   /**
    * Every task Claude still runs for this session, by id: subagents, shells it
    * backgrounded, monitors. Each one ends in a notification that wakes Claude
@@ -489,6 +491,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     nextControlId: 1,
     toolsByIndex: new Map(),
     toolsById: new Map(),
+    agentTokens: new AgentTokens(),
     agentTasks: new Map(),
     backgroundTasks: new Map(),
     backgroundRows: new Map(),
@@ -587,6 +590,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   live.pendingAssistantBoundary = false;
   live.toolsByIndex.clear();
   live.toolsById.clear();
+  live.agentTokens.clear();
   live.agentTasks.clear();
   live.backgroundTasks.clear();
   live.backgroundRows.clear();
@@ -1236,6 +1240,7 @@ function handleAgentLifecycle(
       "in_progress",
       detail,
     );
+    noteAgentTaskTokens(live, rec, progress.toolUseId ?? task?.toolUseId);
     return true;
   }
 
@@ -1270,6 +1275,7 @@ function handleAgentLifecycle(
 
   const notice = parseTaskNotification(rec);
   if (notice) {
+    noteAgentTaskTokens(live, rec, notice.toolUseId ?? live.agentTasks.get(notice.taskId)?.toolUseId);
     if (!notice.ambient) {
       noteTaskNotification(live, notice);
       finishBackgroundTask(live, notice.taskId);
@@ -1420,6 +1426,15 @@ function noteSubagentNarration(live: Live, rec: Record<string, unknown>): void {
       agentModel: model,
     });
   const messageId = assistantMessageId(rec) ?? crypto.randomUUID();
+  const usage = asRecord(asRecord(rec.message)?.usage);
+  if (usage && assistantMessageId(rec)) {
+    const tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+      .reduce((sum, key) => {
+        const value = usage[key];
+        return sum + (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
+      }, 0);
+    live.onEvent({ type: "tool.updated", callId: parent.id, kind: "agent", agentTokens: live.agentTokens.record(parent.id, messageId, tokens) });
+  }
   const thinking = assistantThinkingBlocks(rec).join("").trim();
   if (thinking) {
     live.onEvent({
@@ -1440,6 +1455,12 @@ function noteSubagentNarration(live: Live, rec: Record<string, unknown>): void {
       text,
     });
   }
+}
+
+function noteAgentTaskTokens(live: Live, rec: Record<string, unknown>, callId?: string): void {
+  const tokens = asRecord(rec.usage)?.total_tokens;
+  if (callId && typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0)
+    live.onEvent({ type: "tool.updated", callId, kind: "agent", agentTokens: tokens });
 }
 
 /** Settles the subagent's own tool rows once their results come back. */
