@@ -54,7 +54,8 @@ export async function commitIssueWithTaskModel(
       diff: context.patch,
       subjectHint: issue.commitSubject ?? "",
     });
-    await gitCommit(cwd, message);
+    // Pathspec commit: another issue's staged files stay out of this commit.
+    await gitCommit(cwd, message, false, files);
     committed = true;
     const history = await gitHistory(cwd, 10);
     if (!verifiedIssueCommit(previousHead, history.head))

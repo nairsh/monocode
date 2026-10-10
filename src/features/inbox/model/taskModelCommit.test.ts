@@ -93,6 +93,8 @@ it("stages only recorded files, commits, and records the verified sha", async ()
   expect(fs.gitCommit).toHaveBeenCalledWith(
     "/tmp/web",
     "fix(ui): stop clipping",
+    false,
+    ["src/a.ts", "src/b.ts"],
   );
   const saved = loadLocalIssues()[0]!;
   expect(saved).toMatchObject({
