@@ -9,6 +9,7 @@ import {
 import {
   fetchClaudeRateLimits,
   fetchCodexRateLimits,
+  fetchDevinRateLimits,
   fetchOpencodeGoRateLimits,
 } from "./rateLimitsFetch";
 
@@ -48,6 +49,7 @@ const idle: Record<RateLimitProvider, ProviderRateLimits> = {
   claude: idleRateLimits("claude"),
   codex: idleRateLimits("codex"),
   opencode: idleRateLimits("opencode"),
+  devin: idleRateLimits("devin"),
 };
 
 export function useCachedRateLimits(
@@ -99,7 +101,9 @@ export function loadRateLimits(
           ? await fetchClaudeRateLimits(accountId)
           : provider === "codex"
             ? await fetchCodexRateLimits(accountId)
-            : await fetchOpencodeGoRateLimits();
+            : provider === "devin"
+              ? await fetchDevinRateLimits()
+              : await fetchOpencodeGoRateLimits();
       // A failed refresh (a blip, a 429, waking from sleep) keeps the last
       // good windows instead of blanking the footer until the next poll.
       const settled =

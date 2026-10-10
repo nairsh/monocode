@@ -96,6 +96,7 @@ export function UsageFooter({
   const wantClaude = providers.includes("claude");
   const wantCodex = providers.includes("codex");
   const wantOpencode = providers.includes("opencode");
+  const wantDevin = providers.includes("devin");
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const [, setAccountsVersion] = useState(0);
@@ -118,6 +119,7 @@ export function UsageFooter({
   const cachedClaude = useCachedRateLimits("claude", claudeAccountId);
   const cachedCodex = useCachedRateLimits("codex", codexAccountId);
   const opencode = useCachedRateLimits("opencode");
+  const devin = useCachedRateLimits("devin");
   const claude = claudeAccountAvailable
     ? cachedClaude
     : unavailableRateLimits(
@@ -145,6 +147,7 @@ export function UsageFooter({
     if (wantCodex && codexAccountAvailable)
       void loadRateLimits("codex", codexAccountId);
     if (wantOpencode) void loadRateLimits("opencode");
+    if (wantDevin) void loadRateLimits("devin");
   }, [
     claudeAccountAvailable,
     claudeAccountId,
@@ -153,6 +156,7 @@ export function UsageFooter({
     wantClaude,
     wantCodex,
     wantOpencode,
+    wantDevin,
   ]);
 
   const refresh = useCallback(() => {
@@ -164,6 +168,7 @@ export function UsageFooter({
     if (wantCodex && codexAccountAvailable)
       jobs.push(loadRateLimits("codex", codexAccountId, true));
     if (wantOpencode) jobs.push(loadRateLimits("opencode", "default", true));
+    if (wantDevin) jobs.push(loadRateLimits("devin", "default", true));
     const run = Promise.allSettled(jobs)
       .then(() => undefined)
       .finally(() => {
@@ -180,6 +185,7 @@ export function UsageFooter({
     wantClaude,
     wantCodex,
     wantOpencode,
+    wantDevin,
   ]);
 
   useEffect(() => {
@@ -300,6 +306,11 @@ export function UsageFooter({
     [codexAccountId, reconnectProvider],
   );
 
+  const reconnectDevin = useCallback(
+    () => reconnectProvider("devin", "default"),
+    [reconnectProvider],
+  );
+
   const selectAccount = useCallback(
     (provider: ProviderAccountProvider, accountId: string) => {
       selectProviderAccount(provider, project, accountId);
@@ -320,7 +331,7 @@ export function UsageFooter({
   );
 
   const showOpencodeChip = wantOpencode && opencode.status !== "unavailable";
-  const showUsage = wantClaude || wantCodex || showOpencodeChip;
+  const showUsage = wantClaude || wantCodex || showOpencodeChip || wantDevin;
   const showTerminals = terminals.length > 0;
   const showTerminalButton = Boolean(onNewTerminal || onShowTerminal);
   const terminalLabel = projectTerminalActive
@@ -380,6 +391,15 @@ export function UsageFooter({
           ) : null}
           {showOpencodeChip ? (
             <UsageProviderChip limits={opencode} now={now} project={project} />
+          ) : null}
+          {wantDevin ? (
+            // Devin has one login per machine, so there is no account picker.
+            <UsageProviderChip
+              limits={devin}
+              now={now}
+              project={project}
+              onReconnect={reconnectDevin}
+            />
           ) : null}
           <button
             type="button"

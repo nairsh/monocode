@@ -3,7 +3,11 @@ import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Block } from "../model/session";
-import { useBottomChatMotion } from "./useBottomChatMotion";
+import {
+  followSpring,
+  stepFollowSpring,
+  useBottomChatMotion,
+} from "./useBottomChatMotion";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -462,5 +466,38 @@ describe("bottom chat motion", () => {
     expect(entrances.map(({ message }) => message.dataset.chatMessage)).toEqual(
       ["reply"],
     );
+  });
+});
+
+describe("follow spring", () => {
+  it("settles a single jump without overshooting", () => {
+    const spring = followSpring();
+    let offset = stepFollowSpring(spring, 60, 60, 1);
+    let previous = 60;
+    for (let frame = 0; frame < 40; frame++) {
+      expect(offset).toBeLessThanOrEqual(previous);
+      expect(offset).toBeGreaterThanOrEqual(0);
+      previous = offset;
+      offset = stepFollowSpring(spring, offset, 0, 1);
+    }
+    expect(offset).toBe(0);
+  });
+
+  it("glides at the stream's speed instead of jolting at each update", () => {
+    const spring = followSpring();
+    let offset = 0;
+    const travelled: number[] = [];
+    // 12px every other frame: an update lands, then a frame with none.
+    for (let frame = 0; frame < 120; frame++) {
+      const grew = frame % 2 === 0 ? 12 : 0;
+      const before = offset + grew;
+      offset = stepFollowSpring(spring, before, grew, 1, 1);
+      if (frame >= 80) travelled.push(before - offset);
+    }
+    // Settled into a steady trail behind the end, moving every frame.
+    expect(offset).toBeGreaterThan(0);
+    expect(offset).toBeLessThanOrEqual(32);
+    expect(Math.min(...travelled)).toBeGreaterThan(3);
+    expect(Math.max(...travelled)).toBeLessThan(9);
   });
 });

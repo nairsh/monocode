@@ -8,6 +8,7 @@ import {
   bundledLanguagesInfo,
   createHighlighter,
   type BundledLanguage,
+  type GrammarState,
 } from "shiki";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
@@ -68,57 +69,17 @@ export function createBoundedCodePlugin(
   const results = new Map<string, HighlightResult>();
   const pending = new Map<string, Set<HighlightCallback>>();
   let cachedChars = 0;
-  // Adapted from T3 Code's completed-line grammar-state strategy; see NOTICE.
-  // The plugin has no document ID, so retain at most one prefix per language /
-  // theme pair and require an exact prefix match before reusing it.
-  const prefixes = new Map<string, { code: string; result: ReturnType<Highlighter["codeToTokens"]> }>();
-  let prefixChars = 0;
-
-  const tokenize = (highlighter: Highlighter, code: string, lang: string, names: readonly [string, string]) => {
-    const options = { lang: lang as BundledLanguage, themes: { light: names[0], dark: names[1] } };
-    if (lang === "text" || code.includes("\r") || code.length > maxChars) {
-      return highlighter.codeToTokens(code, options);
-    }
-    const key = `${lang}\u0000${names[0]}\u0000${names[1]}`;
-    let prefix = prefixes.get(key);
-    if (prefix && !code.startsWith(prefix.code)) prefix = undefined;
-    const end = code.lastIndexOf("\n") + 1;
-    const rebase = (result: ReturnType<Highlighter["codeToTokens"]>, offset: number) =>
-      offset === 0 ? result.tokens : result.tokens.map((line) =>
-        line.map((token) => ({ ...token, offset: token.offset + offset })),
-      );
-    if (end > (prefix?.code.length ?? 0)) {
-      const offset = prefix?.code.length ?? 0;
-      // Exclude the final newline: tokenizing its empty line would advance
-      // grammar state a second time before the unfinished line arrives.
-      const completed = highlighter.codeToTokens(code.slice(offset, end - 1), {
-        ...options,
-        grammarState: prefix?.result.grammarState,
-      });
-      if (!completed.grammarState) return highlighter.codeToTokens(code, options);
-      prefix = {
-        code: code.slice(0, end),
-        result: { ...completed, tokens: [...(prefix?.result.tokens ?? []), ...rebase(completed, offset)] },
-      };
-    }
-    if (!prefix) return highlighter.codeToTokens(code, options);
-    const previous = prefixes.get(key);
-    if (previous) prefixChars -= previous.code.length;
-    prefixes.delete(key);
-    prefixes.set(key, prefix);
-    prefixChars += prefix.code.length;
-    while (prefixes.size > Math.min(maxEntries, 8) || prefixChars > maxChars) {
-      const oldest = prefixes.keys().next().value;
-      if (oldest === undefined) break;
-      prefixChars -= prefixes.get(oldest)!.code.length;
-      prefixes.delete(oldest);
-    }
-    const tail = highlighter.codeToTokens(code.slice(prefix.code.length), {
-      ...options,
-      grammarState: prefix.result.grammarState,
-    });
-    return { ...tail, tokens: [...prefix.result.tokens, ...rebase(tail, prefix.code.length)] };
-  };
+  // Only the most recently highlighted fence needs a streaming checkpoint.
+  // Keep complete lines and their grammar state; the unfinished line must be
+  // tokenized again because its syntax can change as characters arrive.
+  let checkpoint:
+    | {
+        config: string;
+        source: string;
+        tokens: HighlightResult["tokens"];
+        state: GrammarState | undefined;
+      }
+    | undefined;
 
   const highlighterFor = (pair: [ThemeInput, ThemeInput]) => {
     const key = `${themeName(pair[0])}\u0000${themeName(pair[1])}`;
@@ -177,7 +138,65 @@ export function createBoundedCodePlugin(
           const usable = highlighter.getLoadedLanguages().includes(lang)
             ? lang
             : "text";
-          const result = tokenize(highlighter, code, usable, names);
+          const config = `${usable}\u0000${names[0]}\u0000${names[1]}`;
+          const previous =
+            checkpoint?.config === config && code.startsWith(checkpoint.source)
+              ? checkpoint
+              : undefined;
+          const offset = previous?.source.length ?? 0;
+          const boundary = code.lastIndexOf("\n") + 1;
+          const settings = {
+            lang: usable as BundledLanguage,
+            themes: { light: names[0], dark: names[1] },
+          };
+          let prefix = previous?.tokens ?? [];
+          let state = previous?.state;
+          if (boundary > offset) {
+            const lineEnd =
+              code[boundary - 2] === "\r" ? boundary - 2 : boundary - 1;
+            const complete = highlighter.codeToTokens(
+              code.slice(offset, lineEnd),
+              {
+                ...settings,
+                grammarState: state,
+              },
+            );
+            prefix = [
+              ...prefix,
+              ...complete.tokens.map((line) =>
+                line.map((token) => ({
+                  ...token,
+                  offset: token.offset + offset,
+                })),
+              ),
+            ];
+            state = complete.grammarState;
+          }
+          const tail = highlighter.codeToTokens(code.slice(boundary), {
+            ...settings,
+            grammarState: state,
+          });
+          const result = {
+            ...tail,
+            tokens: [
+              ...prefix,
+              ...tail.tokens.map((line) =>
+                line.map((token) => ({
+                  ...token,
+                  offset: token.offset + boundary,
+                })),
+              ),
+            ],
+          };
+          checkpoint =
+            boundary > 0 && boundary <= maxChars
+              ? {
+                  config,
+                  source: code.slice(0, boundary),
+                  tokens: prefix,
+                  state,
+                }
+              : undefined;
           remember(key, result);
           const callbacks = pending.get(key);
           pending.delete(key);
