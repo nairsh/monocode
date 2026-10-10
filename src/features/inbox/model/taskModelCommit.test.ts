@@ -168,3 +168,27 @@ it("rejects a commit that did not move HEAD", async () => {
   });
   expect(loadLocalIssues()[0]!.commitSha).toBeUndefined();
 });
+
+it("commits a shared assignment once and records the result on every ticket", async () => {
+  const a = approved(); const b = approved();
+  updateLocalIssue(a.id, { runBatchId: "batch" });
+  updateLocalIssue(b.id, { runBatchId: "batch" });
+  vi.mocked(fs.gitHistory)
+    .mockResolvedValueOnce({ head: "old", commits: [] })
+    .mockResolvedValueOnce({ head: "new", commits: [] });
+  await commitIssueWithTaskModel(loadLocalIssues()[0]!, "/tmp/web");
+  expect(fs.gitCommit).toHaveBeenCalledTimes(1);
+  expect(loadLocalIssues().every((issue) => issue.status === "done" && issue.runState === "completed" && issue.commitSha === "new")).toBe(true);
+  expect(loadLocalIssues().every((issue) => issue.reviews!.at(-1)!.kind === "commit")).toBe(true);
+});
+
+it("returns the entire assignment to review when its shared commit fails", async () => {
+  const a = approved(); const b = approved();
+  updateLocalIssue(a.id, { runBatchId: "batch" });
+  updateLocalIssue(b.id, { runBatchId: "batch" });
+  vi.mocked(fs.gitHistory).mockResolvedValue({ head: "old", commits: [] });
+  vi.mocked(taskModelCommitMessage).mockRejectedValue(new Error("offline"));
+  await commitIssueWithTaskModel(loadLocalIssues()[0]!, "/tmp/web");
+  expect(fs.gitCommit).not.toHaveBeenCalled();
+  expect(loadLocalIssues().every((issue) => issue.status === "in_review" && issue.runState === "failed")).toBe(true);
+});

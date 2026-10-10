@@ -12,6 +12,8 @@ export function TaskModelSettings() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
+  const [triageModel, setTriageModel] = useState("");
+  const [triageReasoningEffort, setTriageReasoningEffort] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -23,7 +25,15 @@ export function TaskModelSettings() {
         if (cancelled || !config) return;
         setEndpoint(config.endpoint);
         setModel(config.model);
-        setModels([config.model]);
+        setModels([
+          ...new Set(
+            [config.model, config.triageModel].filter(
+              (id): id is string => !!id,
+            ),
+          ),
+        ]);
+        setTriageModel(config.triageModel ?? "");
+        setTriageReasoningEffort(config.triageReasoningEffort ?? "");
         setReasoningEffort(config.reasoningEffort);
         setHasApiKey(config.hasApiKey);
       })
@@ -62,6 +72,7 @@ export function TaskModelSettings() {
             apiKey,
             model,
             reasoningEffort,
+            ...(triageModel ? { triageModel, triageReasoningEffort } : {}),
           });
           setEndpoint(config.endpoint);
           setApiKey("");
@@ -72,7 +83,8 @@ export function TaskModelSettings() {
     >
       <p className="text-[12px] text-content/45">
         Generates issue titles and polishes descriptions when you create an
-        issue. Your description is sent to this endpoint.
+        issue. Triage uses its own model at the same endpoint and can read
+        tracked source files in a temporary checkout to group backlog issues.
       </p>
       <fieldset
         disabled={busy}
@@ -90,6 +102,7 @@ export function TaskModelSettings() {
               setEndpoint(event.target.value);
               setModels([]);
               setModel("");
+              setTriageModel("");
               setHasApiKey(false);
               setSaved(false);
             }}
@@ -110,6 +123,7 @@ export function TaskModelSettings() {
               setApiKey(event.target.value);
               setModels([]);
               setModel("");
+              setTriageModel("");
               setSaved(false);
             }}
           />
@@ -123,6 +137,9 @@ export function TaskModelSettings() {
               setModels(next);
               setModel((previous) =>
                 next.includes(previous) ? previous : (next[0] ?? ""),
+              );
+              setTriageModel((previous) =>
+                next.includes(previous) ? previous : "",
               );
             })
           }
@@ -172,6 +189,50 @@ export function TaskModelSettings() {
         </label>
         <p className="text-[12px] text-content/45">
           Choose an effort supported by your model, or use the provider default.
+        </p>
+        <label className="text-[12px] text-content/65">
+          Triage model
+          <select
+            className={inputClass}
+            aria-label="Triage model"
+            value={triageModel}
+            onChange={(event) => {
+              setTriageModel(event.target.value);
+              setSaved(false);
+            }}
+          >
+            <option value="">Triage disabled — choose a model</option>
+            {models.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[12px] text-content/65">
+          Triage reasoning effort
+          <select
+            className={inputClass}
+            aria-label="Triage reasoning effort"
+            value={triageReasoningEffort}
+            onChange={(event) => {
+              setTriageReasoningEffort(event.target.value);
+              setSaved(false);
+            }}
+          >
+            <option value="">Provider default</option>
+            {["none", "minimal", "low", "medium", "high", "xhigh"].map(
+              (effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+        <p className="text-[12px] text-content/45">
+          Triage requires a model supporting tool calls. It inspects committed
+          code, then proposes groups and prerequisites for you to review.
         </p>
         <SecondaryButton type="submit" disabled={!endpoint.trim() || !model}>
           Save task model

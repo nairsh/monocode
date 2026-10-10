@@ -10,7 +10,7 @@ import {
   issueCommitMeta,
   issueRunFailurePatch,
   latestWorkReview,
-  updateLocalIssue,
+  updateIssueAssignment,
   verifiedIssueCommit,
   sanitizeCommitFiles,
   type LocalIssue,
@@ -40,8 +40,8 @@ export async function commitIssueWithTaskModel(
   try {
     if (!files.length)
       throw new Error("No valid issue file paths were recorded.");
-    updateLocalIssue(
-      issue.id,
+    updateIssueAssignment(
+      issue,
       { runState: "running", runHeartbeatAt: new Date().toISOString() },
       "Committing with the task model",
     );
@@ -67,8 +67,8 @@ export async function commitIssueWithTaskModel(
     const commit = history.commits.find((c) => c.sha === history.head);
     const sha = history.head!;
     const current = loadLocalIssues().find((e) => e.id === issue.id) ?? issue;
-    updateLocalIssue(
-      issue.id,
+    updateIssueAssignment(
+      issue,
       {
         status: "done",
         runState: "completed",
@@ -96,8 +96,8 @@ export async function commitIssueWithTaskModel(
         staged.map((file) => gitUnstageFile(cwd, file).catch(() => {})),
       );
     const detail = reason instanceof Error ? reason.message : String(reason);
-    updateLocalIssue(
-      issue.id,
+    updateIssueAssignment(
+      issue,
       issueRunFailurePatch(
         loadLocalIssues().find((e) => e.id === issue.id) ?? issue,
         "failed",

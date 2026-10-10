@@ -37,6 +37,12 @@ export type LocalIssue = {
   priority: number;
   projectPath: string;
   labels: string[];
+  /** Whether the agent should verify its work and provide supporting evidence. */
+  verificationRequired?: boolean;
+  dependsOn?: string[];
+  triageGroup?: { id: string; title: string; reason: string; files: string[] };
+  /** Issues in one assignment share its thread, review and commit. */
+  runBatchId?: string;
   agent: HarnessId | "";
   model?: string;
   modelSettings?: Record<string, string>;
@@ -79,6 +85,7 @@ export type IssueDraft = Pick<
   | "priority"
   | "projectPath"
   | "labels"
+  | "verificationRequired"
   | "agent"
   | "model"
   | "modelSettings"
@@ -203,7 +210,19 @@ function validIssue(value: unknown): value is LocalIssue {
     issue.priority <= 4 &&
     (issue.agent === "" || HARNESSES.includes(issue.agent)) &&
     (issue.model === undefined || typeof issue.model === "string") &&
+    (issue.dependsOn === undefined ||
+      (Array.isArray(issue.dependsOn) &&
+        issue.dependsOn.every((id) => typeof id === "string"))) &&
+    (issue.runBatchId === undefined || typeof issue.runBatchId === "string") &&
+    (issue.triageGroup === undefined ||
+      (typeof issue.triageGroup?.id === "string" &&
+        typeof issue.triageGroup.title === "string" &&
+        typeof issue.triageGroup.reason === "string" &&
+        Array.isArray(issue.triageGroup.files) &&
+        issue.triageGroup.files.every((file) => typeof file === "string"))) &&
     (issue.feedback === undefined || typeof issue.feedback === "string") &&
+    (issue.verificationRequired === undefined ||
+      typeof issue.verificationRequired === "boolean") &&
     (issue.commitSha === undefined || typeof issue.commitSha === "string") &&
     (issue.commitFiles === undefined ||
       (Array.isArray(issue.commitFiles) &&
@@ -252,6 +271,173 @@ function save(issues: LocalIssue[]) {
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
+/** Validate the whole graph before writing any dependency changes. */
+export function validateIssueDependencies(issues: LocalIssue[]) {
+  const byId = new Map(issues.map((issue) => [issue.id, issue]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (issue: LocalIssue) => {
+    if (visiting.has(issue.id))
+      throw new Error("Issue dependencies cannot form a cycle.");
+    if (visited.has(issue.id)) return;
+    visiting.add(issue.id);
+    for (const id of issue.dependsOn ?? []) {
+      const dependency = byId.get(id);
+      if (
+        !dependency ||
+        dependency.id === issue.id ||
+        dependency.projectPath !== issue.projectPath
+      )
+        throw new Error(
+          "Dependencies must reference another issue in the same project.",
+        );
+      visit(dependency);
+    }
+    visiting.delete(issue.id);
+    visited.add(issue.id);
+  };
+  issues.forEach(visit);
+  // An issue graph can be acyclic while two indivisible groups block each other.
+  const groupOf = (issue: LocalIssue) =>
+    issue.runBatchId ?? issue.triageGroup?.id ?? issue.id;
+  const edges = new Map<string, Set<string>>();
+  for (const issue of issues) {
+    if (issue.status === "done") continue;
+    const group = groupOf(issue);
+    if (!edges.has(group)) edges.set(group, new Set());
+    for (const id of issue.dependsOn ?? []) {
+      const dependency = byId.get(id)!;
+      const prerequisite = groupOf(dependency);
+      if (dependency.status !== "done" && prerequisite !== group)
+        edges.get(group)!.add(prerequisite);
+    }
+  }
+  visiting.clear();
+  visited.clear();
+  const visitGroup = (group: string) => {
+    if (visiting.has(group))
+      throw new Error(
+        "These assignments would block each other. Regroup the issues or remove the conflicting dependency.",
+      );
+    if (visited.has(group)) return;
+    visiting.add(group);
+    for (const dependency of edges.get(group) ?? []) visitGroup(dependency);
+    visiting.delete(group);
+    visited.add(group);
+  };
+  edges.forEach((_, group) => visitGroup(group));
+}
+
+/** One synchronous write keeps plans and group reservations all-or-nothing. */
+export function updateLocalIssues(
+  changes: { id: string; patch: Partial<LocalIssue>; message?: string }[],
+): LocalIssue[] {
+  const issues = loadLocalIssues();
+  const at = new Date().toISOString();
+  const byId = new Map(changes.map((change) => [change.id, change]));
+  if (
+    byId.size !== changes.length ||
+    changes.some((change) => !issues.some((issue) => issue.id === change.id))
+  )
+    throw new Error("Some issues no longer exist.");
+  const next = issues.map((issue) => {
+    const change = byId.get(issue.id);
+    if (!change) return issue;
+    const updated = {
+      ...issue,
+      ...change.patch,
+      id: issue.id,
+      number: issue.number,
+      createdAt: issue.createdAt,
+      updatedAt: at,
+      activity: change.message
+        ? [
+            ...issue.activity,
+            { id: crypto.randomUUID(), text: change.message, at },
+          ].slice(-MAX_ACTIVITY)
+        : issue.activity,
+    };
+    if (!validIssue(updated) || !updated.title.trim())
+      throw new Error("Some issue details are invalid.");
+    return updated;
+  });
+  validateIssueDependencies(next);
+  save(next);
+  return next.filter((issue) => byId.has(issue.id));
+}
+
+export function issueBlockers(
+  issue: LocalIssue,
+  issues = loadLocalIssues(),
+  included: readonly string[] = [],
+) {
+  return (issue.dependsOn ?? [])
+    .filter((id) => !included.includes(id))
+    .map((id) => issues.find((candidate) => candidate.id === id))
+    .filter(
+      (dependency): dependency is LocalIssue =>
+        !!dependency && dependency.status !== "done",
+    );
+}
+
+export function issueAssignment(issue: LocalIssue): LocalIssue[] {
+  return issue.runBatchId
+    ? loadLocalIssues().filter(
+        (candidate) => candidate.runBatchId === issue.runBatchId,
+      )
+    : [issue];
+}
+
+/** Apply a shared run result while retaining each ticket's previous reviews. */
+export function updateIssueAssignment(
+  issue: LocalIssue,
+  patch: Partial<LocalIssue>,
+  message?: string,
+): LocalIssue {
+  const assignment = issueAssignment(issue);
+  const current =
+    assignment.find((candidate) => candidate.id === issue.id) ?? issue;
+  const addedReviews = patch.reviews?.filter(
+    (review) => !current.reviews?.some((entry) => entry.id === review.id),
+  );
+  return updateLocalIssues(
+    assignment.map((candidate) => ({
+      id: candidate.id,
+      patch: {
+        ...patch,
+        ...(addedReviews
+          ? {
+              reviews: [...(candidate.reviews ?? []), ...addedReviews].map(
+                (review) => ({ ...review, text: capReviewText(review.text) }),
+              ),
+            }
+          : {}),
+      },
+      message,
+    })),
+  ).find((candidate) => candidate.id === issue.id)!;
+}
+
+export function localIssueAssignmentPrompt(issue: LocalIssue): string {
+  const assignment = issueAssignment(issue);
+  if (assignment.length === 1) return localIssuePrompt(issue);
+  const ordered: LocalIssue[] = [];
+  const visit = (candidate: LocalIssue) => {
+    if (ordered.some((entry) => entry.id === candidate.id)) return;
+    for (const id of candidate.dependsOn ?? []) {
+      const dependency = assignment.find((entry) => entry.id === id);
+      if (dependency) visit(dependency);
+    }
+    ordered.push(candidate);
+  };
+  assignment.forEach(visit);
+  return [
+    `Work on this group in one thread: ${issue.triageGroup?.title ?? "Related issues"}.`,
+    "Complete every issue below, in the listed dependency order. Treat their combined changes as one review and commit plan. Do not spawn separate threads for these tickets. Report each ticket's result explicitly.",
+    ...ordered.map(localIssuePrompt),
+  ].join("\n\n");
+}
+
 export function subscribeLocalIssues(listener: () => void) {
   const storage = (event: StorageEvent) => {
     if (event.key === LOCAL_ISSUES_KEY || event.key === null) listener();
@@ -264,15 +450,20 @@ export function subscribeLocalIssues(listener: () => void) {
   };
 }
 
-export function createLocalIssue(draft: IssueDraft): LocalIssue {
+export function createLocalIssue(
+  draft: IssueDraft,
+  id: string = crypto.randomUUID(),
+): LocalIssue {
   if (!draft.title.trim()) throw new Error("Give the issue a title.");
   const issues = loadLocalIssues();
+  if (issues.some((issue) => issue.id === id))
+    throw new Error("This issue already exists.");
   const at = new Date().toISOString();
   const issue: LocalIssue = {
     ...draft,
     title: draft.title.trim(),
     labels: cleanLabels(draft.labels),
-    id: crypto.randomUUID(),
+    id,
     number: Math.max(0, ...issues.map((issue) => issue.number)) + 1,
     createdAt: at,
     updatedAt: at,
@@ -335,6 +526,7 @@ export function updateLocalIssue(
   if (!next.title.trim() || !validIssue(next))
     throw new Error("Some issue details are invalid.");
   issues[index] = next;
+  validateIssueDependencies(issues);
   save(issues);
   return next;
 }
@@ -352,11 +544,26 @@ export function localIssuePrompt(issue: LocalIssue): string {
       .map((entry) => `${entry.at}: ${entry.text}`)
       .join("\n")}`,
     `Model: ${issue.model || "Project default"}\nModel options: ${JSON.stringify(issue.modelSettings || {})}`,
+    issue.dependsOn?.length
+      ? `Depends on: ${issue.dependsOn
+          .map((id) => {
+            const dependency = loadLocalIssues().find(
+              (candidate) => candidate.id === id,
+            );
+            return dependency
+              ? `MC-${dependency.number} (${dependency.status})`
+              : id;
+          })
+          .join(", ")}`
+      : "",
     issue.images?.length
       ? `## Attached images\n${issue.images.map((image) => image.name).join("\n")}\nUse the attached images as supporting context for this issue.`
       : "",
-    "Complete the work described by the title and description and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths and links to relevant files or artifacts. Capture evidence when practical; never claim evidence you did not produce. " +
+    "Complete the work described by the title and description. Do not commit yet: wait for review approval. In your final response, explain the changes, any validation performed, and remaining blockers. Include links to relevant files or artifacts. Never claim evidence you did not produce. " +
       COMMIT_PLAN_PROMPT,
+    issue.verificationRequired === false
+      ? "Verification not required: No separate verification or supporting evidence is required for this issue."
+      : "Verification required: Verify the completed work using appropriate methods, including computer or browser interaction when relevant, and provide supporting evidence in your final response.",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -506,40 +713,71 @@ export async function startLocalIssue(
   const issue = loadLocalIssues().find((issue) => issue.id === id);
   if (!issue) throw new Error("This issue no longer exists.");
   if (isIssueRunning(issue)) return;
+  const assignment = issueAssignment(issue);
+  if (assignment.some((candidate) => isIssueRunning(candidate)))
+    throw new Error("This group's agent is already working.");
+  const blockers = assignment.flatMap((candidate) =>
+    issueBlockers(
+      candidate,
+      loadLocalIssues(),
+      assignment.map((entry) => entry.id),
+    ),
+  );
+  if (options?.kind !== "commit" && blockers.length)
+    throw new Error(
+      `Blocked by ${[...new Set(blockers.map((entry) => `MC-${entry.number}`))].join(", ")}. Complete those issues first.`,
+    );
+  if (
+    options?.kind === "commit" &&
+    assignment.length > 1 &&
+    assignment.some((candidate) => candidate.status !== "in_review")
+  )
+    throw new Error(
+      "Every issue in the group must be in review before approving its shared commit.",
+    );
   if (!issue.projectPath || issue.projectPath === "~")
     throw new Error(
       "Choose a project before assigning this issue to an agent.",
     );
-  const reserved = updateLocalIssue(
-    id,
-    {
-      // Approval is final: the issue is Done while the commit run proceeds.
-      status:
-        options?.kind === "commit" ? "done" : options ? "in_progress" : "todo",
-      runState: "starting",
-      runError: undefined,
-      runKind: options?.kind ?? "work",
-      runOwner: ISSUE_WINDOW_ID,
-      runHeartbeatAt: new Date().toISOString(),
-      feedback: options?.feedback,
-    },
-    options?.kind === "commit"
-      ? "Approved review; moved to Done and preparing commit"
-      : options?.feedback
-        ? `Review feedback: ${options.feedback}`
-        : "Assigned to agent; preparing the issue thread",
-  );
+  const reserved = updateLocalIssues(
+    assignment.map((candidate) => ({
+      id: candidate.id,
+      patch: {
+        // Approval is final: the issue is Done while the commit run proceeds.
+        status:
+          options?.kind === "commit"
+            ? "done"
+            : options
+              ? "in_progress"
+              : "todo",
+        runState: "starting",
+        runError: undefined,
+        runKind: options?.kind ?? "work",
+        runOwner: ISSUE_WINDOW_ID,
+        runHeartbeatAt: new Date().toISOString(),
+        feedback: options?.feedback,
+      },
+      message:
+        options?.kind === "commit"
+          ? "Approved review; moved to Done and preparing commit"
+          : options?.feedback
+            ? `Review feedback: ${options.feedback}`
+            : "Assigned to agent; preparing the issue thread",
+    })),
+  ).find((candidate) => candidate.id === id)!;
   try {
     await launch(reserved);
   } catch (error) {
-    updateLocalIssue(
-      id,
-      issueRunFailurePatch(
-        loadLocalIssues().find((issue) => issue.id === id) ?? reserved,
-        "failed",
-        error instanceof Error ? error.message : String(error),
-      ),
-      "Agent could not start; retry is available",
+    updateLocalIssues(
+      issueAssignment(reserved).map((candidate) => ({
+        id: candidate.id,
+        patch: issueRunFailurePatch(
+          candidate,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        ),
+        message: "Agent could not start; retry is available",
+      })),
     );
     throw error;
   }

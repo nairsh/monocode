@@ -82,7 +82,12 @@ const ACTIONS: [&str; 12] = [
     "list", "delegate", "get", "steer", "message", "retry", "cancel", "wait", "review", "finish",
     "respond", "answer",
 ];
-const APP_ACTIONS: [&str; 32] = [
+const APP_ACTIONS: [&str; 37] = [
+    "issues.list",
+    "issues.get",
+    "issues.create",
+    "issues.update",
+    "issues.comment",
     "models.list",
     "sessions.list",
     "sessions.read",
@@ -125,6 +130,23 @@ sessions.*, worktrees.* and folders.* actions to choose which one. It may be
 left out when the Mono has a single project.
 
 Actions:
+  issues.list    {"status":"backlog","archived":false}  Project issues and their dependencies.
+  issues.get     {"issueId":"MC-12"}  Full issue, activity and review history.
+  issues.create  {"title":"Fix streaming","description":"...","priority":2,"labels":["streaming"]}
+                  Create a backlog issue. Reuse --request-id on retries.
+  issues.update  {"issueId":"MC-12","status":"todo","priority":2,
+                  "title":"...","description":"...","labels":["streaming"],
+                  "dependsOn":["MC-10"],"archived":false}
+                  Set only supplied properties; arrays replace previous values.
+                  Status is backlog, todo, in_progress, in_review or done.
+                  Priority is 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+                  Dependencies must be in this project and cannot form cycles.
+                  Status changes update the tracker without launching agents or
+                  approving commits. Managed assignments still finish in review.
+                  Another agent's running tickets cannot be edited.
+  issues.comment {"issueId":"MC-12","text":"Investigation notes..."}
+                  Append an activity entry. All issue actions accept project
+                  for a Mono and either MC-number or exact issue ID for issueId.
   models.list    {}  Available providers, models, settings and permission modes.
   sessions.list  {}  Project sessions with IDs, busy status, hasDraft and archived.
   sessions.read  {"sessionId":"...","before":"<turnId>","limit":3,"maxChars":1200}

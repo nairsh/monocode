@@ -1,0 +1,281 @@
+// @vitest-environment happy-dom
+import { beforeEach, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  applyTriagePlan,
+  startIssueGroup,
+  triageBacklog,
+  validateTriagePlan,
+  type TriagePlan,
+} from "./issueTriage";
+import {
+  createLocalIssue,
+  loadLocalIssues,
+  localIssueAssignmentPrompt,
+  startLocalIssue,
+  updateIssueAssignment,
+  updateLocalIssue,
+  updateLocalIssues,
+  type LocalIssue,
+} from "./localIssues";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+beforeEach(() => {
+  localStorage.clear();
+  vi.mocked(invoke).mockReset();
+});
+const seed = (title: string, projectPath = "/repo") =>
+  createLocalIssue({
+    title,
+    projectPath,
+    status: "backlog",
+    description: title,
+    priority: 0,
+    labels: [],
+    agent: "",
+  });
+const planFor = (issues: LocalIssue[]): TriagePlan => ({
+  groups: [
+    {
+      title: "Streaming",
+      reason: "Shared event handling in src/stream.ts",
+      files: ["src/stream.ts"],
+      issueIds: issues.map((issue) => issue.id),
+    },
+  ],
+  dependencies: [],
+});
+
+it("inspects repositories separately and makes no changes until the plan is applied", async () => {
+  const a = seed("Stream tokens");
+  const b = seed("Stream reconnect", "/other");
+  vi.mocked(invoke).mockImplementation(async (_command, args) =>
+    planFor((args as { issues: LocalIssue[] }).issues),
+  );
+  const preview = await triageBacklog();
+  expect(invoke).toHaveBeenCalledTimes(2);
+  expect(invoke).toHaveBeenCalledWith(
+    "task_model_triage",
+    expect.objectContaining({ cwd: "/repo", issues: [a] }),
+  );
+  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
+  applyTriagePlan(preview);
+  const saved = loadLocalIssues();
+  expect(saved[0]!.triageGroup!.id).not.toBe(saved[1]!.triageGroup!.id);
+  expect(saved.every((issue) => issue.status === "backlog")).toBe(true);
+});
+
+it("rejects omitted, duplicate and cross-project group members without changing storage", () => {
+  const a = seed("A");
+  const b = seed("B");
+  const other = seed("Other", "/other");
+  expect(() => validateTriagePlan(planFor([a]), [a, b])).toThrow("omitted");
+  const duplicate = planFor([a, b]);
+  duplicate.groups[0]!.issueIds.push(a.id);
+  expect(() => validateTriagePlan(duplicate, [a, b])).toThrow("exactly one");
+  expect(() => validateTriagePlan(planFor([a, other]), [a, other])).toThrow(
+    "span projects",
+  );
+  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
+});
+
+it("rejects invalid plans, missing references and circular dependencies", () => {
+  const a = seed("A");
+  const b = seed("B");
+  expect(() => validateTriagePlan(null, [a, b])).toThrow("invalid plan");
+  const plan = planFor([a, b]);
+  plan.dependencies = [
+    { issueId: a.id, dependsOn: "missing", reason: "Prerequisite" },
+  ];
+  expect(() => validateTriagePlan(plan, [a, b])).toThrow("same project");
+  plan.dependencies = [
+    { issueId: a.id, dependsOn: b.id, reason: "First" },
+    { issueId: b.id, dependsOn: a.id, reason: "Second" },
+  ];
+  expect(() => validateTriagePlan(plan, [a, b])).toThrow("cycle");
+  expect(loadLocalIssues().every((issue) => !issue.dependsOn)).toBe(true);
+});
+
+it("rejects a group deadlock even when individual dependencies have no cycle", () => {
+  const [a, b, c, d] = ["A", "B", "C", "D"].map((title) => seed(title));
+  const plan = {
+    groups: [...planFor([a!, b!]).groups, ...planFor([c!, d!]).groups],
+    dependencies: [
+      { issueId: a!.id, dependsOn: c!.id, reason: "C first" },
+      { issueId: d!.id, dependsOn: b!.id, reason: "B first" },
+    ],
+  };
+  expect(() => validateTriagePlan(plan, [a!, b!, c!, d!])).toThrow(
+    "block each other",
+  );
+});
+
+it("refuses stale triage results and applies dependencies atomically", () => {
+  const a = seed("A");
+  const b = seed("B");
+  const plan = planFor([a, b]);
+  plan.dependencies = [
+    { issueId: b.id, dependsOn: a.id, reason: "A establishes the protocol" },
+  ];
+  updateLocalIssue(a.id, { title: "Edited" });
+  expect(() => applyTriagePlan({ plan, snapshot: [a, b] })).toThrow(
+    "changed during triage",
+  );
+  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
+  applyTriagePlan({ plan, snapshot: loadLocalIssues() });
+  const saved = loadLocalIssues();
+  expect(saved[1]!.dependsOn).toEqual([a.id]);
+  expect(saved[0]!.triageGroup!.id).toBe(saved[1]!.triageGroup!.id);
+});
+
+it("reserves an entire group before launching once and sends prerequisites first", async () => {
+  const a = seed("Dependent");
+  const b = seed("Prerequisite");
+  const plan = planFor([a, b]);
+  plan.dependencies = [{ issueId: a.id, dependsOn: b.id, reason: "B first" }];
+  applyTriagePlan({ plan, snapshot: [a, b] });
+  const groupId = loadLocalIssues()[0]!.triageGroup!.id;
+  const launch = vi.fn(async (issue: LocalIssue) => {
+    const saved = loadLocalIssues();
+    expect(saved.every((entry) => entry.runState === "starting")).toBe(true);
+    expect(saved[0]!.runBatchId).toBe(saved[1]!.runBatchId);
+    const prompt = localIssueAssignmentPrompt(issue);
+    expect(prompt.indexOf(`MC-${b.number}:`)).toBeLessThan(
+      prompt.indexOf(`MC-${a.number}:`),
+    );
+    updateIssueAssignment(issue, {
+      sessionId: "shared",
+      runState: "running",
+      status: "in_progress",
+    });
+  });
+  await startIssueGroup(groupId, launch);
+  await expect(startIssueGroup(groupId, launch)).rejects.toThrow(
+    "fresh backlog",
+  );
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(loadLocalIssues().every((entry) => entry.sessionId === "shared")).toBe(
+    true,
+  );
+});
+
+it("blocks unfinished external prerequisites but allows a completed prerequisite", async () => {
+  const prerequisite = seed("Auth API");
+  const a = seed("Auth UI");
+  const b = seed("Auth refresh");
+  const plan = planFor([a, b]);
+  plan.dependencies = [
+    { issueId: a.id, dependsOn: prerequisite.id, reason: "Needs the API" },
+  ];
+  applyTriagePlan({ plan, snapshot: [a, b] });
+  const groupId = loadLocalIssues()[1]!.triageGroup!.id;
+  const launch = vi.fn(async () => {});
+  await expect(startIssueGroup(groupId, launch)).rejects.toThrow(
+    `MC-${prerequisite.number}`,
+  );
+  await expect(startLocalIssue(a.id, launch)).rejects.toThrow("Blocked");
+  updateLocalIssue(prerequisite.id, { status: "done" });
+  await startIssueGroup(groupId, launch);
+  expect(launch).toHaveBeenCalledTimes(1);
+});
+
+it("rejects incompatible agent choices and leaves issues unreserved", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  updateLocalIssue(a.id, { agent: "codex" });
+  updateLocalIssue(b.id, { agent: "claude" });
+  applyTriagePlan({ plan: planFor([a, b]), snapshot: loadLocalIssues() });
+  await expect(
+    startIssueGroup(loadLocalIssues()[0]!.triageGroup!.id, vi.fn()),
+  ).rejects.toThrow("same agent");
+  expect(
+    loadLocalIssues().every((issue) => !issue.runBatchId && !issue.runState),
+  ).toBe(true);
+});
+
+it("releases every group reservation on a refused launch and retries in one assignment", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  applyTriagePlan({ plan: planFor([a, b]), snapshot: [a, b] });
+  await expect(
+    startIssueGroup(loadLocalIssues()[0]!.triageGroup!.id, async () => {
+      throw new Error("offline");
+    }),
+  ).rejects.toThrow("offline");
+  expect(
+    loadLocalIssues().every(
+      (issue) =>
+        issue.runState === "failed" &&
+        issue.status === "todo" &&
+        !issue.runOwner,
+    ),
+  ).toBe(true);
+  const launch = vi.fn(async () => {});
+  await startLocalIssue(b.id, launch);
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(
+    loadLocalIssues().every((issue) => issue.runState === "starting"),
+  ).toBe(true);
+});
+
+it("preserves per-ticket review history and requires the entire group to be reviewed for a commit", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  applyTriagePlan({ plan: planFor([a, b]), snapshot: [a, b] });
+  await startIssueGroup(
+    loadLocalIssues()[0]!.triageGroup!.id,
+    async (issue) => {
+      updateIssueAssignment(issue, { sessionId: "shared" });
+    },
+  );
+  const ownReview = {
+    id: "peer",
+    at: new Date().toISOString(),
+    text: "B's peer review",
+    kind: "peer" as const,
+  };
+  updateLocalIssue(b.id, { reviews: [ownReview] });
+  const result = {
+    id: "work",
+    at: new Date().toISOString(),
+    text: "Both done",
+    kind: "work" as const,
+  };
+  updateIssueAssignment(loadLocalIssues()[0]!, {
+    runState: "completed",
+    status: "in_review",
+    reviews: [result],
+    runOwner: undefined,
+  });
+  expect(loadLocalIssues()[1]!.reviews).toEqual([ownReview, result]);
+  updateLocalIssue(b.id, { status: "todo" });
+  await expect(
+    startLocalIssue(a.id, vi.fn(), { kind: "commit" }),
+  ).rejects.toThrow("Every issue");
+  updateLocalIssue(b.id, { status: "in_review" });
+  await startLocalIssue(
+    a.id,
+    async (issue) => {
+      expect(loadLocalIssues().every((entry) => entry.status === "done")).toBe(
+        true,
+      );
+      updateIssueAssignment(issue, { commitSha: "abc", runState: "completed" });
+    },
+    { kind: "commit" },
+  );
+  expect(loadLocalIssues().every((entry) => entry.commitSha === "abc")).toBe(
+    true,
+  );
+});
+
+it("prevents partial writes when any dependency edit is invalid", () => {
+  const a = seed("A");
+  const b = seed("B");
+  expect(() =>
+    updateLocalIssues([
+      { id: a.id, patch: { title: "Changed" } },
+      { id: b.id, patch: { dependsOn: ["unknown"] } },
+    ]),
+  ).toThrow("same project");
+  expect(loadLocalIssues()[0]!.title).toBe("A");
+});

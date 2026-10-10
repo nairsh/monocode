@@ -2368,7 +2368,6 @@ function SidebarComponent({
           onGoBack={onGoBack}
           onGoForward={onGoForward}
           onNew={onNew}
-          onSearch={onSearch}
           searchActive={searchActive}
           onOpenInbox={onOpenInbox}
           inboxActive={inboxActive}

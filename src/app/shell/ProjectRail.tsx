@@ -10,7 +10,6 @@ import {
   PinOff,
   File,
   Plus,
-  Search,
   Settings,
   Zap,
 } from "../../shared/ui/icons";
@@ -81,7 +80,7 @@ import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
 import { ProjectLogoIcon } from "../../features/projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../features/projects/ui/ProjectMascot";
-import { RailAction, RailSearch } from "./RailAction";
+import { RailAction } from "./RailAction";
 import {
   issueNumbersSnapshot,
   requestOpenIssue,
@@ -199,7 +198,6 @@ type Props = {
   onGoBack?: () => void;
   onGoForward?: () => void;
   onNew?: () => void;
-  onSearch?: () => void;
   searchActive?: boolean;
   onOpenInbox?: () => void;
   inboxActive?: boolean;
@@ -241,7 +239,6 @@ export function ProjectRail({
   onGoBack,
   onGoForward,
   onNew,
-  onSearch,
   searchActive = false,
   onOpenInbox,
   inboxActive = false,
@@ -491,15 +488,6 @@ export function ProjectRail({
                   <div className="mt-0.5" />
                 </>
               ) : null}
-              <RailSearch
-                label="Search"
-                icon={Search}
-                onClick={onSearch}
-                active={searchActive}
-                shortcut={`${MOD}K`}
-                ariaLabel={`Search (${MOD}K)`}
-              />
-              <div className="mt-0.5" />
               <RailAction
                 label="Inbox"
                 icon={Inbox}

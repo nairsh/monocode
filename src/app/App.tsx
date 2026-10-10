@@ -27,7 +27,8 @@ import {
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
 import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
-import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { issueAssignment, localIssueAssignmentPrompt, updateIssueAssignment } from "../features/inbox/model/localIssues";
 import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
 import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
 import { taskModelConfig } from "../features/settings/model/taskModel";
@@ -1110,6 +1111,8 @@ function Workspace({
   const [activeTabId, setActiveTabIdState] = useState(
     () => windowTransfer?.activeTabId ?? resumed?.activeTabId ?? seed.tab.id,
   );
+  const selectedTitleTabIdsRef = useRef<string[]>([]);
+  const [selectedTitleTabIds, setSelectedTitleTabIds] = useState<string[]>([]);
   const [monoViewId, setMonoViewId] = useState<string | null>(null);
   const [monoDetailsOpen, setMonoDetailsOpen] = useState(false);
   const [monoArtifact, setMonoArtifact] = useState<{
@@ -3889,10 +3892,24 @@ function Workspace({
 
   /** ⌘W / Ctrl+W: close the focused dock terminal, else the focused pane. */
   const onCloseFocused = useCallback(() => {
+    const selectedIds = selectedTitleTabIdsRef.current.filter((id) =>
+      tabsRef.current.some((tab) => tab.id === id),
+    );
+    if (selectedIds.length > 1) {
+      const activeId = activeTabIdRef.current;
+      const fallbackId = selectedIds.includes(activeId)
+        ? tabsRef.current.find((tab) => !selectedIds.includes(tab.id))?.id ?? activeId
+        : activeId;
+      const closeIds = selectedIds.filter((id) => id !== fallbackId);
+      selectedTitleTabIdsRef.current = [];
+      setSelectedTitleTabIds([]);
+      onCloseTabs(closeIds, fallbackId);
+      return;
+    }
     const fileId = focusedDockTerminal();
     if (fileId) onCloseProjectTerminal(fileId);
     else onClosePane();
-  }, [focusedDockTerminal, onCloseProjectTerminal, onClosePane]);
+  }, [focusedDockTerminal, onCloseProjectTerminal, onClosePane, onCloseTabs]);
 
   const onCloseTitleTab = useCallback(
     (id: string) => {
@@ -7946,6 +7963,11 @@ function Workspace({
               `<monocode_app>\n${handAgent ? "App access is always enabled in this thread." : "The user's Operator command enables app access in this thread, including later turns without the command."} You can start session tabs or split session panes right or down, list and create project worktrees, choose a new session's checkout, read, continue, stop, archive or delete other project sessions, save unsent drafts, organize session folders, and read or write saved notes through its local CLI. Run \`${cli} --help\` when you need the exact commands and JSON fields. When reading another session, start with its latest two or three user/assistant exchanges. Request older exchanges with nextBefore or a larger excerpt only if needed. The CLI uses a session credential already in your environment; never print it. New sessions inherit this session's permission mode unless runtimeMode is set explicitly. For a new session with a draft, call sessions.start with its prompt and draft:true; do not submit a seed prompt. The returned ID can be used as besideSessionId to split its pane again or moved into a folder immediately. A normal sessions.start submits its prompt but returns after acceptance, so do not wait for that agent to finish before organizing it.\n</monocode_app>`,
             );
           }
+          if (operatorAccess) {
+            appContext.push(
+              "<monocode_issues>\nYou can manage this project's local tickets through the same app CLI: issues.list, issues.get, issues.create, issues.update and issues.comment. Use MC-number identifiers or exact issue IDs. Update status, priority (0 none, 1 urgent, 2 high, 3 medium, 4 low), title, description, labels and dependsOn. Inspect current details before editing. Dependencies must reference tickets in this project and cannot form cycles. Status updates do not launch agents or approve commits; managed work finishes in review. Use issues.comment for investigation notes and blockers. Run app --help for exact JSON fields.\n</monocode_issues>",
+            );
+          }
           // A Mono reads who it is ahead of the message, so it never takes it
           // for something the user pasted. A command must stay first.
           if (mono && !rawCommand) sendText = monoTurn(sendText, appContext);
@@ -8315,6 +8337,8 @@ function Workspace({
   }, [isIssueSessionRunning]);
 
   const onLaunchLocalIssue = useCallback(async (issue: LocalIssue) => {
+    const assignment = issueAssignment(issue);
+    const assignmentLabel = assignment.map(entry => `MC-${entry.number}`).join(", ");
     let session = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
     if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
     // Approval commits through the task model (no agent turn) when it is configured and the agent recorded its files.
@@ -8330,14 +8354,14 @@ function Workspace({
     }
     // Images travel with the first prompt of a thread only; later turns already have them.
     const firstRun = !session || !session.blocks.some(block => block.role === "user" && !block.draft);
-    const images = firstRun ? await loadIssueImages(issue.images) : [];
+    const images = firstRun ? (await Promise.all(assignment.map(entry => loadIssueImages(entry.images)))).flat() : [];
     // Only this issue's own draft may be consumed; any other draft belongs to the user.
     const ownDraftId = `local-issue-${issue.id}-draft`;
     if (!session) {
       const base = issue.agent
         ? newSession(issue.agent, issue.projectPath, issue.model, sessionDefaults?.runtimeMode, issue.modelSettings)
         : newDefaultSession(issue.projectPath, sessionDefaults?.runtimeMode);
-      session = { ...base, modelSettings: { ...base.modelSettings, ...issue.modelSettings }, title: `MC-${issue.number} ${issue.title}`, blocks: [{ id: ownDraftId, role: "user", text: localIssuePrompt(issue), attachments: images, draft: true }] };
+      session = { ...base, modelSettings: { ...base.modelSettings, ...issue.modelSettings }, title: `${assignmentLabel} ${assignment.length > 1 ? issue.triageGroup?.title ?? issue.title : issue.title}`, blocks: [{ id: ownDraftId, role: "user", text: localIssueAssignmentPrompt(issue), attachments: images, draft: true }] };
       // Persist the thread before linking or submitting, so a retry can reuse it.
       // No tab is needed to run it; "Open agent thread" opens one on demand.
       if (!(await upsertSession(session))) throw new Error("The issue thread could not be saved.");
@@ -8357,15 +8381,15 @@ function Workspace({
     const commitCwd = session.worktreeCwd || session.cwd;
     const committing = issue.runKind === "commit";
     const previousHead = committing ? (await gitHistory(commitCwd, 1)).head : undefined;
-    const assigned = updateLocalIssue(issue.id, { sessionId, agent: session.harness, model: session.model, modelSettings: session.modelSettings }, `${firstRun ? "Started" : "Continued"} the issue thread with ${session.model}`);
+    const assigned = updateIssueAssignment(issue, { sessionId, agent: session.harness, model: session.model, modelSettings: session.modelSettings }, `${firstRun ? "Started" : "Continued"} the issue thread with ${session.model}`);
     let settled = false;
     const prompt = committing
-      ? `The user approved local issue MC-${issue.number}: ${issue.title}. Create a commit for this issue's changes only. Inspect the diff and preserve unrelated existing changes. Do not push. If a safe scoped commit is not possible, explain the blocker instead of claiming success. Return the commit hash and a summary.`
+      ? `The user approved ${assignmentLabel}: ${issue.title}. Create one commit for this assignment's changes only. Inspect the diff and preserve unrelated existing changes. Do not push. If a safe scoped commit is not possible, explain the blocker instead of claiming success. Return the commit hash and a summary.`
       : issue.feedback
-        ? localIssueFeedbackPrompt(assigned, issue.feedback)
-        : localIssuePrompt(assigned);
+        ? `${localIssueFeedbackPrompt(assigned, issue.feedback)}\n\nThis assignment covers ${assignmentLabel}; keep all its tickets together in this thread.`
+        : localIssueAssignmentPrompt(assigned);
     const accepted = await submitWithSettlement({
-      submit: onSettled => submitSession(sessionId, prompt, images, {
+      submit: onSettled => submitSession(sessionId, `/operator\n${prompt}`, images, {
         managed: true,
         displayText: issueLaunchText(issue, committing),
         // Saved with the compact turn so handoffs, second opinions, and restarts keep the full ticket.
@@ -8373,7 +8397,7 @@ function Workspace({
         onSettled,
         onStarted: () => {
           // A commit run belongs to an already-approved (Done) issue; only work runs are In Progress.
-          if (!settled) updateLocalIssue(issue.id, { ...(committing ? {} : { status: "in_progress" as const }), runState: "running", runHeartbeatAt: new Date().toISOString() }, "Agent started working");
+          if (!settled) updateIssueAssignment(issue, { ...(committing ? {} : { status: "in_progress" as const }), runState: "running", runHeartbeatAt: new Date().toISOString() }, "Agent started working");
         },
         draftBlockId,
       }),
@@ -8406,13 +8430,13 @@ function Workspace({
             ? [...(current.reviews ?? []), { id: crypto.randomUUID(), text: output || "The agent finished without a written summary. Open its thread for details.", at: new Date().toISOString(), kind: committing ? "commit" as const : "work" as const, images: proofImages, evidenceError }]
             : current.reviews;
           if (!completed) {
-            updateLocalIssue(issue.id, issueRunFailurePatch(current, failedState, outcome.error || (committing ? `The commit run ${failedState === "cancelled" ? "was stopped before it finished" : "failed"}; nothing was committed.` : failedState === "cancelled" ? "The agent was stopped before it finished." : "The agent run failed.")), failedState === "cancelled" ? "Agent stopped" : "Agent needs attention");
+            updateIssueAssignment(issue, issueRunFailurePatch(current, failedState, outcome.error || (committing ? `The commit run ${failedState === "cancelled" ? "was stopped before it finished" : "failed"}; nothing was committed.` : failedState === "cancelled" ? "The agent was stopped before it finished." : "The agent run failed.")), failedState === "cancelled" ? "Agent stopped" : "Agent needs attention");
           } else if (committing && !committed) {
-            updateLocalIssue(issue.id, { ...issueRunFailurePatch(current, "failed", "The agent finished, but no new commit was found on HEAD. Review its reply, then retry or send feedback."), reviews }, "No commit was created; back in review");
+            updateIssueAssignment(issue, { ...issueRunFailurePatch(current, "failed", "The agent finished, but no new commit was found on HEAD. Review its reply, then retry or send feedback."), reviews }, "No commit was created; back in review");
           } else {
             const plan = committing ? undefined : parseCommitPlan(output);
             const commit = committed ? history?.commits.find(entry => entry.sha === history.head) : undefined;
-            updateLocalIssue(issue.id, {
+            updateIssueAssignment(issue, {
               status: committing ? "done" : "in_review", runState: "completed", runError: undefined, runOwner: undefined, runHeartbeatAt: undefined, reviews,
               // Files accumulate across feedback runs; the newest proposed subject wins.
               ...(plan?.files.length ? { commitFiles: [...new Set([...(current.commitFiles ?? []), ...plan.files])] } : {}),
@@ -8424,7 +8448,7 @@ function Workspace({
           // Never leave the issue "running" because saving the result failed.
           const runError = `The agent's result could not be saved: ${reason instanceof Error ? reason.message : String(reason)}`;
           try {
-            updateLocalIssue(issue.id, issueRunFailurePatch(loadLocalIssues().find(entry => entry.id === issue.id) ?? issue, "failed", runError));
+            updateIssueAssignment(issue, issueRunFailurePatch(loadLocalIssues().find(entry => entry.id === issue.id) ?? issue, "failed", runError));
           } catch {
             // Storage is unavailable; recovery fails the run once its lease expires.
           }
@@ -11405,6 +11429,15 @@ function Workspace({
     titleTabsRef.current = nextTitleTabs;
   }
   const titleTabs = titleTabsRef.current;
+  useEffect(() => {
+    const available = new Set(titleTabs.map((tab) => tab.id));
+    const next = selectedTitleTabIdsRef.current.filter((id) =>
+      available.has(id),
+    );
+    if (next.length === selectedTitleTabIdsRef.current.length) return;
+    selectedTitleTabIdsRef.current = next;
+    setSelectedTitleTabIds(next);
+  }, [titleTabs]);
 
   // `history` now spans every visited project; consumers that expect the
   // current project only get this slice.
@@ -12707,6 +12740,11 @@ function Workspace({
       }
       hideWindowControls={monoCovers && monoSidebarOpen && !!monoDetailsPanel}
       activeId={monoViewSession ? "" : activeTabId}
+      selectedTabIds={selectedTitleTabIds}
+      onSelectionChange={(ids) => {
+        selectedTitleTabIdsRef.current = ids;
+        setSelectedTitleTabIds(ids);
+      }}
       cwd={sidebarCwd}
       projectRailOpen={projectRailOpen}
       sessionSidebarOpen={sessionSidebarOpen}
@@ -12831,7 +12869,6 @@ function Workspace({
               onNew={onNew}
               openSessions={openProjectSessions}
               onNewTerminal={onNewTerminal}
-              onSearch={onOpenSearch}
               onOpenInbox={onOpenInbox}
               onOpenInboxItem={onOpenLinkedWorkItem}
               onOpenNotes={notesEnabled ? onOpenNotes : undefined}

@@ -123,6 +123,8 @@ type Props = {
   onToggleSidebar: () => void;
   onToggleSessionSidebar?: () => void;
   onSelect: (id: string) => void;
+  selectedTabIds?: string[];
+  onSelectionChange?: (ids: string[]) => void;
   /** Opens a blank chat tab; shown after the last tab. */
   onNew?: () => void;
   onNewTerminal?: () => void;
@@ -291,6 +293,7 @@ type SortableApi = ReturnType<typeof useAnimatedReorder>;
 function TitleTabItem({
   tab,
   active,
+  selected,
   closable,
   canDrag,
   sortable,
@@ -302,10 +305,11 @@ function TitleTabItem({
 }: {
   tab: Tab;
   active: boolean;
+  selected: boolean;
   closable: boolean;
   canDrag: boolean;
   sortable: SortableApi;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: ReactMouseEvent<HTMLButtonElement>) => void;
   onClose: (id: string) => void;
   onPinFile?: (fileId: string) => void;
   onContextMenu: (id: string, event: ReactMouseEvent<HTMLDivElement>) => void;
@@ -354,15 +358,17 @@ function TitleTabItem({
         title={accessibleTooltip}
         aria-label={accessibleTooltip}
         data-tauri-drag-region="false"
-        onClick={() => {
+        onClick={(event) => {
           if (sortable.consumeClick()) return;
-          onSelect(tab.id);
+          onSelect(tab.id, event);
         }}
         onDoubleClick={() => {
           if (tab.previewFileId) onPinFile?.(tab.previewFileId);
         }}
         className={`relative flex h-7.5 min-w-0 flex-1 cursor-default items-center gap-1.5 self-center rounded-md px-2 text-left ${
           closable ? "pr-7" : "pr-2.5"
+        } ${
+          selected ? "ring-1 ring-accent/70" : ""
         } ${
           active
             ? "bg-selection text-content"
@@ -653,6 +659,8 @@ function TitleBarComponent({
   onToggleSidebar,
   onToggleSessionSidebar,
   onSelect,
+  selectedTabIds = [],
+  onSelectionChange,
   onNew,
   onNewTerminal,
   onOpenSettings,
@@ -747,6 +755,37 @@ function TitleBarComponent({
     el.scrollBy({ left: direction * amount, behavior: "smooth" });
   }, []);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
+  const selectionAnchor = useRef(activeId);
+  const pickTab = useCallback(
+    (id: string, event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (event.metaKey || event.ctrlKey) {
+        selectionAnchor.current = id;
+        const next = selectedTabIds.includes(id)
+          ? selectedTabIds.filter((selectedId) => selectedId !== id)
+          : [...selectedTabIds, id];
+        onSelectionChange?.(next);
+        return;
+      }
+      if (event.shiftKey) {
+        const anchorIndex = tabIds.indexOf(selectionAnchor.current);
+        const targetIndex = tabIds.indexOf(id);
+        if (anchorIndex >= 0 && targetIndex >= 0) {
+          onSelectionChange?.(
+            tabIds.slice(
+              Math.min(anchorIndex, targetIndex),
+              Math.max(anchorIndex, targetIndex) + 1,
+            ),
+          );
+        }
+        onSelect(id);
+        return;
+      }
+      selectionAnchor.current = id;
+      onSelectionChange?.([]);
+      onSelect(id);
+    },
+    [onSelect, onSelectionChange, selectedTabIds, tabIds],
+  );
   const canDrag = tabs.length > 1;
 
   useEffect(() => {
@@ -1084,12 +1123,13 @@ function TitleBarComponent({
                     <TitleTabItem
                       tab={tab}
                       active={!entry.closing && tab.id === activeId}
+                      selected={!entry.closing && selectedTabIds.includes(tab.id)}
                       closable={
                         !entry.closing && titleTabClosable(tab, tabs.length)
                       }
                       canDrag={!entry.closing && canDrag}
                       sortable={sortable}
-                      onSelect={onSelect}
+                      onSelect={pickTab}
                       onClose={onClose}
                       onPinFile={onPinFile}
                       onContextMenu={(tabId, event) =>

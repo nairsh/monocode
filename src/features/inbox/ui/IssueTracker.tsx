@@ -49,6 +49,7 @@ import {
   preferredModelSettings,
   resolveModel,
   preferredModelId,
+  modelEffortLabel,
 } from "../../sessions/model/models";
 import { ModelPicker } from "../../sessions/ui/ModelPicker";
 import { HarnessIcon } from "../../sessions/ui/HarnessIcon";
@@ -79,6 +80,7 @@ import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
 import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import type { ApprovalDecision } from "../../../integrations/harness";
 import "./IssueTracker.css";
+import { IssueDependencies, useIssueTriage } from "./IssueTriage";
 
 const SORT_KEY = "monocode.issues.sort";
 const SHOW_EMPTY_KEY = "monocode.issues.showEmpty";
@@ -522,19 +524,32 @@ function CommitChip({ issue }: { issue: LocalIssue }) {
   );
 }
 
+function initialIssueTitle(description: string) {
+  const firstLine =
+    description
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "New issue";
+  return firstLine.length > 80
+    ? `${firstLine.slice(0, 79).trimEnd()}…`
+    : firstLine;
+}
+
 function NewIssue({
   project,
   projects,
   status,
   onClose,
   onCreate,
+  onPolishError,
   leaving,
 }: {
   project: string;
   projects: string[];
   status: IssueStatus;
   onClose: () => void;
-  onCreate: (draft: IssueDraft) => Promise<void>;
+  onCreate: (draft: IssueDraft) => LocalIssue;
+  onPolishError: (issue: LocalIssue, reason: unknown) => void;
   leaving?: boolean;
 }) {
   const [draft, setDraft] = useState<IssueDraft>(() => {
@@ -546,6 +561,7 @@ function NewIssue({
       priority: 0,
       projectPath: project,
       labels: [],
+      verificationRequired: true,
       agent: choice.harness,
       model: choice.model,
       modelSettings: preferredModelSettings(
@@ -570,20 +586,45 @@ function NewIssue({
     if (imagesBusy) setError("Wait for the images to finish saving.");
     else onClose();
   };
-  const submit = async () => {
+  const submit = () => {
     if (submitting.current || imagesBusy || !draft.description.trim()) return;
     submitting.current = true;
     setBusy(true);
     setError("");
     try {
-      const polished = await polishIssue(draft.description);
-      // The model's priority only fills in what the user left unset.
-      await onCreate({
+      const initialDraft = {
         ...draft,
-        title: polished.title,
-        description: polished.description,
-        priority: draft.priority || polished.priority,
-      });
+        title: initialIssueTitle(draft.description),
+      };
+      const issue = onCreate(initialDraft);
+      void Promise.resolve()
+        .then(() => polishIssue(initialDraft.description))
+        .then((polished) => {
+          const current = loadLocalIssues().find(
+            (entry) => entry.id === issue.id,
+          );
+          if (!current) return;
+
+          // Keep any edits made while the task model was working.
+          const patch: Partial<LocalIssue> = {};
+          if (current.title === initialDraft.title && polished.title.trim())
+            patch.title = polished.title.trim();
+          if (
+            current.description === initialDraft.description &&
+            polished.description.trim()
+          )
+            patch.description = polished.description;
+          if (
+            initialDraft.priority === 0 &&
+            current.priority === 0 &&
+            Number.isInteger(polished.priority) &&
+            polished.priority >= 0 &&
+            polished.priority < ISSUE_PRIORITIES.length
+          )
+            patch.priority = polished.priority;
+          if (Object.keys(patch).length) updateLocalIssue(issue.id, patch);
+        })
+        .catch((reason) => onPolishError(issue, reason));
       if (more) {
         setDraft((previous) => ({
           ...previous,
@@ -591,11 +632,15 @@ function NewIssue({
           description: "",
           images: [],
         }));
+        descriptionRef.current?.focus();
+        queueMicrotask(() => {
+          submitting.current = false;
+        });
       } else onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
       submitting.current = false;
+    } finally {
       setBusy(false);
     }
   };
@@ -619,6 +664,32 @@ function NewIssue({
             <Folder className="it-icon it-teal" />
             MC
           </span>
+          <button
+            type="button"
+            className="it-create-verification"
+            role="switch"
+            disabled={busy}
+            aria-checked={draft.verificationRequired !== false}
+            aria-label={
+              draft.verificationRequired !== false
+                ? "Verification required"
+                : "Verification not required"
+            }
+            onClick={() =>
+              change(
+                "verificationRequired",
+                draft.verificationRequired === false,
+              )
+            }
+          >
+            <span
+              className="it-create-verification-track"
+              aria-hidden="true"
+            />
+            {draft.verificationRequired !== false
+              ? "Verification required"
+              : "Verification not required"}
+          </button>
           <ChevronRight className="it-icon" />
           <span>New issue</span>
           <button
@@ -643,8 +714,9 @@ function NewIssue({
             required
           />
           <p className="it-muted">
-            Your task model generates a title and polishes this description on
-            creation. Configure it in Settings → Inbox → Task model.
+            The issue is saved immediately. Your task model generates a title
+            and polishes the description in the background. Configure it in
+            Settings → Inbox → Task model.
           </p>
           <IssueImages
             images={draft.images}
@@ -705,7 +777,7 @@ function NewIssue({
             disabled={busy || imagesBusy || !draft.description.trim()}
           >
             {busy ? <LoaderCircle className="it-icon animate-spin" /> : null}
-            {busy ? "Polishing issue…" : "Create issue"}
+            {busy ? "Creating issue…" : "Create issue"}
           </button>
         </footer>
       </form>
@@ -902,6 +974,11 @@ function IssueDetail({
   onError: (reason: unknown) => void;
 }) {
   const [draft, setDraft] = useState<IssueDraft>(issue);
+  const lastSavedText = useRef({
+    title: issue.title,
+    description: issue.description,
+    priority: issue.priority,
+  });
   const [moreMenu, setMoreMenu] = useState<HTMLElement | null>(null);
   const [picking, setPicking] = useState(false);
   const [comment, setComment] = useState("");
@@ -910,6 +987,33 @@ function IssueDetail({
   const [imagesBusy, setImagesBusy] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [blocks, setBlocks] = useState<Block[]>([]);
+  useEffect(() => {
+    const previous = lastSavedText.current;
+    if (
+      issue.title !== previous.title ||
+      issue.description !== previous.description ||
+      issue.priority !== previous.priority
+    ) {
+      setDraft((current) => ({
+        ...current,
+        title:
+          current.title === previous.title ? issue.title : current.title,
+        description:
+          current.description === previous.description
+            ? issue.description
+            : current.description,
+        priority:
+          current.priority === previous.priority
+            ? issue.priority
+            : current.priority,
+      }));
+      lastSavedText.current = {
+        title: issue.title,
+        description: issue.description,
+        priority: issue.priority,
+      };
+    }
+  }, [issue.title, issue.description, issue.priority]);
   const historicalBlockIds = useMemo(
     () => new Set(blocks.map((block) => block.id)),
     [blocks],
@@ -1300,7 +1404,7 @@ function IssueDetail({
                       }
                     }}
                   >
-                    Approve and commit
+                    {issue.runBatchId ? "Approve group and commit" : "Approve and commit"}
                   </button>
                 ) : null}
               </section>
@@ -1467,6 +1571,7 @@ function IssueDetail({
             }}
           />
           <h3>Agent workflow</h3>
+          <IssueDependencies issue={issue} onError={onError} />
           <p className="it-workflow-help">
             Move an issue to To Do to start (or resume) its dedicated thread
             with the title, description, and attached images. Approving a review
@@ -1654,6 +1759,7 @@ export function IssueTracker({
   );
   const showError = (reason: unknown) =>
     setError(reason instanceof Error ? reason.message : String(reason));
+  const triage = useIssueTriage(issues, project, onLaunch, showError);
   useEffect(() => {
     const refresh = () => {
       try {
@@ -1766,7 +1872,7 @@ export function IssueTracker({
       (issue) => onReview(issue, target),
     ).catch(showError);
   };
-  const create = async (draft: IssueDraft) => {
+  const create = (draft: IssueDraft) => {
     // Always save first in Backlog, so direct creation in To Do uses the same dispatch path.
     // In Progress is agent-owned, so creating there means dispatching too.
     const dispatch = draft.status === "todo" || draft.status === "in_progress";
@@ -1775,9 +1881,8 @@ export function IssueTracker({
       status: dispatch ? "backlog" : draft.status,
     });
     setNotice(`Created MC-${issue.number}`);
-    if (dispatch) {
-      await move(issue.id, "todo").catch(showError);
-    }
+    if (dispatch) void move(issue.id, "todo").catch(showError);
+    return issue;
   };
   const statuses = ISSUE_STATUSES.filter(
     (status) =>
@@ -2037,10 +2142,23 @@ export function IssueTracker({
         ghost = document.createElement("div");
         ghost.className = "issue-surface it-drag-ghost";
         ghost.style.width = `${rect.width}px`;
-        const copy = card.cloneNode(true) as HTMLElement;
-        copy.removeAttribute("data-issue-id");
-        copy.setAttribute("aria-hidden", "true");
-        ghost.append(copy);
+        ghost.setAttribute("aria-hidden", "true");
+        const stack = [issue.id, ...dragged.filter((id) => id !== issue.id)];
+        const stackOffset = 5;
+        ghost.style.height = `${rect.height + (stack.length - 1) * stackOffset}px`;
+        for (const [index, id] of stack.entries()) {
+          const source = id === issue.id ? card : cardOf(id);
+          if (!source) continue;
+          const layer = document.createElement("div");
+          layer.className = "it-drag-layer";
+          layer.style.transform = `translate(${index * stackOffset}px, ${index * stackOffset}px)`;
+          layer.style.zIndex = String(stack.length - index);
+          const copy = source.cloneNode(true) as HTMLElement;
+          copy.removeAttribute("data-issue-id");
+          copy.setAttribute("aria-hidden", "true");
+          layer.append(copy);
+          ghost.append(layer);
+        }
         if (dragged.length > 1) {
           const count = document.createElement("span");
           count.className = "it-drag-count";
@@ -2151,6 +2269,25 @@ export function IssueTracker({
               {projectName(issue.projectPath)}
             </span>
           ) : null}
+          {(() => {
+            const harness =
+              issue.agent || defaultSessionChoice(issue.projectPath).harness;
+            const model = resolveModel(harness, issue.model);
+            const settings = issue.modelSettings ?? {};
+            const reasoning = modelEffortLabel(model, settings) ??
+              settings.reasoningEffort ?? settings.reasoning ?? settings.thinking;
+            const modelName = issue.model ? model.name : `${model.name} (default)`;
+            return (
+              <span
+                className="it-chip it-card-model-chip"
+                title={`${modelName}${reasoning ? ` · ${reasoning} reasoning` : ""}`}
+              >
+                <HarnessIcon harness={harness} className="it-icon" />
+                <span>{modelName}</span>
+                {reasoning ? <span className="it-card-reasoning">{reasoning}</span> : null}
+              </span>
+            );
+          })()}
           {issue.labels.slice(0, 2).map((label) => (
             <span className="it-label" key={label}>
               {label}
@@ -2191,20 +2328,6 @@ export function IssueTracker({
       >
         <MoreHorizontal className="it-icon" />
       </Choice>
-      <span
-        className="it-card-model"
-        title={
-          issue.model ||
-          (issue.agent ? HARNESS_LABEL[issue.agent] : "Project default model")
-        }
-      >
-        <HarnessIcon
-          harness={
-            issue.agent || defaultSessionChoice(issue.projectPath).harness
-          }
-          className="it-icon"
-        />
-      </span>
     </div>
   );
   const dropClass = (status: IssueStatus) =>
@@ -2354,6 +2477,7 @@ export function IssueTracker({
             </>
           ) : null}
           <strong>{viewTitle}</strong>
+          {view !== "archive" ? triage.button : null}
           <button
             className="it-chip it-push"
             disabled={storeError}
@@ -2363,6 +2487,7 @@ export function IssueTracker({
             New issue<kbd>C</kbd>
           </button>
         </header>
+        {view !== "archive" ? triage.panel : null}
         <div className="it-toolbar">
           {view !== "archive" ? (
             <div
@@ -2646,6 +2771,11 @@ export function IssueTracker({
           status={createShown}
           onClose={() => setCreateStatus(null)}
           onCreate={create}
+          onPolishError={(issue, reason) => {
+            const message =
+              reason instanceof Error ? reason.message : String(reason);
+            showError(`MC-${issue.number} was created but could not be polished: ${message}`);
+          }}
           leaving={createLeaving}
         />
       ) : null}

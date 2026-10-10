@@ -18,6 +18,7 @@ mod gitlab;
 mod harness;
 mod harness_updates;
 mod inbox_media;
+mod issue_triage;
 mod jira;
 mod jsonc;
 mod linear;
@@ -407,6 +408,7 @@ pub fn run() {
             task_model::task_model_models,
             task_model::task_model_polish_issue,
             task_model::task_model_commit_message,
+            issue_triage::task_model_triage,
             jira::jira_set_config,
             jira::jira_list_projects,
             jira::jira_list_issues,

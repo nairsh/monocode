@@ -206,7 +206,61 @@ it("keeps the create issue dialog open when Create more is switched on", async (
   });
 });
 
-it("preserves the draft and creates nothing when polishing fails, then retries", async () => {
+it("creates the issue before polishing and updates it when polishing finishes", async () => {
+  let resolve!: (value: {
+    title: string;
+    description: string;
+    priority: number;
+  }) => void;
+  vi.mocked(polishIssue).mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  const description = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Issue description"]',
+  )!;
+  act(() => type(description, "Please fix the spacing\nAdd a test"));
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>(
+        '.it-create-footer button[type="submit"]',
+      )!
+      .click();
+    await Promise.resolve();
+  });
+
+  expect(loadLocalIssues()).toMatchObject([
+    {
+      title: "Please fix the spacing",
+      description: "Please fix the spacing\nAdd a test",
+    },
+  ]);
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(polishIssue).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    resolve({
+      title: "Fix spacing",
+      description: "Please fix the spacing and add a test.",
+      priority: 0,
+    });
+    await Promise.resolve();
+  });
+  expect(loadLocalIssues()[0]).toMatchObject({
+    title: "Fix spacing",
+    description: "Please fix the spacing and add a test.",
+  });
+});
+
+it("keeps the created issue when background polishing fails", async () => {
   vi.mocked(polishIssue).mockRejectedValueOnce(new Error("Endpoint offline"));
   await render();
   act(() =>
@@ -221,19 +275,21 @@ it("preserves the draft and creates nothing when polishing fails, then retries",
   const submit = document.querySelector<HTMLButtonElement>(
     '.it-create-footer button[type="submit"]',
   )!;
-  await act(async () => submit.click());
-  expect(loadLocalIssues()).toHaveLength(0);
-  expect(description.value).toBe("Please fix the spacing");
-  expect(document.querySelector('[role="alert"]')?.textContent).toBe(
-    "Endpoint offline",
-  );
-  await act(async () => submit.click());
-  expect(polishIssue).toHaveBeenLastCalledWith("Please fix the spacing");
+  await act(async () => {
+    submit.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   expect(loadLocalIssues()).toHaveLength(1);
   expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(description.value).toBe("Please fix the spacing");
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+    "MC-1 was created but could not be polished: Endpoint offline",
+  );
+  expect(polishIssue).toHaveBeenCalledWith("Please fix the spacing");
 });
 
-it("prevents duplicate creation and closing while polishing is pending", async () => {
+it("prevents duplicate creation while the background polish is pending", async () => {
   let resolve!: (value: { title: string; description: string }) => void;
   vi.mocked(polishIssue).mockImplementation(
     () =>
@@ -260,15 +316,12 @@ it("prevents duplicate creation and closing while polishing is pending", async (
       new Event("submit", { bubbles: true, cancelable: true }),
     );
   });
-  act(() =>
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    ),
-  );
-  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-  expect(
-    document.querySelector<HTMLFieldSetElement>(".it-create-fields")?.disabled,
-  ).toBe(true);
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(loadLocalIssues()).toHaveLength(1);
+  expect(loadLocalIssues()[0]).toMatchObject({
+    title: "Draft",
+    description: "Draft",
+  });
   expect(polishIssue).toHaveBeenCalledTimes(1);
   await act(async () =>
     resolve({
@@ -278,6 +331,66 @@ it("prevents duplicate creation and closing while polishing is pending", async (
     }),
   );
   expect(loadLocalIssues()).toHaveLength(1);
+  expect(loadLocalIssues()[0]!.title).toBe("Generated title");
+});
+
+it("keeps unsaved detail edits while applying the background polish", async () => {
+  let resolve!: (value: {
+    title: string;
+    description: string;
+    priority: number;
+  }) => void;
+  vi.mocked(polishIssue).mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  act(() =>
+    type(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Issue description"]',
+      )!,
+      "Draft details",
+    ),
+  );
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>(
+        '.it-create-footer button[type="submit"]',
+      )!
+      .click();
+    await Promise.resolve();
+  });
+
+  const issue = loadLocalIssues()[0]!;
+  act(() => button(`Open MC-${issue.number}: Draft details`).click());
+  const title = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Issue title"]',
+  )!;
+  act(() => type(title, "My manual title"));
+  await act(async () => {
+    resolve({
+      title: "Polished title",
+      description: "Polished details",
+      priority: 0,
+    });
+    await Promise.resolve();
+  });
+
+  expect(title.value).toBe("My manual title");
+  expect(loadLocalIssues()[0]!.title).toBe("Polished title");
+  act(() => button("Back to issues").click());
+  expect(loadLocalIssues()[0]).toMatchObject({
+    title: "My manual title",
+    description: "Polished details",
+  });
 });
 
 it("switches between Kanban and list layouts without changing issues", async () => {
@@ -432,6 +545,20 @@ it("drags every checked card together", async () => {
   await pointer(container.querySelector(".it-card")!, "pointerdown", 5, 5);
   await pointer(window, "pointermove", 90, 50);
   expect(document.querySelector(".it-drag-count")?.textContent).toBe("2");
+  const stack = document.querySelectorAll<HTMLElement>(".it-drag-layer");
+  expect(stack).toHaveLength(2);
+  expect(stack[0].style.transform).toBe("translate(0px, 0px)");
+  expect(stack[1].style.transform).toBe("translate(5px, 5px)");
+  expect(
+    [...stack].map((layer) =>
+      layer.querySelector(".it-card-open")?.getAttribute("aria-label"),
+    ),
+  ).toEqual(
+    expect.arrayContaining([
+      `Open MC-${first.number}: Fix clipping`,
+      `Open MC-${second.number}: Second`,
+    ]),
+  );
   await pointer(window, "pointerup", 90, 50);
   expect(loadLocalIssues().map((entry) => entry.status)).toEqual([
     "in_review",

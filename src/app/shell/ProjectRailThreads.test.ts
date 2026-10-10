@@ -440,11 +440,12 @@ it("tags a thread that belongs to an issue and opens that issue from the tag", a
   expect(props.onSelectSession).not.toHaveBeenCalled();
 });
 
-it("starts a new thread from the button above Search", async () => {
+it("keeps Search out of the sidebar while starting a new thread", async () => {
   props.onNew = vi.fn();
   await act(async () => root.render(createElement(Sidebar, props)));
   const button = container.querySelector<HTMLElement>('nav[aria-label="Projects"] button[aria-label^="New thread"]')!;
-  expect(button.nextElementSibling?.nextElementSibling?.getAttribute("aria-label")).toContain("Search");
+  expect(container.querySelector('nav[aria-label="Projects"] button[aria-label^="Search"]')).toBeNull();
+  expect(container.querySelector('nav[aria-label="Projects"] button[aria-label="Inbox"]')).not.toBeNull();
   await act(async () => button.click());
   expect(props.onNew).toHaveBeenCalledOnce();
 });

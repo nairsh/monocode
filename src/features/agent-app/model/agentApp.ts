@@ -1,4 +1,5 @@
 import { isHarnessAvailable } from "../../../integrations/harness/core/availability";
+import { handleIssueCommand } from "../../inbox/model/issueCommands";
 import { looksLikeProject } from "../../projects/model/recents";
 import {
   mergeModelSettings,
@@ -168,6 +169,11 @@ export type AgentAppHost = {
 };
 
 const FIELDS = new Map<string, readonly string[]>([
+  ["issues.list", ["project", "status", "archived"]],
+  ["issues.get", ["project", "issueId"]],
+  ["issues.create", ["project", "title", "description", "priority", "labels"]],
+  ["issues.update", ["project", "issueId", "title", "description", "status", "priority", "labels", "dependsOn", "archived"]],
+  ["issues.comment", ["project", "issueId", "text"]],
   ["models.list", []],
   ["sessions.list", ["project"]],
   ["sessions.read", ["sessionId", "before", "limit", "maxChars", "project"]],
@@ -942,6 +948,8 @@ export async function handleAgentApp(
   host: AgentAppHost,
 ): Promise<unknown> {
   fields(action, input);
+  if (action.startsWith("issues."))
+    return handleIssueCommand(source, requestId, action, input, requireProject(source, input, host));
   if (action.startsWith("artifacts."))
     return handleArtifacts(source, requestId, action, input, host);
   if (action.startsWith("soul."))
