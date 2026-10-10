@@ -10,6 +10,7 @@ import {
   localIssueFeedbackPrompt,
   localIssuePrompt,
   moveLocalIssue,
+  parseCommitPlan,
   recoverLocalIssueRuns,
   staleIssueRuns,
   startLocalIssue,
@@ -39,6 +40,30 @@ describe("local issue workflow", () => {
     expect(verifiedIssueCommit("aaa1111", "aaa1111")).toBe(false);
     expect(verifiedIssueCommit("aaa1111", null)).toBe(false);
     expect(verifiedIssueCommit(undefined, undefined)).toBe(false);
+  });
+  it("reads the agent's commit plan and ignores unsafe paths", () => {
+    const reply = [
+      "Done.",
+      "```commit-files",
+      "- src/a.ts",
+      "`src/b.ts`",
+      "/etc/passwd",
+      "../escape.ts",
+      "src/a.ts",
+      "```",
+      "Commit subject: fix(ui): stop clipping",
+    ].join("\n");
+    expect(parseCommitPlan(reply)).toEqual({
+      files: ["src/a.ts", "src/b.ts"],
+      subject: "fix(ui): stop clipping",
+    });
+    expect(parseCommitPlan("No plan here")).toEqual({
+      files: [],
+      subject: undefined,
+    });
+    const issue = createLocalIssue(draft);
+    expect(localIssuePrompt(issue)).toContain("```commit-files");
+    expect(localIssueFeedbackPrompt(issue, "x")).toContain("```commit-files");
   });
   it("extracts distinct absolute evidence image paths, ignoring external URLs", () => {
     expect(

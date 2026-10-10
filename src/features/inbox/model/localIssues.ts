@@ -47,6 +47,11 @@ export type LocalIssue = {
   runOwner?: string;
   runHeartbeatAt?: string;
   feedback?: string;
+  /** Repo-relative files the agent reported changing for this issue; the app stages exactly these on approval. */
+  commitFiles?: string[];
+  commitSubject?: string;
+  commitSha?: string;
+  commitMeta?: { subject: string; author: string; at: string };
   reviews?: {
     id: string;
     text: string;
@@ -86,6 +91,33 @@ export function verifiedIssueCommit(
   head: string | null | undefined,
 ): boolean {
   return Boolean(head && head !== previousHead);
+}
+const COMMIT_FILES_FENCE = /```commit-files\n([\s\S]*?)```/g;
+const COMMIT_SUBJECT_LINE = /^Commit subject:[ \t]*(.+)$/gm;
+/** Reads the commit plan the agent ends its reply with; the last block and line win. */
+export function parseCommitPlan(text: string): {
+  files: string[];
+  subject?: string;
+} {
+  const block = [...text.matchAll(COMMIT_FILES_FENCE)].pop()?.[1] ?? "";
+  const files = block
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^\s*[-*]\s+/, "")
+        .replace(/[`"']/g, "")
+        .trim(),
+    )
+    // Repo-relative only: the app stages these in the project's own index.
+    .filter(
+      (file) =>
+        file && !file.startsWith("/") && !file.split("/").includes(".."),
+    );
+  const subject = [...text.matchAll(COMMIT_SUBJECT_LINE)]
+    .pop()?.[1]
+    ?.replace(/^[`"']|[`"']$/g, "")
+    .trim();
+  return { files: [...new Set(files)], subject: subject || undefined };
 }
 export const capReviewText = (text: string) =>
   text.length > MAX_REVIEW_CHARS
@@ -150,6 +182,10 @@ function validIssue(value: unknown): value is LocalIssue {
     (issue.agent === "" || HARNESSES.includes(issue.agent)) &&
     (issue.model === undefined || typeof issue.model === "string") &&
     (issue.feedback === undefined || typeof issue.feedback === "string") &&
+    (issue.commitSha === undefined || typeof issue.commitSha === "string") &&
+    (issue.commitFiles === undefined ||
+      (Array.isArray(issue.commitFiles) &&
+        issue.commitFiles.every((file) => typeof file === "string"))) &&
     (issue.runOwner === undefined || typeof issue.runOwner === "string") &&
     (issue.runHeartbeatAt === undefined ||
       typeof issue.runHeartbeatAt === "string") &&
@@ -278,6 +314,8 @@ export function updateLocalIssue(
   return next;
 }
 
+const COMMIT_PLAN_PROMPT =
+  "List the repo-relative paths of every file you changed for this issue (including deletions), one per line, in a fenced block that starts with ```commit-files, then a line `Commit subject: <one-line conventional commit subject>`. Do not commit.";
 export function localIssuePrompt(issue: LocalIssue): string {
   return [
     `Work on local issue MC-${issue.number}: ${issue.title}`,
@@ -292,7 +330,8 @@ export function localIssuePrompt(issue: LocalIssue): string {
     issue.images?.length
       ? `## Attached images\n${issue.images.map((image) => image.name).join("\n")}\nUse the attached images as supporting context for this issue.`
       : "",
-    "Complete the work described by the title and description and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths and links to relevant files or artifacts. Capture evidence when practical; never claim evidence you did not produce.",
+    "Complete the work described by the title and description and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths and links to relevant files or artifacts. Capture evidence when practical; never claim evidence you did not produce. " +
+      COMMIT_PLAN_PROMPT,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -300,7 +339,7 @@ export function localIssuePrompt(issue: LocalIssue): string {
 
 // Feedback resumes the same thread, which already holds the full issue prompt.
 export const localIssueFeedbackPrompt = (issue: LocalIssue, feedback: string) =>
-  `Continue local issue MC-${issue.number}: ${issue.title} in this same thread.\n\nReview feedback:\n${feedback}\n\nAddress the feedback and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths; never claim evidence you did not produce.`;
+  `Continue local issue MC-${issue.number}: ${issue.title} in this same thread.\n\nReview feedback:\n${feedback}\n\nAddress the feedback and validate it. Do not commit yet: wait for review approval. In your final response, explain the changes, tests, and remaining blockers. Include proof using Markdown image links to absolute screenshot paths; never claim evidence you did not produce. ${COMMIT_PLAN_PROMPT}`;
 
 const hasWorkReview = (issue: LocalIssue) =>
   issue.reviews?.some((review) => review.kind === "work") ?? false;

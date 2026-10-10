@@ -51,6 +51,7 @@ import {
 import { ModelPicker } from "../../sessions/ui/ModelPicker";
 import { HarnessIcon } from "../../sessions/ui/HarnessIcon";
 import { IssueImages, useIssueImages } from "./IssueImages";
+import { gitCommitFiles } from "../../../platform/tauri/fs";
 import { polishIssue } from "../../settings/model/taskModel";
 import {
   createLocalIssue,
@@ -448,6 +449,68 @@ function IssueDialog({
   );
 }
 
+/** Short commit id; commit details load on first hover, never per card render. */
+function CommitChip({ issue }: { issue: LocalIssue }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState<string[] | null>(null);
+  const requested = useRef(false);
+  const meta = issue.commitMeta;
+  const show = () => {
+    setOpen(true);
+    if (requested.current) return;
+    requested.current = true;
+    gitCommitFiles(issue.projectPath, issue.commitSha!).then(
+      (changed) => setFiles(changed.map((file) => file.relative)),
+      () => setFiles([]),
+    );
+  };
+  return (
+    <span
+      ref={ref}
+      className="it-sha"
+      tabIndex={0}
+      onMouseEnter={show}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={show}
+      onBlur={() => setOpen(false)}
+      aria-label={`Commit ${issue.commitSha}`}
+    >
+      #{issue.commitSha!.slice(0, 7)}
+      {open ? (
+        <Popover
+          bare
+          anchor={ref}
+          side="bottom"
+          align="start"
+          width={300}
+          className="issue-surface it-menu it-sha-pop"
+        >
+          <strong>{meta?.subject || issue.commitSha}</strong>
+          {meta?.author ? (
+            <span>
+              {meta.author} · {new Date(meta.at).toLocaleString()}
+            </span>
+          ) : null}
+          <span>
+            {files === null
+              ? "Loading files…"
+              : files.length
+                ? `${files.length} file${files.length === 1 ? "" : "s"} changed`
+                : "No file list available"}
+          </span>
+          {files?.slice(0, 8).map((file) => (
+            <code key={file}>{file}</code>
+          ))}
+          {files && files.length > 8 ? (
+            <span>+{files.length - 8} more</span>
+          ) : null}
+        </Popover>
+      ) : null}
+    </span>
+  );
+}
+
 function NewIssue({
   project,
   projects,
@@ -503,7 +566,13 @@ function NewIssue({
     setError("");
     try {
       const polished = await polishIssue(draft.description);
-      await onCreate({ ...draft, ...polished });
+      // The model's priority only fills in what the user left unset.
+      await onCreate({
+        ...draft,
+        title: polished.title,
+        description: polished.description,
+        priority: draft.priority || polished.priority,
+      });
       if (more) {
         setDraft((previous) => ({
           ...previous,
@@ -885,6 +954,7 @@ function IssueDetail({
         <span>Issues</span>
         <ChevronRight className="it-icon" />
         <span className="it-muted">MC-{issue.number}</span>
+        {issue.commitSha ? <CommitChip issue={issue} /> : null}
         <button
           className="it-icon-button it-push"
           aria-label="Copy issue as prompt"
@@ -1881,7 +1951,10 @@ export function IssueTracker({
         aria-pressed={checked.includes(issue.id)}
         aria-label={`Open MC-${issue.number}: ${issue.title}`}
       >
-        <span className="it-card-id">MC-{issue.number}</span>
+        <span className="it-card-id">
+          MC-{issue.number}
+          {issue.commitSha ? <CommitChip issue={issue} /> : null}
+        </span>
         <span className="it-card-title">
           <StatusIcon status={issue.status} />
           <span>{issue.title}</span>

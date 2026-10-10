@@ -26,8 +26,10 @@ import {
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
-import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
 import { gitHistory } from "../platform/tauri/fs";
+import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
+import { taskModelConfig } from "../features/settings/model/taskModel";
 import { issueProofPaths, loadIssueImages, saveIssueImages, type IssueImage } from "../features/inbox/model/localIssueImages";
 import { attachmentsFromPaths } from "../features/sessions/model/attachments";
 import {
@@ -8146,6 +8148,17 @@ function Workspace({
   const onLaunchLocalIssue = useCallback(async (issue: LocalIssue) => {
     let session = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
     if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
+    // Approval commits through the task model (no agent turn) when it is configured and the agent recorded its files.
+    if (issue.runKind === "commit" && session && canCommitWithTaskModel(issue, !!(await taskModelConfig().catch(() => null)))) {
+      const threadId = session.id;
+      issueSettlingSessions.current.add(threadId);
+      try {
+        await commitIssueWithTaskModel(issue, session.worktreeCwd || session.cwd);
+      } finally {
+        issueSettlingSessions.current.delete(threadId);
+      }
+      return;
+    }
     // Images travel with the first prompt of a thread only; later turns already have them.
     const firstRun = !session || !session.blocks.some(block => block.role === "user" && !block.draft);
     const images = firstRun ? await loadIssueImages(issue.images) : [];
@@ -8205,7 +8218,7 @@ function Workspace({
           const replies = turnBlocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim());
           const output = replies[replies.length - 1]?.text || outcome.text || "";
           // A successful turn alone does not prove that the requested commit exists: HEAD must have moved.
-          const history = committing && completed ? await gitHistory(commitCwd, 1).catch(() => null) : null;
+          const history = committing && completed ? await gitHistory(commitCwd, 10).catch(() => null) : null;
           const committed = committing && verifiedIssueCommit(previousHead, history?.head);
           let proofImages: IssueImage[] = [];
           let evidenceError: string | undefined;
@@ -8226,7 +8239,15 @@ function Workspace({
           } else if (committing && !committed) {
             updateLocalIssue(issue.id, { ...issueRunFailurePatch(current, "failed", "The agent finished, but no new commit was found on HEAD. Review its reply, then retry or send feedback."), reviews }, "No commit was created; back in review");
           } else {
-            updateLocalIssue(issue.id, { status: committing ? "done" : "in_review", runState: "completed", runError: undefined, runOwner: undefined, runHeartbeatAt: undefined, reviews }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
+            const plan = committing ? undefined : parseCommitPlan(output);
+            const commit = committed ? history?.commits.find(entry => entry.sha === history.head) : undefined;
+            updateLocalIssue(issue.id, {
+              status: committing ? "done" : "in_review", runState: "completed", runError: undefined, runOwner: undefined, runHeartbeatAt: undefined, reviews,
+              // Files accumulate across feedback runs; the newest proposed subject wins.
+              ...(plan?.files.length ? { commitFiles: [...new Set([...(current.commitFiles ?? []), ...plan.files])] } : {}),
+              ...(plan?.subject ? { commitSubject: plan.subject } : {}),
+              ...(committed && history?.head ? { commitSha: history.head, commitMeta: { subject: commit?.subject ?? "", author: commit?.author ?? "", at: new Date(commit ? commit.timestamp * 1000 : Date.now()).toISOString() } } : {}),
+            }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
           }
         } catch (reason) {
           // Never leave the issue "running" because saving the result failed.

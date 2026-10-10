@@ -378,6 +378,7 @@ pub fn run() {
             task_model::task_model_save,
             task_model::task_model_models,
             task_model::task_model_polish_issue,
+            task_model::task_model_commit_message,
             jira::jira_set_config,
             jira::jira_list_projects,
             jira::jira_list_issues,

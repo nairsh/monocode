@@ -31,6 +31,7 @@ beforeEach(() => {
   vi.mocked(polishIssue).mockResolvedValue({
     title: "Generated title",
     description: "Polished details",
+    priority: 0,
   });
   container = document.createElement("div");
   container.id = "root";
@@ -104,6 +105,63 @@ it("opens issue creation with C, focuses the description, and closes with Escape
   );
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(container.inert).toBe(false);
+});
+
+it("applies the polished priority only while the draft has no priority", async () => {
+  vi.mocked(polishIssue).mockResolvedValue({
+    title: "Generated title",
+    description: "Polished details",
+    priority: 3,
+  });
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+  act(() =>
+    type(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Issue description"]',
+      )!,
+      "Dashboard is slow",
+    ),
+  );
+  await act(async () =>
+    document
+      .querySelector<HTMLButtonElement>(
+        '.it-create-footer button[type="submit"]',
+      )!
+      .click(),
+  );
+  expect(loadLocalIssues()[0]!.priority).toBe(3);
+});
+
+it("shows the commit sha on the card and loads its files only on hover", async () => {
+  const { invoke } = await import("@tauri-apps/api/core");
+  vi.mocked(invoke).mockResolvedValue([{ relative: "src/a.ts" }]);
+  reviewed({
+    status: "done",
+    commitSha: "abc1234def5678",
+    commitMeta: {
+      subject: "fix: stop clipping",
+      author: "Ada",
+      at: new Date(2026, 0, 2).toISOString(),
+    },
+  });
+  await render();
+  const chip = document.querySelector<HTMLElement>(".it-card .it-sha")!;
+  expect(chip.textContent).toBe("#abc1234");
+  expect(invoke).not.toHaveBeenCalled();
+  await act(async () =>
+    chip.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })),
+  );
+  expect(invoke).toHaveBeenCalledWith("git_commit_files", {
+    cwd: "/tmp/web",
+    sha: "abc1234def5678",
+  });
+  expect(document.body.textContent).toContain("fix: stop clipping");
+  expect(document.body.textContent).toContain("src/a.ts");
 });
 
 it("keeps the create issue dialog open when Create more is switched on", async () => {
@@ -209,7 +267,11 @@ it("prevents duplicate creation and closing while polishing is pending", async (
   ).toBe(true);
   expect(polishIssue).toHaveBeenCalledTimes(1);
   await act(async () =>
-    resolve({ title: "Generated title", description: "Polished details" }),
+    resolve({
+      title: "Generated title",
+      description: "Polished details",
+      priority: 0,
+    }),
   );
   expect(loadLocalIssues()).toHaveLength(1);
 });
