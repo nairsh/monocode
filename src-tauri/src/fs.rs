@@ -7690,13 +7690,22 @@ mod tests {
         }
         std::fs::write(dir.0.join("a.txt"), "alpha 2\n").unwrap();
         std::fs::write(dir.0.join("b.txt"), "beta 2\n").unwrap();
+        std::fs::write(dir.0.join("new.txt"), "new\n").unwrap();
         git_stage_file_for(&dir.0, "a.txt").unwrap();
         git_stage_file_for(&dir.0, "b.txt").unwrap();
-        git_commit_paths_for(&dir.0, "update a", &["a.txt".into()]).unwrap();
+        // The issue also adds a file; a pathspec commit needs it in the index first.
+        git_stage_file_for(&dir.0, "new.txt").unwrap();
+        git_commit_paths_for(&dir.0, "update a", &["a.txt".into(), "new.txt".into()]).unwrap();
         let index = git_diff_index_for(&dir.0);
         assert_eq!(index.files.len(), 1);
         assert_eq!(index.files[0].relative, "b.txt");
         assert!(index.files[0].staged);
+        // A deleted file stages and commits by path too.
+        std::fs::remove_file(dir.0.join("new.txt")).unwrap();
+        git_stage_file_for(&dir.0, "new.txt").unwrap();
+        git_commit_paths_for(&dir.0, "remove new", &["new.txt".into()]).unwrap();
+        assert_eq!(git_diff_index_for(&dir.0).files.len(), 1);
+        assert!(!dir.0.join("new.txt").exists());
     }
 
     #[test]

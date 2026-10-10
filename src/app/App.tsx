@@ -8208,6 +8208,8 @@ function Workspace({
       submit: onSettled => submitSession(sessionId, prompt, images, {
         managed: true,
         displayText: issueLaunchText(issue, committing),
+        // Saved with the compact turn so handoffs, second opinions, and restarts keep the full ticket.
+        ciContext: prompt,
         onSettled,
         onStarted: () => {
           // A commit run belongs to an already-approved (Done) issue; only work runs are In Progress.

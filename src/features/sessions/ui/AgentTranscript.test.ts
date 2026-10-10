@@ -161,7 +161,7 @@ describe("AgentTranscript collapsed work", () => {
     expect(markup).toContain("Fix 1 failed CI check for acme/web PR #42.");
     expect(markup).toMatch(/<details\b[^>]*>/);
     expect(markup).not.toMatch(/<details\b[^>]*\bopen[\s=>]/);
-    expect(markup).toContain("CI context</span>");
+    expect(markup).toContain("Full request</span>");
     expect(markup).toContain(
       "Checked commit: abc123\n\nRun tests: expected &lt;main&gt;, received &lt;script&gt;",
     );

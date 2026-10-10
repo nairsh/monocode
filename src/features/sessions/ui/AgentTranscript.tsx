@@ -2437,10 +2437,10 @@ function UserMessageBlock({
                 >
                   <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded text-xs text-content/50 transition-colors hover:text-content/80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-content/40 [&::-webkit-details-marker]:hidden">
                     <ChevronRight className="size-3 shrink-0 transition-transform group-open/ci:rotate-90" />
-                    <span>CI context</span>
+                    <span>Full request</span>
                   </summary>
                   <p className="mt-2 text-xs text-content/50">
-                    CI instructions and failure details included with this
+                    Exact instructions and details sent to the agent with this
                     request.
                   </p>
                   <pre className="mt-2 max-h-72 min-w-0 overflow-auto overscroll-contain rounded-md bg-content/5 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words text-content/70">

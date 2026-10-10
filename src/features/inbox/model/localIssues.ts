@@ -327,7 +327,7 @@ export function updateLocalIssue(
 }
 
 const COMMIT_PLAN_PROMPT =
-  "List the repo-relative paths of every file you changed for this issue (including deletions), one per line, in a fenced block that starts with ```commit-files, then a line `Commit subject: <one-line conventional commit subject>`. Do not commit.";
+  "List the paths, relative to your working directory, of every file you changed for this issue (including deletions), one per line, in a fenced block that starts with ```commit-files, then a line `Commit subject: <one-line conventional commit subject>`. Do not commit.";
 export function localIssuePrompt(issue: LocalIssue): string {
   return [
     `Work on local issue MC-${issue.number}: ${issue.title}`,
