@@ -2,56 +2,48 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-import { invoke } from "@tauri-apps/api/core";
-import { TaskModelSettings } from "./TaskModelSettings";
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+import { TriageModelSettings } from "./TriageModelSettings";
+import { loadTriageModel, saveTriageModel } from "../model/triageModel";
+import { ModelPicker } from "../../sessions/ui/ModelPicker";
 
-it("retains and saves a separate triage model and reasoning effort using the task endpoint", async () => {
+vi.mock("../../sessions/ui/ModelPicker", () => ({
+  ModelPicker: vi.fn(() => null),
+}));
+
+it("uses the normal picker and retains its independent provider, model and options", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.mocked(invoke).mockImplementation(async (command, args) =>
-    command === "task_model_config"
-      ? {
-          endpoint: "http://localhost:8000/v1",
-          model: "task",
-          reasoningEffort: "low",
-          hasApiKey: true,
-          triageModel: "triage",
-          triageReasoningEffort: "high",
-        }
-      : { ...(args as { config: object }).config, hasApiKey: true },
-  );
+  localStorage.clear();
+  saveTriageModel({
+    harness: "claude",
+    model: "claude:sonnet-4.6",
+    modelSettings: { effort: "high" },
+  });
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
-    await act(async () => root.render(createElement(TaskModelSettings)));
-    expect(
-      container.querySelector<HTMLSelectElement>('[aria-label="Triage model"]')!
-        .value,
-    ).toBe("triage");
-    expect(
-      container.querySelector<HTMLSelectElement>(
-        '[aria-label="Triage reasoning effort"]',
-      )!.value,
-    ).toBe("high");
     await act(async () =>
-      container
-        .querySelector("form")!
-        .dispatchEvent(
-          new Event("submit", { bubbles: true, cancelable: true }),
-        ),
+      root.render(createElement(TriageModelSettings, { project: "/repo" })),
     );
-    expect(invoke).toHaveBeenCalledWith("task_model_save", {
-      config: {
-        endpoint: "http://localhost:8000/v1",
-        apiKey: "",
-        model: "task",
-        reasoningEffort: "low",
-        triageModel: "triage",
-        triageReasoningEffort: "high",
-      },
+    const picker = () => vi.mocked(ModelPicker).mock.calls.slice(-1)[0][0];
+    expect(picker()).toMatchObject({
+      harness: "claude",
+      model: "claude:sonnet-4.6",
+      values: { effort: "high" },
+      project: "/repo",
     });
+    await act(async () => picker().onChange("codex", "codex:gpt-5.4"));
+    await act(async () =>
+      picker().onSettingsChange({ reasoningEffort: "low" }),
+    );
+    expect(loadTriageModel()).toEqual({
+      harness: "codex",
+      model: "codex:gpt-5.4",
+      modelSettings: { reasoningEffort: "low" },
+    });
+    expect(container.textContent).toContain("independently of the task model");
   } finally {
     await act(async () => root.unmount());
+    localStorage.clear();
     vi.unstubAllGlobals();
   }
 });

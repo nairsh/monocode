@@ -1,6 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
 import { pathKey } from "../../../shared/lib/paths";
 import { loadIssueImages } from "./localIssueImages";
+import { runTriageAgent } from "./triageAgent";
+import { loadTriageModel } from "../../settings/model/triageModel";
+import type { Attachment } from "../../sessions/model/session";
 import {
   isIssueRunning,
   issueBlockers,
@@ -200,6 +202,7 @@ export async function triageBacklog(
     throw new Error("There are no unassigned backlog issues to triage.");
   if (snapshot.some((issue) => !issue.projectPath || issue.projectPath === "~"))
     throw new Error("Choose a project for every backlog issue before triage.");
+  const target = loadTriageModel(project);
   const plan: TriagePlan = { groups: [], dependencies: [] };
   const analyzed: LocalIssue[] = [];
   const warnings: string[] = [];
@@ -225,11 +228,6 @@ export async function triageBacklog(
       );
     for (const [index, batch] of batches.entries()) {
       if (options.signal?.aborted) break;
-      const runId = crypto.randomUUID();
-      const cancel = () => {
-        void invoke("task_model_cancel_triage", { runId }).catch(() => {});
-      };
-      options.signal?.addEventListener("abort", cancel, { once: true });
       try {
         options.onProgress?.(
           {
@@ -239,7 +237,7 @@ export async function triageBacklog(
           },
           `Inspecting ${cwd} · batch ${index + 1}/${batches.length}`,
         );
-        const images: { issueId: string; name: string; url: string }[] = [];
+        const images: Attachment[] = [];
         for (const issue of batch) {
           if (!issue.images?.length) continue;
           if (!options.includeImages) {
@@ -257,9 +255,8 @@ export async function triageBacklog(
             );
           for (const image of await loadIssueImages(available))
             images.push({
-              issueId: issue.id,
-              name: image.name,
-              url: `data:${image.mimeType};base64,${image.data}`,
+              ...image,
+              name: `MC-${issue.number}: ${image.name}`,
             });
         }
         if (options.signal?.aborted) break;
@@ -284,12 +281,13 @@ export async function triageBacklog(
           warnings.push(
             `${cwd}: existing-issue context was limited to ${context.length}/${fullContextCount} tickets. Review dependencies against omitted tickets.`,
           );
-        const result = await invoke<TriagePlan>("task_model_triage", {
+        const result = await runTriageAgent({
           cwd,
           issues: batch,
           context,
-          runId,
           images,
+          target,
+          signal: options.signal,
         });
         if (options.signal?.aborted) break;
         // Validate the combined plan too: batches can introduce group-level deadlocks.
@@ -314,8 +312,6 @@ export async function triageBacklog(
           warnings.push(
             `${cwd}, batch ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
           );
-      } finally {
-        options.signal?.removeEventListener("abort", cancel);
       }
     }
     if (options.signal?.aborted) break;

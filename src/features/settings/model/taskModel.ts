@@ -5,8 +5,6 @@ export type TaskModelConfig = {
   model: string;
   reasoningEffort: string;
   hasApiKey: boolean;
-  triageModel?: string;
-  triageReasoningEffort?: string;
 };
 
 export const taskModelConfig = () =>

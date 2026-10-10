@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, expect, it, vi } from "vitest";
-import { invoke } from "@tauri-apps/api/core";
+import { runTriageAgent } from "./triageAgent";
 import {
   applyTriagePlan,
   detachUnstartedIssue,
@@ -26,10 +26,10 @@ import {
   type LocalIssue,
 } from "./localIssues";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("./triageAgent", () => ({ runTriageAgent: vi.fn() }));
 beforeEach(() => {
   localStorage.clear();
-  vi.mocked(invoke).mockReset();
+  vi.mocked(runTriageAgent).mockReset();
 });
 const seed = (title: string, projectPath = "/repo") =>
   createLocalIssue({
@@ -56,13 +56,12 @@ const planFor = (issues: LocalIssue[]): TriagePlan => ({
 it("inspects repositories separately and makes no changes until the plan is applied", async () => {
   const a = seed("Stream tokens");
   const b = seed("Stream reconnect", "/other");
-  vi.mocked(invoke).mockImplementation(async (_command, args) =>
-    planFor((args as { issues: LocalIssue[] }).issues),
+  vi.mocked(runTriageAgent).mockImplementation(async ({ issues }) =>
+    planFor(issues),
   );
   const preview = await triageBacklog();
-  expect(invoke).toHaveBeenCalledTimes(2);
-  expect(invoke).toHaveBeenCalledWith(
-    "task_model_triage",
+  expect(runTriageAgent).toHaveBeenCalledTimes(2);
+  expect(runTriageAgent).toHaveBeenCalledWith(
     expect.objectContaining({ cwd: "/repo", issues: [a] }),
   );
   expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
@@ -458,8 +457,7 @@ it("retriages selected tickets without retaining obsolete model dependencies or 
 it("batches more than 100 tickets, saves drafts and preserves successful projects when another fails", async () => {
   Array.from({ length: 101 }, (_, index) => seed(`Ticket ${index}`));
   seed("Failing project", "/other");
-  vi.mocked(invoke).mockImplementation(async (_command, args) => {
-    const input = args as { cwd: string; issues: LocalIssue[] };
+  vi.mocked(runTriageAgent).mockImplementation(async (input) => {
     if (input.cwd === "/other") throw new Error("offline");
     return planFor(input.issues);
   });
@@ -468,7 +466,7 @@ it("batches more than 100 tickets, saves drafts and preserves successful project
       if (partial.snapshot.length) saveTriageDraft(partial);
     },
   });
-  expect(invoke).toHaveBeenCalledTimes(3);
+  expect(runTriageAgent).toHaveBeenCalledTimes(3);
   expect(result.snapshot).toHaveLength(101);
   expect(result.warnings?.join(" ")).toContain("offline");
   expect(loadTriageDraft()?.snapshot).toHaveLength(101);
@@ -481,8 +479,7 @@ it("honors ticket selection and cancellation without applying a late model respo
   seed("Unselected");
   const controller = new AbortController();
   let finish!: (value: TriagePlan) => void;
-  vi.mocked(invoke).mockImplementation(async (command) => {
-    if (command === "task_model_cancel_triage") return;
+  vi.mocked(runTriageAgent).mockImplementation(async () => {
     return new Promise<TriagePlan>((resolve) => {
       finish = resolve;
     });
@@ -491,16 +488,11 @@ it("honors ticket selection and cancellation without applying a late model respo
     issueIds: [a.id],
     signal: controller.signal,
   });
-  expect(invoke).toHaveBeenCalledWith(
-    "task_model_triage",
-    expect.objectContaining({ issues: [a] }),
+  expect(runTriageAgent).toHaveBeenCalledWith(
+    expect.objectContaining({ issues: [a], signal: controller.signal }),
   );
   controller.abort();
   finish(planFor([a]));
   await expect(pending).rejects.toThrow("cancelled");
-  expect(invoke).toHaveBeenCalledWith(
-    "task_model_cancel_triage",
-    expect.objectContaining({ runId: expect.any(String) }),
-  );
   expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
 });

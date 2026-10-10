@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true' && '["macos-latest", "ubuntu-latest", "windows-latest"]' || '["macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true' && '["macos-latest", "ubuntu-latest", "windows-latest"]' || '["macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +125,7 @@ jobs:
           retention-days: 30
 
   appimage:
+    if: vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true'
     name: AppImage host libraries
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -194,6 +195,7 @@ jobs:
         run: bash scripts/assert-appimage-host-libs.sh
 
   rpm:
+    if: vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true'
     name: RPM build (${{ matrix.image }})
     timeout-minutes: 60
     runs-on: ubuntu-latest
@@ -269,6 +271,7 @@ jobs:
           if-no-files-found: error
 
   rpm-clean-install:
+    if: vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true'
     name: Clean rpm install
     timeout-minutes: 15
     needs: rpm

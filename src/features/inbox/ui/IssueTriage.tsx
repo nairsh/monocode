@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, LoaderCircle, X } from "../../../shared/ui/icons";
 import { pathKey, projectName } from "../../../shared/lib/paths";
+import { TriageModelSettings } from "../../settings/ui/TriageModelSettings";
 import {
   applyTriagePlan,
   detachUnstartedIssue,
@@ -183,6 +184,7 @@ export function useIssueTriage(
                 />
                 Include screenshots (requires a vision-capable triage model)
               </label>
+              <TriageModelSettings project={project} />
               <button
                 className="it-primary"
                 disabled={!candidates.length}

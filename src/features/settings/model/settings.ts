@@ -476,6 +476,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
       "issue title polish prompt openai endpoint model reasoning effort api key",
   },
   {
+    id: "triage-model",
+    section: "inbox",
+    label: "Triage model",
+    keywords: "agent provider model grouping backlog issues dependencies reasoning",
+  },
+  {
     id: "jira",
     section: "inbox",
     label: "Jira",

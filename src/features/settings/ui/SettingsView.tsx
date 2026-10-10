@@ -42,6 +42,7 @@ import { Popover } from "../../../shared/ui/Popover";
 import { SecondaryButton } from "../../../shared/ui/SecondaryButton";
 import { JiraSettings } from "./JiraSettings";
 import { TaskModelSettings } from "./TaskModelSettings";
+import { TriageModelSettings } from "./TriageModelSettings";
 import { GradientBlurBackground } from "./GradientBlurBackground";
 import { McpSettings } from "./McpSettings";
 import { InboxProviderMark } from "../../inbox/ui/InboxProviderMark";
@@ -1224,6 +1225,11 @@ function InboxPage({
         description="An OpenAI-compatible endpoint for issue creation."
       >
         <TaskModelSettings />
+      </Group>
+      <Group id="triage-model" title="Triage model" description="An agent from your normal model picker for analyzing and grouping issues.">
+        <div className="px-4 py-3.5">
+          <TriageModelSettings project={cwd} />
+        </div>
       </Group>
       <Group
         id="github"

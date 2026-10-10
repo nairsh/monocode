@@ -1,10 +1,19 @@
 # Workflow maintenance
 
-CI preserves the three-platform web/Rust and standalone-host checks, both
-browser engines, Fedora and Enterprise Linux RPM builds, and the clean RPM
-installation check. The AppImage build remains conditional on packaging inputs.
-These jobs cover different failure modes; in particular, installing an RPM on a
-build machine cannot replace installing it without development libraries.
+Desktop and standalone-host CI currently run on macOS only. Windows/Linux
+builds, AppImage and RPM checks, and the combined tagged release are paused.
+Set the repository Actions variable `ENABLE_CROSS_PLATFORM_BUILDS` to `true`
+to restore them. Unset or `false` keeps them disabled.
+
+Ubuntu runners still run shared browser, script, workflow and performance checks,
+upstream proposals, and macOS fork publication. These are support jobs, not
+Windows/Linux application builds. `fork-build.yml` continues to build and publish
+the Apple Silicon fork independently. The combined `release.yml` is gated at
+preflight because its publication and updater feed require all platform artifacts;
+skipping individual platform builds would otherwise break publication.
+
+The preserved RPM jobs cover distinct build and clean-install failure modes.
+The AppImage build also remains conditional on packaging inputs when re-enabled.
 
 ## Efficiency and reliability
 

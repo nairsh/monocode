@@ -1,8 +1,11 @@
 # Backlog triage and agent issue access
 
-In **Settings → Inbox → Task model**, choose a **Triage model** and optional
-reasoning effort. Triage shares the task model's endpoint and saved API key, but
-uses its own model. The endpoint must support Chat Completions function tools.
+Choose a **Triage model** using the normal agent/model dropdown in the triage
+scope panel or **Settings → Inbox**. The provider, model and model options are
+saved automatically, independently of the task model. Triage uses that agent's
+normal connection and selected project account; no task-model endpoint or API
+key is required. The initial choice follows your normal conversation default.
+Old endpoint-based triage settings are ignored; choose your preferred agent once.
 
 Click **Triage** in Issues to review the scope, then **Analyze N issues**. Checked
 tickets take precedence; otherwise the current project and search select fresh,
@@ -10,16 +13,21 @@ ungrouped backlog tickets. Existing groups stay intact unless you explicitly
 select their tickets for retriage. Repositories are analyzed separately, in
 batches of at most 100 tickets with a bounded input size. Successful batches
 remain available if a later batch fails. Review groups across batches for merges.
-The model inspects tracked files in a temporary detached Git worktree
-of HEAD. It cannot edit files or run arbitrary commands. Uncommitted changes are
-not included. Inspection is bounded, and the temporary worktree is removed when
-the run finishes or fails. Code search, file-list pagination and continued reads
-allow inspection beyond the start of large files. Every group must cite files
-the model actually read. Priority, agent/model choices and recent activity are
+The agent inspects code in a temporary detached Git worktree of HEAD, through
+its normal reading/search tools. Uncommitted changes are not included. The run
+uses supervised plan mode, denies permission requests, skips questions, and has
+no MonoCode app-tool access. Provider plan-mode restrictions still depend on the
+selected agent; this is not a new universal filesystem sandbox. A proposal is
+rejected if the checkout was modified. The provider session is stopped before
+the temporary worktree is removed on completion or failure. Every group must
+cite existing tracked files inside that checkout. Native tool execution is owned
+by the provider, so citations are validated as source paths rather than proof of
+an exact read call. Priority, agent/model choices and recent activity are
 included. Screenshot analysis is optional and requires a vision-capable model;
 up to eight screenshots of at most 2 MB each are included per batch. Skipped
-images are identified in the proposal. Cancel stops further inspection and
-batches; an in-flight HTTP request may finish before cleanup completes.
+images are identified in the proposal. Cancel interrupts that triage session and
+stops subsequent batches without affecting normal chats. Each batch has a
+five-minute cancellation deadline; provider startup/shutdown may delay cleanup.
 
 The proposed plan explains each group, lists affected files, and gives reasons
 for dependencies. Draft proposals and edits survive navigation and restart.

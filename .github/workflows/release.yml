@@ -15,6 +15,9 @@ concurrency:
 
 jobs:
   preflight:
+    # This release requires every platform's artifacts. macOS-only fork
+    # releases continue independently through fork-build.yml.
+    if: vars.ENABLE_CROSS_PLATFORM_BUILDS == 'true'
     name: Validate release metadata
     runs-on: ubuntu-latest
     timeout-minutes: 5
