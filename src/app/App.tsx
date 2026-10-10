@@ -26,6 +26,7 @@ import {
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
+import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
 import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
 import { gitHistory } from "../platform/tauri/fs";
 import { issueProofPaths, loadIssueImages, saveIssueImages, type IssueImage } from "../features/inbox/model/localIssueImages";
@@ -829,6 +830,8 @@ type SubmitOptions = ComposerTurnOptions & {
   ciRepair?: CiRepairRequest;
   /** Saved alongside the user turn; does not replace the submitted prompt. */
   ciContext?: string;
+  /** Shown as the user turn instead of the submitted prompt, which still goes to the agent. */
+  displayText?: string;
   secondOpinion?: SecondOpinionMeta;
   followUpBehavior?: FollowUpBehavior;
   noteCard?: NoteComposerCard;
@@ -7116,7 +7119,9 @@ function Workspace({
         !current.noteCard &&
         placeholderTitle
           ? titleFromPrompt(
-              operatorCommand.matched ? promptText : submittedText,
+              operatorCommand.matched
+                ? promptText
+                : (options?.displayText ?? submittedText),
               current.harness,
               attachments,
             )
@@ -7125,7 +7130,9 @@ function Workspace({
       const card =
         options?.secondOpinion ??
         (handoffCard ? handoffTurnCard(handoffCard) : undefined);
-      const visibleText = operatorCommand.matched
+      const visibleText = options?.displayText
+        ? options.displayText
+        : operatorCommand.matched
         ? promptText
         : card?.kind === "handoff"
           ? submittedText
@@ -7141,7 +7148,8 @@ function Workspace({
           ? { appRequestId: options.appRequestId }
           : {}),
         // The orchestrator writes these turns, not the user; hide them.
-        ...(options?.managed || options?.monoSessionCompletion
+        ...((options?.managed && !options.displayText) ||
+        options?.monoSessionCompletion
           ? { internal: true }
           : {}),
         ...(options?.monoSessionCompletion
@@ -8185,6 +8193,7 @@ function Workspace({
     const accepted = await submitWithSettlement({
       submit: onSettled => submitSession(sessionId, prompt, images, {
         managed: true,
+        displayText: issueLaunchText(issue, committing),
         onSettled,
         onStarted: () => {
           // A commit run belongs to an already-approved (Done) issue; only work runs are In Progress.
@@ -11310,6 +11319,7 @@ function Workspace({
   );
 
   const onOpenInbox = useCallback(() => openSection("inbox"), [openSection]);
+  useEffect(() => subscribeOpenIssue(onOpenInbox), [onOpenInbox]);
 
   const onOpenLinkedWorkItem = useCallback(
     (item: LinkedWorkItem, sessionId: string) => {
@@ -11655,6 +11665,7 @@ function Workspace({
   );
 
   const actions = useRef({
+    onNew,
     onNewFocused,
     onArchiveFocusedSession,
     onCloseOtherTabs,
@@ -11687,6 +11698,7 @@ function Workspace({
     onOpenApprovalSession,
   });
   actions.current = {
+    onNew,
     onNewFocused,
     onArchiveFocusedSession,
     onCloseOtherTabs,
@@ -11891,7 +11903,7 @@ function Workspace({
       const shortcut = resolveAppShortcut(e);
       if (shortcut) {
         if (
-          shortcut === "App: Search" &&
+          (shortcut === "App: Search" || shortcut === "App: New Thread") &&
           e.target instanceof Element &&
           e.target.closest(".monocode-terminal") &&
           e.ctrlKey &&
@@ -11902,7 +11914,8 @@ function Workspace({
         e.preventDefault();
         e.stopPropagation();
         const a = actions.current;
-        if (shortcut === "App: New Window")
+        if (shortcut === "App: New Thread") run("new_thread", a.onNew);
+        else if (shortcut === "App: New Window")
           run("new_window", () => void invoke("open_new_window"));
         else if (shortcut === "App: Open Project")
           run("open_project", () => void a.pickProject());

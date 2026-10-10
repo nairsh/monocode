@@ -71,6 +71,7 @@ import {
 import { copyMessage } from "../../../platform/tauri/clipboard";
 import type { Attachment } from "../model/session";
 import { visibleUserPrompt } from "../../orchestration/model/orchestration";
+import { IssueReferenceText } from "./IssueReferenceText";
 import { playCue } from "../../settings/model/sounds";
 import { legacyTaskListFromText } from "../model/taskList";
 import { resolveModel } from "../model/models";
@@ -2414,7 +2415,7 @@ function UserMessageBlock({
                   }}
                   className={`min-w-0 whitespace-pre-wrap break-words font-sans text-sm ${expanded ? "" : "line-clamp-4"}`}
                 >
-                  {displayText}
+                  <IssueReferenceText text={displayText} />
                 </pre>
               ) : null}
               {overflows ? (
