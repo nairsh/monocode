@@ -1336,7 +1336,8 @@ First public release. macOS (Apple Silicon) only.
 - Updater endpoint and minisign public key are injected at release time rather than committed, so forks do not inherit the maintainer's update channel.
 - macOS release builds sign with `APPLE_SIGNING_IDENTITY` via a config overlay; the committed default remains ad-hoc `-` for community builds.
 
-[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/hardbeat920/monocode/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hardbeat920/monocode/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/hardbeat920/monocode/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/hardbeat920/monocode/compare/v0.7.0...v0.7.1
