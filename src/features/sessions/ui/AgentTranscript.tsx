@@ -1676,9 +1676,13 @@ function TurnDuration({
       {completedAt != null ? (
         <span className="flex shrink-0 items-center gap-2.5">
           {dot}
-          <span className="shrink-0 text-content/35">
-            {formatClockTime(completedAt)}
-          </span>
+          <time
+            dateTime={new Date(completedAt).toISOString()}
+            title={new Date(completedAt).toLocaleString()}
+            className="shrink-0 text-content/35"
+          >
+            done {formatCompletionTime(completedAt)}
+          </time>
         </span>
       ) : null}
     </div>
@@ -1786,6 +1790,21 @@ function formatClockTime(epochMs: number): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/** Keep recent completions compact; older ones need a date as well as a weekday. */
+function formatCompletionTime(epochMs: number): string {
+  const date = new Date(epochMs);
+  const now = new Date();
+  const weekAgo = new Date(now);
+  weekAgo.setDate(now.getDate() - 7);
+  weekAgo.setHours(0, 0, 0, 0);
+  const day = new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    ...(epochMs < weekAgo.getTime() ? { month: "short", day: "numeric" } as const : {}),
+    ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } as const : {}),
+  }).format(epochMs);
+  return `${day} ${formatClockTime(epochMs)}`;
 }
 
 function CopyTurnButton({

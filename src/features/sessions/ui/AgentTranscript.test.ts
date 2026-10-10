@@ -25,6 +25,41 @@ function render(
 }
 
 describe("AgentTranscript collapsed work", () => {
+  it("shows a saved turn's completion weekday and time when reopened", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 9, 10, 12));
+    try {
+      const completedAt = new Date(2026, 9, 9, 1, 22).getTime();
+      const markup = render([
+        { id: "user", role: "user", text: "Inspect", startedAt: completedAt - 25_000, durationMs: 25_000 },
+        { id: "answer", role: "assistant", text: "Done" },
+      ]);
+      expect(markup).toContain('aria-label="Worked for 25s"');
+      expect(markup).toContain(`dateTime="${new Date(completedAt).toISOString()}"`);
+      expect(markup).toContain("done Friday");
+      expect(markup).toContain(new Date(completedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }));
+      const olderAt = new Date(2025, 8, 12, 1, 22).getTime();
+      const older = render([
+        { id: "old", role: "user", text: "Inspect", startedAt: olderAt - 25_000, durationMs: 25_000 },
+        { id: "answer", role: "assistant", text: "Done" },
+      ]);
+      expect(older).toContain("done Friday");
+      expect(older).toContain("2025");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not invent a completion date for a legacy turn without a start time", () => {
+    const markup = render([
+      { id: "user", role: "user", text: "Inspect", durationMs: 25_000 },
+      { id: "answer", role: "assistant", text: "Done" },
+    ]);
+    expect(markup).toContain('aria-label="Worked for 25s"');
+    expect(markup).not.toContain("done Friday");
+    expect(markup).not.toContain("dateTime=");
+  });
+
   it("keeps the completed time beside actions when a turn has no BTW control", () => {
     const markup = render([
       {

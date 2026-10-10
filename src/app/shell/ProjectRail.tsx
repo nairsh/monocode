@@ -85,7 +85,6 @@ import { DevModeSlot, TabVisitNav } from "./TitleBar";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
 import type { InstalledUpdate } from "../model/updateNotice";
 import { SettingsNav } from "./SettingsRail";
-import { Shimmer } from "../../shared/ui/Shimmer";
 import { resolveModel } from "../../features/sessions/model/models";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
 import { NineDotSpinner } from "../../features/sessions/ui/NineDotSpinner";
@@ -1449,13 +1448,7 @@ const ThreadRow = memo(function ThreadRow({
             {busy && !approval ? (
               <NineDotSpinner className="absolute -left-5 top-1 text-accent" />
             ) : null}
-            {busy ? (
-              <Shimmer as="span" duration={1.4} className="min-w-0 flex-1 truncate font-medium">
-                {title}
-              </Shimmer>
-            ) : (
-              <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
-            )}
+            <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
             <time
               title={new Date(session.updatedAt).toLocaleString()}
               className={`shrink-0 text-[11px] font-normal tabular-nums text-content/40 ${menuItems.length ? "group-hover/thread:invisible group-focus-within/thread:invisible" : ""}`}
