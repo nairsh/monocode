@@ -26,8 +26,11 @@ import {
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
-import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
-import { gitHistory } from "../platform/tauri/fs";
+import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
+import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
+import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
+import { taskModelConfig } from "../features/settings/model/taskModel";
 import { issueProofPaths, loadIssueImages, saveIssueImages, type IssueImage } from "../features/inbox/model/localIssueImages";
 import { attachmentsFromPaths } from "../features/sessions/model/attachments";
 import {
@@ -642,6 +645,7 @@ import type { QuickLaunch } from "../features/quick-composer/model/quickComposer
 import { claimInboxAutomationRuns } from "../features/automations/model/automationEvents";
 import {
   SECOND_OPINION_TITLE,
+  buildSecondOpinionCard,
   buildSecondOpinionRequest,
   harnessForTurn,
   turnEditedFiles,
@@ -829,6 +833,8 @@ type SubmitOptions = ComposerTurnOptions & {
   ciRepair?: CiRepairRequest;
   /** Saved alongside the user turn; does not replace the submitted prompt. */
   ciContext?: string;
+  /** Shown as the user turn instead of the submitted prompt, which still goes to the agent. */
+  displayText?: string;
   secondOpinion?: SecondOpinionMeta;
   followUpBehavior?: FollowUpBehavior;
   noteCard?: NoteComposerCard;
@@ -7116,7 +7122,9 @@ function Workspace({
         !current.noteCard &&
         placeholderTitle
           ? titleFromPrompt(
-              operatorCommand.matched ? promptText : submittedText,
+              operatorCommand.matched
+                ? promptText
+                : (options?.displayText ?? submittedText),
               current.harness,
               attachments,
             )
@@ -7125,7 +7133,9 @@ function Workspace({
       const card =
         options?.secondOpinion ??
         (handoffCard ? handoffTurnCard(handoffCard) : undefined);
-      const visibleText = operatorCommand.matched
+      const visibleText = options?.displayText
+        ? options.displayText
+        : operatorCommand.matched
         ? promptText
         : card?.kind === "handoff"
           ? submittedText
@@ -7141,7 +7151,8 @@ function Workspace({
           ? { appRequestId: options.appRequestId }
           : {}),
         // The orchestrator writes these turns, not the user; hide them.
-        ...(options?.managed || options?.monoSessionCompletion
+        ...((options?.managed && !options.displayText) ||
+        options?.monoSessionCompletion
           ? { internal: true }
           : {}),
         ...(options?.monoSessionCompletion
@@ -8146,6 +8157,17 @@ function Workspace({
   const onLaunchLocalIssue = useCallback(async (issue: LocalIssue) => {
     let session = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
     if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
+    // Approval commits through the task model (no agent turn) when it is configured and the agent recorded its files.
+    if (issue.runKind === "commit" && session && canCommitWithTaskModel(issue, !!(await taskModelConfig().catch(() => null)))) {
+      const threadId = session.id;
+      issueSettlingSessions.current.add(threadId);
+      try {
+        await commitIssueWithTaskModel(issue, session.worktreeCwd || session.cwd);
+      } finally {
+        issueSettlingSessions.current.delete(threadId);
+      }
+      return;
+    }
     // Images travel with the first prompt of a thread only; later turns already have them.
     const firstRun = !session || !session.blocks.some(block => block.role === "user" && !block.draft);
     const images = firstRun ? await loadIssueImages(issue.images) : [];
@@ -8185,6 +8207,9 @@ function Workspace({
     const accepted = await submitWithSettlement({
       submit: onSettled => submitSession(sessionId, prompt, images, {
         managed: true,
+        displayText: issueLaunchText(issue, committing),
+        // Saved with the compact turn so handoffs, second opinions, and restarts keep the full ticket.
+        ciContext: prompt,
         onSettled,
         onStarted: () => {
           // A commit run belongs to an already-approved (Done) issue; only work runs are In Progress.
@@ -8202,10 +8227,9 @@ function Workspace({
           const completed = outcome.status === "completed";
           const failedState = outcome.status === "cancelled" ? "cancelled" as const : "failed" as const;
           const turnBlocks = sessionsRef.current.find(entry => entry.id === sessionId)?.blocks.filter(block => !priorBlockIds.has(block.id)) ?? [];
-          const replies = turnBlocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim());
-          const output = replies[replies.length - 1]?.text || outcome.text || "";
+          const output = lastAgentReply(turnBlocks) || outcome.text || "";
           // A successful turn alone does not prove that the requested commit exists: HEAD must have moved.
-          const history = committing && completed ? await gitHistory(commitCwd, 1).catch(() => null) : null;
+          const history = committing && completed ? await gitHistory(commitCwd, 10).catch(() => null) : null;
           const committed = committing && verifiedIssueCommit(previousHead, history?.head);
           let proofImages: IssueImage[] = [];
           let evidenceError: string | undefined;
@@ -8226,7 +8250,15 @@ function Workspace({
           } else if (committing && !committed) {
             updateLocalIssue(issue.id, { ...issueRunFailurePatch(current, "failed", "The agent finished, but no new commit was found on HEAD. Review its reply, then retry or send feedback."), reviews }, "No commit was created; back in review");
           } else {
-            updateLocalIssue(issue.id, { status: committing ? "done" : "in_review", runState: "completed", runError: undefined, runOwner: undefined, runHeartbeatAt: undefined, reviews }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
+            const plan = committing ? undefined : parseCommitPlan(output);
+            const commit = committed ? history?.commits.find(entry => entry.sha === history.head) : undefined;
+            updateLocalIssue(issue.id, {
+              status: committing ? "done" : "in_review", runState: "completed", runError: undefined, runOwner: undefined, runHeartbeatAt: undefined, reviews,
+              // Files accumulate across feedback runs; the newest proposed subject wins.
+              ...(plan?.files.length ? { commitFiles: [...new Set([...(current.commitFiles ?? []), ...plan.files])] } : {}),
+              ...(plan?.subject ? { commitSubject: plan.subject } : {}),
+              ...(committed && history?.head ? { commitSha: history.head, commitMeta: issueCommitMeta(commit, "") } : {}),
+            }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
           }
         } catch (reason) {
           // Never leave the issue "running" because saving the result failed.
@@ -8243,6 +8275,47 @@ function Workspace({
     });
     if (!accepted) throw new Error("The selected agent could not start this issue. Open its thread for details, or retry.");
   }, [ensureOpenSession, sessionDefaults?.runtimeMode, submitSession]);
+
+  // A peer review runs in its own thread and never touches the issue's session, status, or run state.
+  const onReviewLocalIssue = useCallback(async (issue: LocalIssue, target: ModelTarget): Promise<{ text: string; sessionId: string }> => {
+    const source = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
+    if (!source || source.worktreeRemoved) throw new Error("The issue thread or its worktree is gone, so there is nothing to review.");
+    const { harness, model, modelSettings } = target;
+    const reviewer = resolveModel(harness, model);
+    const diff = await gitStagedContext(sessionWorkCwd(source)).catch(
+      reason =>({ summary: "", patch: `(${reason instanceof Error ? reason.message : String(reason)}; if the work was already committed, inspect git log)` }),
+    );
+    const session = {
+      ...newSession(harness, source.cwd, model, source.runtimeMode),
+      worktreeCwd: source.worktreeCwd,
+      branch: source.branch,
+      modelSettings: mergeModelSettings(reviewer, modelSettings),
+      title: `Review MC-${issue.number} · ${reviewer.name}`,
+    };
+    // Persisted without a tab, like the issue thread; the comment links to it.
+    if (!(await upsertSession(session))) throw new Error("The review thread could not be saved.");
+    sessionsRef.current = [...sessionsRef.current, session];
+    setSessions(sessionsRef.current);
+    return new Promise((resolve, reject) => {
+      void submitWithSettlement({
+        submit: onSettled => submitSession(session.id, peerReviewPrompt(issue, diff), [], {
+          managed: true,
+          onSettled,
+          secondOpinion: buildSecondOpinionCard({ from: source.harness, to: harness, userRequest: `MC-${issue.number} ${issue.title}`, files: [] }),
+        }),
+        rejectionMessage: "The selected model could not start the review.",
+        onSettled: async outcome => {
+          // Let the final transcript flush reach React before reading the reply.
+          await new Promise<void>(done => window.setTimeout(done, 0));
+          if (outcome.status !== "completed") {
+            reject(new Error(outcome.error || (outcome.status === "cancelled" ? "The review was stopped before it finished." : "The review failed.")));
+            return;
+          }
+          resolve({ text: lastAgentReply(sessionsRef.current.find(entry => entry.id === session.id)?.blocks) || outcome.text || "", sessionId: session.id });
+        },
+      });
+    });
+  }, [ensureOpenSession, submitSession]);
 
   const onReadIssueSession = useCallback(async (id: string) => sessionsRef.current.find(session => session.id === id) ?? await getSession(id), []);
 
@@ -11310,6 +11383,7 @@ function Workspace({
   );
 
   const onOpenInbox = useCallback(() => openSection("inbox"), [openSection]);
+  useEffect(() => subscribeOpenIssue(onOpenInbox), [onOpenInbox]);
 
   const onOpenLinkedWorkItem = useCallback(
     (item: LinkedWorkItem, sessionId: string) => {
@@ -11655,6 +11729,7 @@ function Workspace({
   );
 
   const actions = useRef({
+    onNew,
     onNewFocused,
     onArchiveFocusedSession,
     onCloseOtherTabs,
@@ -11687,6 +11762,7 @@ function Workspace({
     onOpenApprovalSession,
   });
   actions.current = {
+    onNew,
     onNewFocused,
     onArchiveFocusedSession,
     onCloseOtherTabs,
@@ -11891,7 +11967,7 @@ function Workspace({
       const shortcut = resolveAppShortcut(e);
       if (shortcut) {
         if (
-          shortcut === "App: Search" &&
+          (shortcut === "App: Search" || shortcut === "App: New Thread") &&
           e.target instanceof Element &&
           e.target.closest(".monocode-terminal") &&
           e.ctrlKey &&
@@ -11902,7 +11978,8 @@ function Workspace({
         e.preventDefault();
         e.stopPropagation();
         const a = actions.current;
-        if (shortcut === "App: New Window")
+        if (shortcut === "App: New Thread") run("new_thread", a.onNew);
+        else if (shortcut === "App: New Window")
           run("new_window", () => void invoke("open_new_window"));
         else if (shortcut === "App: Open Project")
           run("open_project", () => void a.pickProject());
@@ -12317,6 +12394,7 @@ function Workspace({
             recents={recents}
             onStart={onStartInboxItem}
             onLaunchLocalIssue={onLaunchLocalIssue}
+            onReviewLocalIssue={onReviewLocalIssue}
             onReadIssueSession={onReadIssueSession}
             onIssueApproval={onApproval}
             onAsk={onAskInboxItem}
@@ -12352,6 +12430,7 @@ function Workspace({
       sectionRepairSessions,
       onStartInboxItem,
       onLaunchLocalIssue,
+      onReviewLocalIssue,
       onReadIssueSession,
       onApproval,
       onAskInboxItem,

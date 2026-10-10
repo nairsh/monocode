@@ -37,6 +37,12 @@ describe("resolveAppShortcut", () => {
     ).toBeNull();
   });
 
+  it("starts a new thread with Mod+N and keeps Mod+Shift+N for a new window", () => {
+    expect(resolveAppShortcut(key({ key: "n", metaKey: true }))).toBe("App: New Thread");
+    expect(resolveAppShortcut(key({ key: "n", ctrlKey: true }))).toBe("App: New Thread");
+    expect(resolveAppShortcut(key({ key: "N", metaKey: true, shiftKey: true }))).toBe("App: New Window");
+  });
+
   it("resolves the default app chords", () => {
     expect(resolveAppShortcut(key({ key: "k", metaKey: true }))).toBe(
       "App: Search",

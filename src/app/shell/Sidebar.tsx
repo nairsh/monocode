@@ -2327,6 +2327,7 @@ function SidebarComponent({
           onOpenProject={onOpenProject}
           onRemoveProject={onRemoveProject}
           onTabChange={onCompactTabPick}
+          onNew={onNew}
           onSearch={onSearch}
           searchActive={searchActive}
           onOpenInbox={onOpenInbox}
@@ -2358,6 +2359,7 @@ function SidebarComponent({
           canGoForward={canGoForward}
           onGoBack={onGoBack}
           onGoForward={onGoForward}
+          onNew={onNew}
           onSearch={onSearch}
           searchActive={searchActive}
           onOpenInbox={onOpenInbox}
@@ -2385,6 +2387,7 @@ function SidebarComponent({
             onNewInProject
               ? {
                   current: listedSessions,
+                  loading: pendingFirstLoad,
                   activeSessionId: activeListedSessionId,
                   busyIds: listedBusySessionIds,
                   approvalIds: listedApprovalSessionIds,
@@ -2601,6 +2604,7 @@ function CompactProjectRail({
   onOpenProject,
   onRemoveProject,
   onTabChange,
+  onNew,
   onSearch,
   searchActive,
   onOpenInbox,
@@ -2630,6 +2634,7 @@ function CompactProjectRail({
   onOpenProject?: () => void;
   onRemoveProject?: Props["onRemoveProject"];
   onTabChange: (tab: SidebarTab) => void;
+  onNew?: () => void;
   onSearch?: () => void;
   searchActive: boolean;
   onOpenInbox?: () => void;
@@ -2740,6 +2745,9 @@ function CompactProjectRail({
             />
           ))}
         </div>
+        {onNew ? (
+          <CompactRailAction label={`New thread (${MOD}N)`} icon={Plus} onClick={onNew} />
+        ) : null}
         <CompactRailAction
           label={`Search (${MOD}K)`}
           icon={Search}

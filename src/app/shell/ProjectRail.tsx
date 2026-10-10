@@ -23,6 +23,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent,
 } from "react";
 import { useDragResize } from "../../shared/hooks/useDragResize";
@@ -81,6 +82,11 @@ import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview"
 import { ProjectLogoIcon } from "../../features/projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../features/projects/ui/ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
+import {
+  issueNumbersSnapshot,
+  requestOpenIssue,
+  subscribeIssueNumbers,
+} from "../../features/inbox/model/issueReference";
 import { DevModeSlot, TabVisitNav } from "./TitleBar";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
 import type { InstalledUpdate } from "../model/updateNotice";
@@ -122,6 +128,8 @@ import {
 export type ProjectThreads = {
   /** The current project's chats, including live and unsaved ones. */
   current: readonly SessionSummary[];
+  /** The current project's chats are not listed yet, so an empty list is unknown rather than empty. */
+  loading?: boolean;
   activeSessionId?: string;
   busyIds: ReadonlySet<string>;
   approvalIds: ReadonlySet<string>;
@@ -135,8 +143,11 @@ export type ProjectThreads = {
 };
 
 const ThreadsContext = createContext<
-  (ProjectThreads & { cwd: string }) | null
+  (ProjectThreads & { cwd: string; issueNumbers: ReadonlyMap<string, number> }) | null
 >(null);
+
+/** Rows last shown per project, so switching away or re-expanding never flashes an empty list. */
+const lastThreadRows = new Map<string, SessionSummary[]>();
 
 const THREAD_PAGE = 5;
 const THREADS_EXPANDED_KEY = "monocode.projectThreadsExpanded";
@@ -187,6 +198,7 @@ type Props = {
   canGoForward?: boolean;
   onGoBack?: () => void;
   onGoForward?: () => void;
+  onNew?: () => void;
   onSearch?: () => void;
   searchActive?: boolean;
   onOpenInbox?: () => void;
@@ -228,6 +240,7 @@ export function ProjectRail({
   canGoForward = false,
   onGoBack,
   onGoForward,
+  onNew,
   onSearch,
   searchActive = false,
   onOpenInbox,
@@ -429,9 +442,10 @@ export function ProjectRail({
   const projectIds = groupedProjectSections.ungrouped.map((item) => item.path);
   const pinnedSortable = useAnimatedReorder(pinnedIds, onReorderPinned, "y");
   const projectSortable = useAnimatedReorder(projectIds, onReorderProjects, "y");
+  const issueNumbers = useSyncExternalStore(subscribeIssueNumbers, issueNumbersSnapshot);
   const threadsContext = useMemo(
-    () => (threads ? { ...threads, cwd } : null),
-    [threads, cwd],
+    () => (threads ? { ...threads, cwd, issueNumbers } : null),
+    [threads, cwd, issueNumbers],
   );
   return (
     <ThreadsContext.Provider value={threadsContext}>
@@ -465,6 +479,18 @@ export function ProjectRail({
         ) : (
           <>
             <div className="flex shrink-0 flex-col gap-px px-2 pb-2 pt-0.5">
+              {onNew ? (
+                <>
+                  <RailAction
+                    label="New thread"
+                    icon={Plus}
+                    onClick={onNew}
+                    shortcut={`${MOD}N`}
+                    ariaLabel={`New thread (${MOD}N)`}
+                  />
+                  <div className="mt-0.5" />
+                </>
+              ) : null}
               <RailSearch
                 label="Search"
                 icon={Search}
@@ -1230,6 +1256,7 @@ function ProjectCard({
               busy={threads.busyIds.has(row.id)}
               approval={threads.approvalIds.has(row.id)}
               unseen={threads.unseenIds.has(row.id)}
+              issueNumber={threads.issueNumbers.get(row.id)}
               onSelect={threads.onSelect}
               onArchive={threads.onArchive}
               onDelete={threads.onDelete}
@@ -1266,6 +1293,12 @@ function useProjectThreadRows(
 ): SessionSummary[] | null {
   const [stored, setStored] = useState<SessionSummary[] | null>(null);
   const currentRows = threads?.current;
+  const key = pathKey(path);
+  // Before the first listing the live list is empty only because it is unknown.
+  const liveRows = current && !(threads?.loading && !currentRows?.length) ? currentRows : undefined;
+  useEffect(() => {
+    if (liveRows) lastThreadRows.set(key, [...liveRows]);
+  }, [key, liveRows]);
   const remote = !!remoteProjectFor(path);
   useEffect(() => {
     if (!enabled || current || remote) return;
@@ -1276,7 +1309,9 @@ function useProjectThreadRows(
       const request = ++revision;
       void listSessionsByProject(path)
         .then((rows) => {
-          if (!cancelled && request === revision) setStored(rows);
+          if (cancelled || request !== revision) return;
+          lastThreadRows.set(key, rows);
+          setStored(rows);
         })
         .catch(() => undefined);
     };
@@ -1286,9 +1321,9 @@ function useProjectThreadRows(
       cancelled = true;
       unsubscribe();
     };
-  }, [enabled, current, remote, path]);
+  }, [enabled, current, remote, path, key]);
   // Unknown until loaded (and never listed for another machine's project).
-  const rows = current ? currentRows : stored;
+  const rows = liveRows ?? lastThreadRows.get(key) ?? stored;
   const busyIds = threads?.busyIds;
   const approvalIds = threads?.approvalIds;
   const unseenIds = threads?.unseenIds;
@@ -1351,6 +1386,7 @@ const ThreadRow = memo(function ThreadRow({
   busy,
   approval,
   unseen,
+  issueNumber,
   onSelect,
   onArchive,
   onDelete,
@@ -1361,6 +1397,7 @@ const ThreadRow = memo(function ThreadRow({
   busy: boolean;
   approval: boolean;
   unseen: boolean;
+  issueNumber?: number;
   onSelect: (sessionId: string) => void;
   onArchive?: ProjectThreads["onArchive"];
   onDelete?: ProjectThreads["onDelete"];
@@ -1459,6 +1496,19 @@ const ThreadRow = memo(function ThreadRow({
           <span className={`mt-0.5 flex min-w-0 items-center gap-1 text-[11px] font-normal text-content/45 ${menuItems.length ? "group-hover/thread:pr-6 group-focus-within/thread:pr-6" : ""}`}>
             <HarnessIcon harness={session.harness} className="size-3 shrink-0" />
             <span className="truncate">{resolveModel(session.harness, session.model).name}</span>
+            {issueNumber ? (
+              <span
+                role="link"
+                title={`Open MC-${issueNumber} in the issue tracker`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  requestOpenIssue(issueNumber);
+                }}
+                className="shrink-0 cursor-pointer text-accent hover:underline"
+              >
+                · MC-{issueNumber}
+              </span>
+            ) : null}
           </span>
         </div>
         {approval || unseen ? (

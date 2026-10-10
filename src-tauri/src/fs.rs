@@ -1129,12 +1129,20 @@ pub async fn git_staged_context(cwd: String) -> Result<GitStagedContext, String>
 }
 
 /// Create a commit from the current index, or rewrite HEAD with it when `amend` is set.
+/// `paths` limits the commit to those files and leaves anything else staged untouched.
 #[tauri::command]
-pub async fn git_commit(cwd: String, message: String, amend: bool) -> Result<(), String> {
+pub async fn git_commit(
+    cwd: String,
+    message: String,
+    amend: bool,
+    paths: Option<Vec<String>>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = expand_home(&cwd);
         if amend {
             git_commit_amend_for(&root, &message)
+        } else if let Some(paths) = paths.filter(|paths| !paths.is_empty()) {
+            git_commit_paths_for(&root, &message, &paths)
         } else {
             git_commit_for(&root, &message)
         }
@@ -2637,6 +2645,12 @@ fn git_commit_for(root: &Path, message: &str) -> Result<(), String> {
     git_commit_args(root, message, &[])
 }
 
+fn git_commit_paths_for(root: &Path, message: &str, paths: &[String]) -> Result<(), String> {
+    let mut extra = vec!["--"];
+    extra.extend(paths.iter().map(String::as_str));
+    git_commit_args(root, message, &extra)
+}
+
 fn git_commit_amend_for(root: &Path, message: &str) -> Result<(), String> {
     git_commit_args(root, message, &["--amend"])
 }
@@ -2646,9 +2660,8 @@ fn git_commit_args(root: &Path, message: &str, extra: &[&str]) -> Result<(), Str
     if message.is_empty() {
         return Err("Commit message cannot be empty".into());
     }
-    let mut args = vec!["commit"];
+    let mut args = vec!["commit", "--cleanup=strip", "-m", message];
     args.extend_from_slice(extra);
-    args.extend(["--cleanup=strip", "-m", message]);
     git_checked(root, &args).map_err(with_signing_hint)
 }
 
@@ -7667,6 +7680,32 @@ mod tests {
             git_stdout(&dir.0, &["log", "-1", "--pretty=%s"]).as_deref(),
             Some("update a")
         );
+    }
+
+    #[test]
+    fn git_commit_paths_leaves_other_staged_files() {
+        let dir = tmp("git-commit-paths");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n"), ("b.txt", "beta\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "alpha 2\n").unwrap();
+        std::fs::write(dir.0.join("b.txt"), "beta 2\n").unwrap();
+        std::fs::write(dir.0.join("new.txt"), "new\n").unwrap();
+        git_stage_file_for(&dir.0, "a.txt").unwrap();
+        git_stage_file_for(&dir.0, "b.txt").unwrap();
+        // The issue also adds a file; a pathspec commit needs it in the index first.
+        git_stage_file_for(&dir.0, "new.txt").unwrap();
+        git_commit_paths_for(&dir.0, "update a", &["a.txt".into(), "new.txt".into()]).unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].relative, "b.txt");
+        assert!(index.files[0].staged);
+        // A deleted file stages and commits by path too.
+        std::fs::remove_file(dir.0.join("new.txt")).unwrap();
+        git_stage_file_for(&dir.0, "new.txt").unwrap();
+        git_commit_paths_for(&dir.0, "remove new", &["new.txt".into()]).unwrap();
+        assert_eq!(git_diff_index_for(&dir.0).files.len(), 1);
+        assert!(!dir.0.join("new.txt").exists());
     }
 
     #[test]

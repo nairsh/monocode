@@ -316,8 +316,9 @@ export function gitCommit(
   cwd: string,
   message: string,
   amend = false,
+  paths?: string[],
 ): Promise<void> {
-  return invoke<void>("git_commit", { cwd, message, amend });
+  return invoke<void>("git_commit", { cwd, message, amend, paths });
 }
 
 export function gitHeadMessage(cwd: string): Promise<string> {

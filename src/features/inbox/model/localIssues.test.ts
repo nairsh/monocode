@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  canPeerReview,
   capReviewText,
   createLocalIssue,
+  hasWorkReview,
   ISSUE_WINDOW_ID,
   issueRunFailurePatch,
   loadLocalIssues,
@@ -10,9 +12,13 @@ import {
   localIssueFeedbackPrompt,
   localIssuePrompt,
   moveLocalIssue,
+  parseCommitPlan,
+  peerReviewOf,
+  peerReviewPrompt,
   recoverLocalIssueRuns,
   staleIssueRuns,
   startLocalIssue,
+  startPeerReview,
   touchIssueRunLeases,
   updateLocalIssue,
   verifiedIssueCommit,
@@ -39,6 +45,30 @@ describe("local issue workflow", () => {
     expect(verifiedIssueCommit("aaa1111", "aaa1111")).toBe(false);
     expect(verifiedIssueCommit("aaa1111", null)).toBe(false);
     expect(verifiedIssueCommit(undefined, undefined)).toBe(false);
+  });
+  it("reads the agent's commit plan and ignores unsafe paths", () => {
+    const reply = [
+      "Done.",
+      "```commit-files",
+      "- src/a.ts",
+      "`src/b.ts`",
+      "/etc/passwd",
+      "../escape.ts",
+      "src/a.ts",
+      "```",
+      "Commit subject: fix(ui): stop clipping",
+    ].join("\n");
+    expect(parseCommitPlan(reply)).toEqual({
+      files: ["src/a.ts", "src/b.ts"],
+      subject: "fix(ui): stop clipping",
+    });
+    expect(parseCommitPlan("No plan here")).toEqual({
+      files: [],
+      subject: undefined,
+    });
+    const issue = createLocalIssue(draft);
+    expect(localIssuePrompt(issue)).toContain("```commit-files");
+    expect(localIssueFeedbackPrompt(issue, "x")).toContain("```commit-files");
   });
   it("extracts distinct absolute evidence image paths, ignoring external URLs", () => {
     expect(
@@ -569,6 +599,139 @@ describe("local issue workflow", () => {
       expect(text.length).toBeLessThan(20_100);
       expect(text).toContain("truncated; open the thread for the full reply");
       expect(capReviewText("short")).toBe("short");
+    });
+  });
+
+  describe("review with another model", () => {
+    const reviewedIssue = () => {
+      const issue = createLocalIssue(draft);
+      return updateLocalIssue(issue.id, {
+        status: "in_review",
+        sessionId: "work-thread",
+        runState: "completed",
+        reviews: [
+          { id: "w1", text: "Old summary", at: "a", kind: "work" },
+          { id: "w2", text: "Latest summary", at: "b", kind: "work" },
+        ],
+      });
+    };
+
+    it("is offered only for an idle issue with a work thread and a work review", () => {
+      const issue = reviewedIssue();
+      expect(canPeerReview(issue)).toBe(true);
+      expect(canPeerReview({ ...issue, runState: "running" })).toBe(false);
+      expect(canPeerReview({ ...issue, sessionId: undefined })).toBe(false);
+      expect(canPeerReview({ ...issue, reviews: undefined })).toBe(false);
+      expect(
+        canPeerReview({
+          ...issue,
+          reviews: [{ id: "p", text: "x", at: "a", kind: "peer" }],
+        }),
+      ).toBe(false);
+    });
+
+    it("sends a compact prompt: issue, latest work summary, capped diff, no transcript", () => {
+      const prompt = peerReviewPrompt(reviewedIssue(), {
+        summary: " a.ts | 2 +-",
+        patch: `+${"x".repeat(30_000)}`,
+      });
+      expect(prompt).toContain("Fix the sidebar");
+      expect(prompt).toContain("Latest summary");
+      expect(prompt).not.toContain("Old summary");
+      expect(prompt).toContain("a.ts | 2 +-");
+      expect(prompt).toContain("do not modify");
+      expect(prompt).toContain("at most 10 bullets");
+      expect(prompt).toContain("[truncated]");
+      expect(prompt.length).toBeLessThan(19_000);
+    });
+
+    it("keeps peer reviews out of the work and failure logic", () => {
+      const issue = reviewedIssue();
+      const peerOnly = {
+        ...issue,
+        reviews: [{ id: "p", text: "x", at: "a", kind: "peer" as const }],
+      };
+      expect(hasWorkReview(peerOnly)).toBe(false);
+      expect(issueRunFailurePatch(peerOnly, "failed").status).toBe("todo");
+      expect(issueRunFailurePatch(issue, "failed").status).toBe("in_review");
+    });
+
+    it("posts the review as a peer comment without touching the work thread or status", async () => {
+      const issue = reviewedIssue();
+      const seen: boolean[] = [];
+      const done = startPeerReview(issue.id, "GPT-6.1", async () => {
+        seen.push(peerReviewOf(issue.id)?.state === "running");
+        return { text: "Verdict: needs changes", sessionId: "review-thread" };
+      });
+      await done;
+      expect(seen).toEqual([true]);
+      expect(peerReviewOf(issue.id)).toBeUndefined();
+      const stored = loadLocalIssues()[0];
+      expect(stored).toMatchObject({
+        status: "in_review",
+        sessionId: "work-thread",
+        runState: "completed",
+      });
+      expect(stored.runKind).toBeUndefined();
+      expect(stored.reviews).toHaveLength(3);
+      expect(stored.reviews!.at(-1)).toMatchObject({
+        kind: "peer",
+        model: "GPT-6.1",
+        sessionId: "review-thread",
+        text: "Verdict: needs changes",
+      });
+      expect(stored.activity.at(-1)?.text).toBe("Review by GPT-6.1 posted");
+      // A later feedback run still resumes the original thread.
+      expect(stored.sessionId).toBe("work-thread");
+    });
+
+    it("records a failed or cancelled review without posting or moving the issue", async () => {
+      const issue = reviewedIssue();
+      await startPeerReview(issue.id, "GPT-6.1", async () => {
+        throw new Error("The review was stopped before it finished.");
+      });
+      expect(peerReviewOf(issue.id)).toEqual({
+        state: "failed",
+        model: "GPT-6.1",
+        error: "The review was stopped before it finished.",
+      });
+      const stored = loadLocalIssues()[0];
+      expect(stored.reviews).toHaveLength(2);
+      expect(stored).toMatchObject({
+        status: "in_review",
+        sessionId: "work-thread",
+        runState: "completed",
+      });
+      expect(stored.activity.at(-1)?.text).toContain("failed");
+      // Retrying is allowed and clears the failure.
+      await startPeerReview(issue.id, "GPT-6.1", async () => ({
+        text: "ok",
+        sessionId: "r2",
+      }));
+      expect(peerReviewOf(issue.id)).toBeUndefined();
+      expect(loadLocalIssues()[0].reviews).toHaveLength(3);
+    });
+
+    it("refuses while the agent is working or before any work exists, and never runs twice", async () => {
+      const issue = reviewedIssue();
+      const review = vi.fn(async () => ({ text: "x", sessionId: "r" }));
+      updateLocalIssue(issue.id, { runState: "running" });
+      await expect(startPeerReview(issue.id, "M", review)).rejects.toThrow();
+      updateLocalIssue(issue.id, { runState: "completed" });
+      let release!: () => void;
+      const first = startPeerReview(
+        issue.id,
+        "M",
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ text: "late", sessionId: "r" });
+          }),
+      );
+      await startPeerReview(issue.id, "M", review);
+      expect(review).not.toHaveBeenCalled();
+      release();
+      await first;
+      expect(loadLocalIssues()[0].reviews).toHaveLength(3);
     });
   });
 });

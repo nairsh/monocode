@@ -27,7 +27,7 @@ import {
   SlidersHorizontal,
   X,
 } from "../../../shared/ui/icons";
-import { Popover } from "../../../shared/ui/Popover";
+import { Popover, type PopoverAnchor } from "../../../shared/ui/Popover";
 import { copyText } from "../../../platform/tauri/clipboard";
 import { suppressTextSelection } from "../../../shared/lib/drag";
 import { LAYER } from "../../../shared/lib/layers";
@@ -40,6 +40,8 @@ import {
 import {
   HARNESS_LABEL,
   type Block,
+  type HarnessId,
+  type ModelTarget,
   type Session,
 } from "../../sessions/model/session";
 import {
@@ -51,23 +53,28 @@ import {
 import { ModelPicker } from "../../sessions/ui/ModelPicker";
 import { HarnessIcon } from "../../sessions/ui/HarnessIcon";
 import { IssueImages, useIssueImages } from "./IssueImages";
+import { gitCommitFiles } from "../../../platform/tauri/fs";
 import { polishIssue } from "../../settings/model/taskModel";
 import {
   createLocalIssue,
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   ISSUE_STATUS_LABELS,
+  canPeerReview,
   isIssueRunning,
   loadLocalIssues,
   localIssuePrompt,
   moveLocalIssue,
+  peerReviewOf,
   startLocalIssue,
+  startPeerReview,
   subscribeLocalIssues,
   updateLocalIssue,
   type IssueDraft,
   type IssueStatus,
   type LocalIssue,
 } from "../model/localIssues";
+import { subscribeOpenIssue, takeOpenIssueRequest } from "../model/issueReference";
 import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
 import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import type { ApprovalDecision } from "../../../integrations/harness";
@@ -150,6 +157,11 @@ type Props = {
   cwd: string;
   recents: RecentProject[];
   onLaunch?: (issue: LocalIssue) => Promise<void>;
+  /** Runs another model over the issue's work; resolves with its review text and thread. */
+  onReview?: (
+    issue: LocalIssue,
+    target: ModelTarget,
+  ) => Promise<{ text: string; sessionId: string }>;
   /** Shows a GitHub entry in the navigation when provided. */
   onOpenGithub?: () => void;
   onOpenSession?: (id: string) => void | Promise<void>;
@@ -448,6 +460,68 @@ function IssueDialog({
   );
 }
 
+/** Short commit id; commit details load on first hover, never per card render. */
+function CommitChip({ issue }: { issue: LocalIssue }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState<string[] | null>(null);
+  const requested = useRef(false);
+  const meta = issue.commitMeta;
+  const show = () => {
+    setOpen(true);
+    if (requested.current) return;
+    requested.current = true;
+    gitCommitFiles(issue.projectPath, issue.commitSha!).then(
+      (changed) => setFiles(changed.map((file) => file.relative)),
+      () => setFiles([]),
+    );
+  };
+  return (
+    <span
+      ref={ref}
+      className="it-sha"
+      tabIndex={0}
+      onMouseEnter={show}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={show}
+      onBlur={() => setOpen(false)}
+      aria-label={`Commit ${issue.commitSha}`}
+    >
+      #{issue.commitSha!.slice(0, 7)}
+      {open ? (
+        <Popover
+          bare
+          anchor={ref}
+          side="bottom"
+          align="start"
+          width={300}
+          className="issue-surface it-menu it-sha-pop"
+        >
+          <strong>{meta?.subject || issue.commitSha}</strong>
+          {meta?.author ? (
+            <span>
+              {meta.author} · {new Date(meta.at).toLocaleString()}
+            </span>
+          ) : null}
+          <span>
+            {files === null
+              ? "Loading files…"
+              : files.length
+                ? `${files.length} file${files.length === 1 ? "" : "s"} changed`
+                : "No file list available"}
+          </span>
+          {files?.slice(0, 8).map((file) => (
+            <code key={file}>{file}</code>
+          ))}
+          {files && files.length > 8 ? (
+            <span>+{files.length - 8} more</span>
+          ) : null}
+        </Popover>
+      ) : null}
+    </span>
+  );
+}
+
 function NewIssue({
   project,
   projects,
@@ -503,7 +577,13 @@ function NewIssue({
     setError("");
     try {
       const polished = await polishIssue(draft.description);
-      await onCreate({ ...draft, ...polished });
+      // The model's priority only fills in what the user left unset.
+      await onCreate({
+        ...draft,
+        title: polished.title,
+        description: polished.description,
+        priority: draft.priority || polished.priority,
+      });
       if (more) {
         setDraft((previous) => ({
           ...previous,
@@ -736,6 +816,60 @@ function IssueProperties({
   );
 }
 
+/** Pick any model through the normal selector, then start a read-only peer review. */
+function ReviewPopover({
+  issue,
+  anchor,
+  onStart,
+  onDismiss,
+}: {
+  issue: LocalIssue;
+  anchor: PopoverAnchor;
+  onStart: (target: ModelTarget) => void;
+  onDismiss: () => void;
+}) {
+  const target = (harness: HarnessId, model: string): ModelTarget => ({
+    harness,
+    model,
+    modelSettings: preferredModelSettings(resolveModel(harness, model)),
+  });
+  const [choice, setChoice] = useState(() => {
+    const { harness, model } = defaultSessionChoice(issue.projectPath);
+    return target(harness, model);
+  });
+  return (
+    <Popover
+      anchor={anchor}
+      width={260}
+      autoFocus
+      onDismiss={onDismiss}
+      ignore="[data-model-picker]"
+      className="issue-surface it-menu it-review-picker"
+      role="dialog"
+      aria-label={`Review MC-${issue.number} with another model`}
+      data-dialog-popover
+    >
+      <p className="it-muted">Review MC-{issue.number} with</p>
+      <ModelPicker
+        variant="plain"
+        harness={choice.harness}
+        model={choice.model}
+        values={choice.modelSettings}
+        project={issue.projectPath}
+        side="bottom"
+        hotkeys={false}
+        onChange={(harness, model) => setChoice(target(harness, model))}
+        onSettingsChange={(modelSettings) =>
+          setChoice((previous) => ({ ...previous, modelSettings }))
+        }
+      />
+      <button className="it-primary" onClick={() => onStart(choice)}>
+        Start review
+      </button>
+    </Popover>
+  );
+}
+
 function IssueDetail({
   issue,
   projects,
@@ -743,6 +877,7 @@ function IssueDetail({
   onMove,
   onRetry,
   onContinue,
+  onReview,
   onReadSession,
   onApproval,
   onOpenSession,
@@ -760,12 +895,15 @@ function IssueDetail({
     feedback?: string,
     kind?: "work" | "commit",
   ) => Promise<void>;
+  onReview: (id: string, target: ModelTarget) => void;
   onReadSession?: Props["onReadSession"];
   onApproval?: Props["onApproval"];
   onOpenSession?: Props["onOpenSession"];
   onError: (reason: unknown) => void;
 }) {
   const [draft, setDraft] = useState<IssueDraft>(issue);
+  const [moreMenu, setMoreMenu] = useState<HTMLElement | null>(null);
+  const [picking, setPicking] = useState(false);
   const [comment, setComment] = useState("");
   const [editingDescription, setEditingDescription] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -807,8 +945,13 @@ function IssueDetail({
   const newestReviews = [...(issue.reviews ?? [])].reverse();
   const workReview = newestReviews.find((review) => review.kind === "work");
   const commitReview = newestReviews.find((review) => review.kind === "commit");
+  const peerReviews = newestReviews.filter((review) => review.kind === "peer");
+  const peerState = peerReviewOf(issue.id);
   const previousReviews = newestReviews.filter(
-    (review) => review !== workReview && review !== commitReview,
+    (review) =>
+      review !== workReview &&
+      review !== commitReview &&
+      review.kind !== "peer",
   );
   const committing = issue.runKind === "commit";
   const commitStatus = committing
@@ -885,6 +1028,7 @@ function IssueDetail({
         <span>Issues</span>
         <ChevronRight className="it-icon" />
         <span className="it-muted">MC-{issue.number}</span>
+        {issue.commitSha ? <CommitChip issue={issue} /> : null}
         <button
           className="it-icon-button it-push"
           aria-label="Copy issue as prompt"
@@ -899,6 +1043,20 @@ function IssueDetail({
         >
           <Copy className="it-icon" />
         </button>
+        {canPeerReview(issue) ? (
+          <button
+            className="it-icon-button"
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={!!moreMenu}
+            onClick={(event) => {
+              setPicking(false);
+              setMoreMenu(event.currentTarget);
+            }}
+          >
+            <MoreHorizontal className="it-icon" />
+          </button>
+        ) : null}
         <button
           className="it-icon-button"
           aria-label="Close issue"
@@ -907,6 +1065,39 @@ function IssueDetail({
           <X className="it-icon" />
         </button>
       </header>
+      {moreMenu && !picking ? (
+        <Popover
+          anchor={moreMenu}
+          align="end"
+          width={220}
+          onDismiss={() => setMoreMenu(null)}
+          autoFocus
+          className="issue-surface it-menu"
+          role="menu"
+          aria-label="More actions"
+          data-dialog-popover
+        >
+          <button
+            role="menuitem"
+            disabled={peerState?.state === "running"}
+            onClick={() => setPicking(true)}
+          >
+            <Bot className="it-icon" />
+            Review with…
+          </button>
+        </Popover>
+      ) : null}
+      {moreMenu && picking ? (
+        <ReviewPopover
+          issue={issue}
+          anchor={moreMenu}
+          onDismiss={() => setMoreMenu(null)}
+          onStart={(target) => {
+            setMoreMenu(null);
+            onReview(issue.id, target);
+          }}
+        />
+      ) : null}
       {detailError ? (
         <div className="it-error-banner" role="alert">
           {detailError}
@@ -1043,6 +1234,38 @@ function IssueDetail({
                     ) : null}
                   </div>
                 ) : null}
+                {peerState ? (
+                  <p
+                    className={
+                      peerState.state === "failed" ? "it-error" : "it-muted"
+                    }
+                  >
+                    {peerState.state === "running"
+                      ? `Reviewing with ${peerState.model}…`
+                      : `Review with ${peerState.model} failed${peerState.error ? `: ${peerState.error}` : ""}`}
+                  </p>
+                ) : null}
+                {peerReviews.map((review) => (
+                  <div className="it-commit" key={review.id}>
+                    <h4>Review · {review.model ?? "another model"}</h4>
+                    <IssueOutput cwd={issue.projectPath} text={review.text} />
+                    {review.sessionId ? (
+                      <button
+                        className="it-thread-link"
+                        onClick={() => {
+                          onClose();
+                          void Promise.resolve(
+                            onOpenSession?.(review.sessionId!),
+                          ).catch(onError);
+                        }}
+                      >
+                        <Bot className="it-icon" />
+                        Open review thread
+                        <ChevronRight className="it-icon" />
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
                 {previousReviews.length ? (
                   <details>
                     <summary>Previous reviews</summary>
@@ -1104,22 +1327,24 @@ function IssueDetail({
                   </p>
                 </div>
               ))}
-              {issue.reviews?.map((review) => (
-                <details key={review.id}>
-                  <summary>
-                    {review.kind === "commit"
-                      ? "Commit result"
-                      : "Agent review and evidence"}{" "}
-                    · {new Date(review.at).toLocaleString()}
-                  </summary>
-                  <IssueOutput
-                    cwd={issue.projectPath}
-                    text={review.text}
-                    images={review.images}
-                    evidenceError={review.evidenceError}
-                  />
-                </details>
-              ))}
+              {issue.reviews
+                ?.filter((review) => review.kind !== "peer")
+                .map((review) => (
+                  <details key={review.id}>
+                    <summary>
+                      {review.kind === "commit"
+                        ? "Commit result"
+                        : "Agent review and evidence"}{" "}
+                      · {new Date(review.at).toLocaleString()}
+                    </summary>
+                    <IssueOutput
+                      cwd={issue.projectPath}
+                      text={review.text}
+                      images={review.images}
+                      evidenceError={review.evidenceError}
+                    />
+                  </details>
+                ))}
               {issue.sessionId ? (
                 <details className="it-transcript" open={running}>
                   <summary>
@@ -1341,6 +1566,7 @@ export function IssueTracker({
   cwd,
   recents,
   onLaunch,
+  onReview,
   onOpenGithub,
   onOpenSession,
   onReadSession,
@@ -1405,6 +1631,11 @@ export function IssueTracker({
     x: number;
     y: number;
   } | null>(null);
+  const [reviewAt, setReviewAt] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [notice, setNotice] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const search = useRef<HTMLInputElement>(null);
@@ -1435,6 +1666,19 @@ export function IssueTracker({
     };
     refresh();
     return subscribeLocalIssues(refresh);
+  }, []);
+  useEffect(() => {
+    const open = () => {
+      const number = takeOpenIssueRequest();
+      try {
+        const id = number && loadLocalIssues().find((issue) => issue.number === number)?.id;
+        if (id) setSelectedId(id);
+      } catch {
+        // The store banner already reports unreadable storage.
+      }
+    };
+    open();
+    return subscribeOpenIssue(open);
   }, []);
   useEffect(() => {
     if (!notice) return;
@@ -1512,6 +1756,15 @@ export function IssueTracker({
           ? { feedback: issue.feedback }
           : undefined,
     );
+  };
+  const reviewIssue = (id: string, target: ModelTarget) => {
+    if (!onReview) return showError("Review is unavailable.");
+    // Failures are reported on the issue itself; only a refused start throws here.
+    void startPeerReview(
+      id,
+      resolveModel(target.harness, target.model).name,
+      (issue) => onReview(issue, target),
+    ).catch(showError);
   };
   const create = async (draft: IssueDraft) => {
     // Always save first in Backlog, so direct creation in To Do uses the same dispatch path.
@@ -1787,7 +2040,6 @@ export function IssueTracker({
         const copy = card.cloneNode(true) as HTMLElement;
         copy.removeAttribute("data-issue-id");
         copy.setAttribute("aria-hidden", "true");
-        copy.classList.remove("is-dragging");
         ghost.append(copy);
         if (dragged.length > 1) {
           const count = document.createElement("span");
@@ -1881,7 +2133,10 @@ export function IssueTracker({
         aria-pressed={checked.includes(issue.id)}
         aria-label={`Open MC-${issue.number}: ${issue.title}`}
       >
-        <span className="it-card-id">MC-{issue.number}</span>
+        <span className="it-card-id">
+          MC-{issue.number}
+          {issue.commitSha ? <CommitChip issue={issue} /> : null}
+        </span>
         <span className="it-card-title">
           <StatusIcon status={issue.status} />
           <span>{issue.title}</span>
@@ -1910,6 +2165,13 @@ export function IssueTracker({
                 ? "Starting agent"
                 : "Agent is working"}
             </>
+          ) : peerReviewOf(issue.id)?.state === "running" ? (
+            <>
+              <LoaderCircle className="it-icon animate-spin" />
+              Reviewing with {peerReviewOf(issue.id)?.model}…
+            </>
+          ) : peerReviewOf(issue.id)?.state === "failed" ? (
+            <span className="it-error">Review failed</span>
           ) : issue.runState === "failed" ? (
             <span className="it-error">Agent needs attention</span>
           ) : (
@@ -2396,6 +2658,7 @@ export function IssueTracker({
           onMove={move}
           onRetry={retry}
           onContinue={continueIssue}
+          onReview={reviewIssue}
           onReadSession={onReadSession}
           onApproval={onApproval}
           onOpenSession={onOpenSession}
@@ -2408,6 +2671,17 @@ export function IssueTracker({
           <CheckCircle className="it-icon" />
           {notice}
         </div>
+      ) : null}
+      {reviewAt && issues.some((issue) => issue.id === reviewAt.id) ? (
+        <ReviewPopover
+          issue={issues.find((issue) => issue.id === reviewAt.id)!}
+          anchor={reviewAt}
+          onDismiss={() => setReviewAt(null)}
+          onStart={(target) => {
+            reviewIssue(reviewAt.id, target);
+            setReviewAt(null);
+          }}
+        />
       ) : null}
       {context ? (
         <Popover
@@ -2496,6 +2770,21 @@ export function IssueTracker({
             <Copy className="it-icon" />
             Copy as prompt
           </button>
+          {canPeerReview(
+            issues.find((issue) => issue.id === context.id) ?? {},
+          ) ? (
+            <button
+              role="menuitem"
+              disabled={peerReviewOf(context.id)?.state === "running"}
+              onClick={() => {
+                setReviewAt(context);
+                setContext(null);
+              }}
+            >
+              <Bot className="it-icon" />
+              Review with…
+            </button>
+          ) : null}
           <button
             role="menuitem"
             disabled={isIssueRunning(
