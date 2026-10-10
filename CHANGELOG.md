@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-10
+
+### Removed
+
+- The unused `@xterm/addon-fit` dependency.
+
 ## [0.9.0] - 2026-10-07
 
 ### Added
