@@ -142,7 +142,8 @@ Actions:
                   Priority is 0 none, 1 urgent, 2 high, 3 medium, 4 low.
                   Dependencies must be in this project and cannot form cycles.
                   Status changes update the tracker without launching agents or
-                  approving commits. Managed assignments still finish in review.
+                  approving commits. Assigned tickets' statuses are managed by
+                  execution and human review; use comments to report blockers.
                   Another agent's running tickets cannot be edited.
   issues.comment {"issueId":"MC-12","text":"Investigation notes..."}
                   Append an activity entry. All issue actions accept project

@@ -63,6 +63,7 @@ import {
   ISSUE_STATUS_LABELS,
   canPeerReview,
   isIssueRunning,
+  issueBlockers,
   loadLocalIssues,
   localIssuePrompt,
   moveLocalIssue,
@@ -1495,7 +1496,7 @@ function IssueDetail({
                 if (!comment.trim()) return;
                 try {
                   persist();
-                  if (issue.status === "in_review")
+                  if (issue.status === "in_review" || issue.workOutcome)
                     await onContinue(issue.id, comment.trim());
                   else updateLocalIssue(issue.id, {}, comment.trim());
                   setComment("");
@@ -1515,7 +1516,7 @@ function IssueDetail({
                 disabled={!comment.trim() || running}
                 type="submit"
               >
-                {issue.status === "in_review"
+                {issue.status === "in_review" || issue.workOutcome
                   ? "Send feedback and iterate"
                   : "Add comment"}
               </button>
@@ -1575,7 +1576,7 @@ function IssueDetail({
           <p className="it-workflow-help">
             Move an issue to To Do to start (or resume) its dedicated thread
             with the title, description, and attached images. Approving a review
-            marks it Done and commits in the same thread.
+            commits in the same thread. The issue becomes Done only after the commit succeeds.
           </p>
           {issue.sessionId ? (
             <button
@@ -1603,8 +1604,12 @@ function IssueDetail({
               )}
               {issue.runState === "completed"
                 ? issue.status === "done"
-                  ? "Approved and committed"
-                  : "Ready for review"
+                  ? issue.commitSha ? "Approved and committed" : "Marked done"
+                  : issue.workOutcome?.status === "blocked"
+                    ? "Ticket blocked"
+                    : issue.workOutcome?.status === "needs_work"
+                      ? "Ticket needs more work"
+                      : "Ready for review"
                 : issue.runState === "failed"
                   ? committing
                     ? "Commit needs attention"
@@ -1759,7 +1764,13 @@ export function IssueTracker({
   );
   const showError = (reason: unknown) =>
     setError(reason instanceof Error ? reason.message : String(reason));
-  const triage = useIssueTriage(issues, project, onLaunch, showError);
+  const triage = useIssueTriage(issues, project, onLaunch, showError, {
+    selectedIds: checked,
+    query,
+    onOpenIssue: setSelectedId,
+    onOpenSession: (id) => { void Promise.resolve(onOpenSession?.(id)).catch(showError); },
+    onRetry: (id) => { void retry(id).catch(showError); },
+  });
   useEffect(() => {
     const refresh = () => {
       try {
@@ -2288,6 +2299,10 @@ export function IssueTracker({
               </span>
             );
           })()}
+          {issue.triageGroup ? <span className="it-chip" title="Assignment group">{issue.triageGroup.title}</span> : null}
+          {issueBlockers(issue, issues, issues.filter((member) => !member.archived && issue.runBatchId && member.runBatchId === issue.runBatchId).map((member) => member.id)).length ?
+            <span className="it-chip it-blocked">Blocked</span> : null}
+          {issue.workOutcome && issue.workOutcome.status !== "ready" ? <span className="it-chip it-blocked">{issue.workOutcome.status === "blocked" ? "Needs prerequisite" : "Needs work"}</span> : null}
           {issue.labels.slice(0, 2).map((label) => (
             <span className="it-label" key={label}>
               {label}

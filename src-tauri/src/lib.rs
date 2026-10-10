@@ -409,6 +409,7 @@ pub fn run() {
             task_model::task_model_polish_issue,
             task_model::task_model_commit_message,
             issue_triage::task_model_triage,
+            issue_triage::task_model_cancel_triage,
             jira::jira_set_config,
             jira::jira_list_projects,
             jira::jira_list_issues,

@@ -457,7 +457,7 @@ describe("local issue workflow", () => {
       return issue;
     };
 
-    it("moves to Done immediately, once, while the commit run starts", async () => {
+    it("stays in review until the commit succeeds and starts only once", async () => {
       const issue = reviewed();
       let finish!: () => void;
       const launch = vi.fn(
@@ -470,7 +470,7 @@ describe("local issue workflow", () => {
       await startLocalIssue(issue.id, launch, { kind: "commit" });
       expect(launch).toHaveBeenCalledTimes(1);
       expect(loadLocalIssues()[0]).toMatchObject({
-        status: "done",
+        status: "in_review",
         runKind: "commit",
         runState: "starting",
         sessionId: "thread",

@@ -737,7 +737,7 @@ it("approves a review as a commit run in the same thread", async () => {
   expect(launch.mock.calls[0][0]).toMatchObject({
     sessionId: "same-thread",
     runKind: "commit",
-    status: "done",
+    status: "in_review",
   });
   expect(container.textContent).not.toContain("My work");
   expect(container.textContent).not.toContain("Stored on this device");

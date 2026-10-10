@@ -15,8 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: fork-build-${{ github.ref }}
-  cancel-in-progress: false
+  group: fork-build-${{ inputs.ref || github.ref }}
+  # PR builds are disposable; never interrupt signed publication on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   macos:
@@ -81,6 +82,7 @@ jobs:
     needs: macos
     if: github.repository == 'nairsh/monocode' && inputs.ref == '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

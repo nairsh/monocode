@@ -1,4 +1,5 @@
 import { limitSection } from "../../../shared/lib/jsonText";
+import { pathKey } from "../../../shared/lib/paths";
 import {
   HARNESSES,
   type Block,
@@ -40,6 +41,9 @@ export type LocalIssue = {
   /** Whether the agent should verify its work and provide supporting evidence. */
   verificationRequired?: boolean;
   dependsOn?: string[];
+  /** Dependencies added by triage; manual prerequisites are retained on retriage. */
+  triageDependencies?: string[];
+  workOutcome?: { status: "ready" | "blocked" | "needs_work"; summary: string };
   triageGroup?: { id: string; title: string; reason: string; files: string[] };
   /** Issues in one assignment share its thread, review and commit. */
   runBatchId?: string;
@@ -185,6 +189,36 @@ const validImages = (value: unknown) =>
 export const isIssueRunning = (issue: Pick<LocalIssue, "runState">) =>
   issue.runState === "starting" || issue.runState === "running";
 
+export const isIssueResolved = (issue: LocalIssue) =>
+  issue.status === "done" &&
+  !isIssueRunning(issue) &&
+  (!issue.sessionId || !!issue.commitSha) &&
+  !(issue.runKind === "commit" && issue.runState !== "completed");
+
+/** Pending review still owns the working copy: its edits have not been committed. */
+export function repositoryAssignmentBlocker(
+  issue: LocalIssue,
+  all = loadLocalIssues(),
+) {
+  return all.find(
+    (other) =>
+      other.id !== issue.id &&
+      !(issue.runBatchId && issue.runBatchId === other.runBatchId) &&
+      pathKey(other.projectPath) === pathKey(issue.projectPath) &&
+      (isIssueRunning(other) || !!other.sessionId) &&
+      !isIssueResolved(other) &&
+      !(
+        other.archived &&
+        all.some(
+          (member) =>
+            other.runBatchId &&
+            member.runBatchId === other.runBatchId &&
+            isIssueResolved(member),
+        )
+      ),
+  );
+}
+
 const cleanLabels = (labels: string[]) => [
   ...new Set(labels.map((label) => label.trim()).filter(Boolean)),
 ];
@@ -213,6 +247,12 @@ function validIssue(value: unknown): value is LocalIssue {
     (issue.dependsOn === undefined ||
       (Array.isArray(issue.dependsOn) &&
         issue.dependsOn.every((id) => typeof id === "string"))) &&
+    (issue.triageDependencies === undefined ||
+      (Array.isArray(issue.triageDependencies) &&
+        issue.triageDependencies.every((id) => typeof id === "string"))) &&
+    (issue.workOutcome === undefined ||
+      (["ready", "blocked", "needs_work"].includes(issue.workOutcome.status) &&
+        typeof issue.workOutcome.summary === "string")) &&
     (issue.runBatchId === undefined || typeof issue.runBatchId === "string") &&
     (issue.triageGroup === undefined ||
       (typeof issue.triageGroup?.id === "string" &&
@@ -286,7 +326,7 @@ export function validateIssueDependencies(issues: LocalIssue[]) {
       if (
         !dependency ||
         dependency.id === issue.id ||
-        dependency.projectPath !== issue.projectPath
+        pathKey(dependency.projectPath) !== pathKey(issue.projectPath)
       )
         throw new Error(
           "Dependencies must reference another issue in the same project.",
@@ -302,13 +342,13 @@ export function validateIssueDependencies(issues: LocalIssue[]) {
     issue.runBatchId ?? issue.triageGroup?.id ?? issue.id;
   const edges = new Map<string, Set<string>>();
   for (const issue of issues) {
-    if (issue.status === "done") continue;
+    if (isIssueResolved(issue)) continue;
     const group = groupOf(issue);
     if (!edges.has(group)) edges.set(group, new Set());
     for (const id of issue.dependsOn ?? []) {
       const dependency = byId.get(id)!;
       const prerequisite = groupOf(dependency);
-      if (dependency.status !== "done" && prerequisite !== group)
+      if (!isIssueResolved(dependency) && prerequisite !== group)
         edges.get(group)!.add(prerequisite);
     }
   }
@@ -376,14 +416,17 @@ export function issueBlockers(
     .map((id) => issues.find((candidate) => candidate.id === id))
     .filter(
       (dependency): dependency is LocalIssue =>
-        !!dependency && dependency.status !== "done",
+        !!dependency && !isIssueResolved(dependency),
     );
 }
 
 export function issueAssignment(issue: LocalIssue): LocalIssue[] {
   return issue.runBatchId
     ? loadLocalIssues().filter(
-        (candidate) => candidate.runBatchId === issue.runBatchId,
+        (candidate) =>
+          candidate.runBatchId === issue.runBatchId &&
+          !candidate.archived &&
+          (!isIssueResolved(candidate) || candidate.id === issue.id),
       )
     : [issue];
 }
@@ -393,6 +436,7 @@ export function updateIssueAssignment(
   issue: LocalIssue,
   patch: Partial<LocalIssue>,
   message?: string,
+  outcomes?: Record<string, NonNullable<LocalIssue["workOutcome"]>>,
 ): LocalIssue {
   const assignment = issueAssignment(issue);
   const current =
@@ -405,6 +449,15 @@ export function updateIssueAssignment(
       id: candidate.id,
       patch: {
         ...patch,
+        ...(outcomes?.[candidate.id]
+          ? {
+              workOutcome: outcomes[candidate.id],
+              status:
+                outcomes[candidate.id].status === "ready"
+                  ? ("in_review" as const)
+                  : ("todo" as const),
+            }
+          : {}),
         ...(addedReviews
           ? {
               reviews: [...(candidate.reviews ?? []), ...addedReviews].map(
@@ -416,6 +469,43 @@ export function updateIssueAssignment(
       message,
     })),
   ).find((candidate) => candidate.id === issue.id)!;
+}
+
+/** Missing or malformed per-ticket results never imply that a grouped ticket is ready. */
+export function parseIssueOutcomes(text: string, assignment: LocalIssue[]) {
+  let results: Record<string, unknown> = {};
+  try {
+    const block = [
+      ...text.matchAll(/```issue-results\s*\n([\s\S]*?)```/g),
+    ].pop()?.[1];
+    if (block) results = JSON.parse(block) ?? {};
+  } catch {
+    /* Display an actionable missing-result outcome below. */
+  }
+  return Object.fromEntries(
+    assignment.map((issue) => {
+      const result = results[`MC-${issue.number}`] as LocalIssue["workOutcome"];
+      const valid =
+        result &&
+        ["ready", "blocked", "needs_work"].includes(result.status) &&
+        typeof result.summary === "string";
+      return [
+        issue.id,
+        valid
+          ? result
+          : {
+              status:
+                assignment.length === 1
+                  ? ("ready" as const)
+                  : ("needs_work" as const),
+              summary:
+                assignment.length === 1
+                  ? "Ready for review."
+                  : "No individual result reported. Request feedback or confirm this ticket is ready for review.",
+            },
+      ];
+    }),
+  );
 }
 
 export function localIssueAssignmentPrompt(issue: LocalIssue): string {
@@ -433,8 +523,10 @@ export function localIssueAssignmentPrompt(issue: LocalIssue): string {
   assignment.forEach(visit);
   return [
     `Work on this group in one thread: ${issue.triageGroup?.title ?? "Related issues"}.`,
+    "Only the tickets listed below are active in this assignment. Do not resume archived or completed former members.",
     "Complete every issue below, in the listed dependency order. Treat their combined changes as one review and commit plan. Do not spawn separate threads for these tickets. Report each ticket's result explicitly.",
     ...ordered.map(localIssuePrompt),
+    'Finish with ONE combined commit-files block for the entire assignment, and an ```issue-results JSON block mapping EVERY MC-number to {"status":"ready"|"blocked"|"needs_work","summary":"Result or remaining blocker"}. Only mark a ticket ready when its requested work is complete. Do not treat a completed turn as completion of every ticket.',
   ].join("\n\n");
 }
 
@@ -489,6 +581,26 @@ export function updateLocalIssue(
   const index = issues.findIndex((issue) => issue.id === id);
   if (index < 0) throw new Error("This issue no longer exists.");
   const previous = issues[index]!;
+  if (
+    patch.projectPath !== undefined &&
+    pathKey(patch.projectPath) !== pathKey(previous.projectPath)
+  ) {
+    if (previous.sessionId || previous.runBatchId || isIssueRunning(previous))
+      throw new Error(
+        "An assigned issue cannot change projects. Create a new ticket in the target project.",
+      );
+    patch = { ...patch, triageGroup: undefined, triageDependencies: undefined };
+  }
+  if (patch.dependsOn) {
+    patch = {
+      ...patch,
+      triageDependencies: previous.triageDependencies?.filter((id) =>
+        patch.dependsOn!.includes(id),
+      ),
+    };
+  }
+  if (patch.archived && isIssueRunning(previous))
+    throw new Error("Stop the issue's thread before archiving it.");
   if (
     !message &&
     Object.entries(patch).every(
@@ -704,16 +816,47 @@ export async function startPeerReview(
   }
 }
 
-// Synchronous reservation is persisted before any async work to prevent duplicate launches.
+/** Serialize reservations across app windows where Web Locks are available. */
+export function withIssueDispatchLock<T>(
+  dispatch: () => Promise<T>,
+): Promise<T> {
+  return typeof navigator !== "undefined" && navigator.locks
+    ? navigator.locks.request("monocode.issue-dispatch", dispatch)
+    : dispatch();
+}
+
 export async function startLocalIssue(
+  id: string,
+  launch: (issue: LocalIssue) => Promise<void>,
+  options?: { feedback?: string; kind?: "work" | "commit" },
+): Promise<void> {
+  return withIssueDispatchLock(() =>
+    startReservedLocalIssue(id, launch, options),
+  );
+}
+
+/** Caller holds the dispatch lock; persist reservations before invoking an agent. */
+export async function startReservedLocalIssue(
   id: string,
   launch: (issue: LocalIssue) => Promise<void>,
   options?: { feedback?: string; kind?: "work" | "commit" },
 ): Promise<void> {
   const issue = loadLocalIssues().find((issue) => issue.id === id);
   if (!issue) throw new Error("This issue no longer exists.");
+  if (issue.archived) throw new Error("Restore this issue before running it.");
   if (isIssueRunning(issue)) return;
   const assignment = issueAssignment(issue);
+  if (
+    assignment.some(
+      (member) => pathKey(member.projectPath) !== pathKey(issue.projectPath),
+    )
+  )
+    throw new Error("An assignment cannot span projects.");
+  const occupied = repositoryAssignmentBlocker(issue);
+  if (occupied)
+    throw new Error(
+      `Waiting for MC-${occupied.number}: finish and commit its assignment before starting more work in this repository.`,
+    );
   if (assignment.some((candidate) => isIssueRunning(candidate)))
     throw new Error("This group's agent is already working.");
   const blockers = assignment.flatMap((candidate) =>
@@ -729,8 +872,8 @@ export async function startLocalIssue(
     );
   if (
     options?.kind === "commit" &&
-    assignment.length > 1 &&
-    assignment.some((candidate) => candidate.status !== "in_review")
+    assignment.some((candidate) => candidate.status !== "in_review" ||
+      (candidate.workOutcome && candidate.workOutcome.status !== "ready"))
   )
     throw new Error(
       "Every issue in the group must be in review before approving its shared commit.",
@@ -743,10 +886,10 @@ export async function startLocalIssue(
     assignment.map((candidate) => ({
       id: candidate.id,
       patch: {
-        // Approval is final: the issue is Done while the commit run proceeds.
+        // Dependencies remain blocked until the commit has actually succeeded.
         status:
           options?.kind === "commit"
-            ? "done"
+            ? "in_review"
             : options
               ? "in_progress"
               : "todo",
@@ -756,10 +899,17 @@ export async function startLocalIssue(
         runOwner: ISSUE_WINDOW_ID,
         runHeartbeatAt: new Date().toISOString(),
         feedback: options?.feedback,
+        ...(options?.kind !== "commit"
+          ? {
+              workOutcome: undefined,
+              commitSha: undefined,
+              commitMeta: undefined,
+            }
+          : {}),
       },
       message:
         options?.kind === "commit"
-          ? "Approved review; moved to Done and preparing commit"
+          ? "Approved review; preparing commit"
           : options?.feedback
             ? `Review feedback: ${options.feedback}`
             : "Assigned to agent; preparing the issue thread",
@@ -802,6 +952,10 @@ export async function moveLocalIssue(
       "In Progress is set when an agent starts. Move the issue to To Do to dispatch it, or send review feedback.",
     );
   if (status === "todo") {
+    if (previous.triageGroup && !previous.runBatchId)
+      throw new Error(
+        "This ticket belongs to a triage group. Use Start group, or detach the ticket in its details before starting it individually.",
+      );
     if (!launch)
       throw new Error(
         `Agent dispatch is unavailable. The issue is still in ${ISSUE_STATUS_LABELS[previous.status]}.`,

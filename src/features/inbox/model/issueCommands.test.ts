@@ -56,6 +56,30 @@ it("lists, reads, edits and comments through the existing app CLI handler", asyn
   expect(loadLocalIssues()[0]!.runState).toBeUndefined();
 });
 
+it("does not let an agent complete or manufacture a running assignment through status edits", async () => {
+  const issue = seed();
+  await expect(
+    run("issues.update", { issueId: issue.id, status: "in_progress" }),
+  ).rejects.toThrow("when an agent starts");
+  updateLocalIssue(issue.id, {
+    sessionId: source.id,
+    runState: "running",
+    status: "in_progress",
+  });
+  await expect(
+    run("issues.update", { issueId: issue.id, status: "done" }),
+  ).rejects.toThrow("human review");
+  await run("issues.update", { issueId: issue.id, priority: 1 });
+  expect(loadLocalIssues()[0]).toMatchObject({
+    status: "in_progress",
+    priority: 1,
+  });
+  updateLocalIssue(issue.id, { runState: "completed", status: "in_review" });
+  await expect(
+    run("issues.update", { issueId: issue.id, status: "done" }),
+  ).rejects.toThrow("human review");
+});
+
 it("creates a ticket once when a request is retried", async () => {
   const first = await run(
     "issues.create",

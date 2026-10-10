@@ -1,9 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import { pathKey } from "../../../shared/lib/paths";
+import { loadIssueImages } from "./localIssueImages";
 import {
   isIssueRunning,
   issueBlockers,
+  repositoryAssignmentBlocker,
   loadLocalIssues,
-  startLocalIssue,
+  startReservedLocalIssue,
+  withIssueDispatchLock,
   updateLocalIssues,
   validateIssueDependencies,
   type LocalIssue,
@@ -18,7 +22,87 @@ export type TriagePlan = {
   }[];
   dependencies: { issueId: string; dependsOn: string; reason: string }[];
 };
-export type TriagePreview = { plan: TriagePlan; snapshot: LocalIssue[] };
+export type TriagePreview = {
+  plan: TriagePlan;
+  snapshot: LocalIssue[];
+  warnings?: string[];
+};
+const DRAFT_KEY = "monocode.issueTriage.draft.v1";
+export function loadTriageDraft(): TriagePreview | null {
+  try {
+    const value = JSON.parse(
+      localStorage.getItem(DRAFT_KEY) ?? "null",
+    ) as TriagePreview | null;
+    if (
+      !value ||
+      !Array.isArray(value.snapshot) ||
+      !Array.isArray(value.plan?.groups) ||
+      !Array.isArray(value.plan?.dependencies)
+    )
+      return null;
+    if (
+      !value.snapshot.every(
+        (issue) =>
+          issue &&
+          typeof issue.id === "string" &&
+          typeof issue.projectPath === "string",
+      )
+    )
+      return null;
+    if (
+      !value.plan.groups.every(
+        (group) =>
+          group &&
+          typeof group.title === "string" &&
+          typeof group.reason === "string" &&
+          Array.isArray(group.files) &&
+          group.files.every((file) => typeof file === "string") &&
+          Array.isArray(group.issueIds) &&
+          group.issueIds.length &&
+          group.issueIds.every((id) =>
+            value.snapshot.some((issue) => issue.id === id),
+          ),
+      )
+    )
+      return null;
+    if (
+      !value.plan.dependencies.every(
+        (edge) =>
+          edge &&
+          typeof edge.issueId === "string" &&
+          typeof edge.dependsOn === "string" &&
+          typeof edge.reason === "string",
+      )
+    )
+      return null;
+    if (
+      value.warnings &&
+      (!Array.isArray(value.warnings) ||
+        !value.warnings.every((warning) => typeof warning === "string"))
+    )
+      return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+export function saveTriageDraft(value: TriagePreview | null) {
+  if (value) localStorage.setItem(DRAFT_KEY, JSON.stringify(value));
+  else localStorage.removeItem(DRAFT_KEY);
+}
+export const eligibleForTriage = (issue: LocalIssue) =>
+  !issue.archived &&
+  issue.status === "backlog" &&
+  !isIssueRunning(issue) &&
+  !issue.sessionId &&
+  !issue.runBatchId;
+
+export type TriageOptions = {
+  issueIds?: string[];
+  signal?: AbortSignal;
+  includeImages?: boolean;
+  onProgress?: (preview: TriagePreview, message: string) => void;
+};
 
 export function validateTriagePlan(
   value: unknown,
@@ -54,13 +138,21 @@ export function validateTriagePlan(
       if (!ids.has(id) || assigned.has(id))
         throw new Error("Each backlog issue must appear in exactly one group.");
       assigned.add(id);
-      projects.add(snapshot.find((issue) => issue.id === id)!.projectPath);
+      projects.add(
+        pathKey(snapshot.find((issue) => issue.id === id)!.projectPath),
+      );
     }
     if (projects.size !== 1) throw new Error("A group cannot span projects.");
   }
   if (assigned.size !== ids.size)
     throw new Error("Triage omitted backlog issues. Retry triage.");
   const issues = loadLocalIssues();
+  for (const issue of issues) {
+    if (ids.has(issue.id))
+      issue.dependsOn = (issue.dependsOn ?? []).filter(
+        (id) => !issue.triageDependencies?.includes(id),
+      );
+  }
   plan.groups.forEach((group, index) =>
     group.issueIds.forEach((id) => {
       const issue = issues.find((entry) => entry.id === id);
@@ -92,39 +184,149 @@ export function validateTriagePlan(
 }
 
 /** Analyze each repository separately; one isolated workspace per repository. */
-export async function triageBacklog(project?: string): Promise<TriagePreview> {
+export async function triageBacklog(
+  project?: string,
+  options: TriageOptions = {},
+): Promise<TriagePreview> {
   const snapshot = loadLocalIssues().filter(
     (issue) =>
-      !issue.archived &&
-      issue.status === "backlog" &&
-      !isIssueRunning(issue) &&
-      !issue.sessionId &&
-      !issue.runBatchId &&
-      (!project || issue.projectPath === project),
+      eligibleForTriage(issue) &&
+      (!project || pathKey(issue.projectPath) === pathKey(project)) &&
+      (options.issueIds
+        ? options.issueIds.includes(issue.id)
+        : !issue.triageGroup),
   );
   if (!snapshot.length)
     throw new Error("There are no unassigned backlog issues to triage.");
   if (snapshot.some((issue) => !issue.projectPath || issue.projectPath === "~"))
     throw new Error("Choose a project for every backlog issue before triage.");
   const plan: TriagePlan = { groups: [], dependencies: [] };
+  const analyzed: LocalIssue[] = [];
+  const warnings: string[] = [];
   for (const cwd of new Set(snapshot.map((issue) => issue.projectPath))) {
-    const result = await invoke<TriagePlan>("task_model_triage", {
-      cwd,
-      issues: snapshot.filter((issue) => issue.projectPath === cwd),
-      context: loadLocalIssues()
-        .filter((issue) => issue.projectPath === cwd && !issue.archived)
-        .map(({ id, number, title, status, dependsOn }) => ({
-          id,
-          number,
-          title,
-          status,
-          dependsOn,
-        })),
-    });
-    plan.groups.push(...result.groups);
-    plan.dependencies.push(...result.dependencies);
+    const projectIssues = snapshot.filter((issue) => issue.projectPath === cwd);
+    // Bound ticket text per request as well as count; keep successful batches reviewable.
+    const batches: LocalIssue[][] = [];
+    for (const issue of projectIssues) {
+      let batch = batches[batches.length - 1];
+      if (
+        !batch ||
+        batch.length >= 100 ||
+        JSON.stringify([...batch, issue]).length > 100_000
+      ) {
+        batch = [];
+        batches.push(batch);
+      }
+      batch.push(issue);
+    }
+    if (batches.length > 1)
+      warnings.push(
+        `${cwd}: analyzed in ${batches.length} batches. Review groups across batches for possible merges.`,
+      );
+    for (const [index, batch] of batches.entries()) {
+      if (options.signal?.aborted) break;
+      const runId = crypto.randomUUID();
+      const cancel = () => {
+        void invoke("task_model_cancel_triage", { runId }).catch(() => {});
+      };
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        options.onProgress?.(
+          {
+            plan: structuredClone(plan),
+            snapshot: [...analyzed],
+            warnings: [...warnings],
+          },
+          `Inspecting ${cwd} · batch ${index + 1}/${batches.length}`,
+        );
+        const images: { issueId: string; name: string; url: string }[] = [];
+        for (const issue of batch) {
+          if (!issue.images?.length) continue;
+          if (!options.includeImages) {
+            warnings.push(
+              `MC-${issue.number}: screenshots were not analyzed. Enable screenshots with a vision-capable model to include them.`,
+            );
+            continue;
+          }
+          const available = issue.images
+            .filter((image) => image.size <= 2_000_000)
+            .slice(0, Math.max(0, 8 - images.length));
+          if (available.length !== issue.images.length)
+            warnings.push(
+              `MC-${issue.number}: some screenshots exceeded the 8-image / 2 MB-per-image limit and were not analyzed.`,
+            );
+          for (const image of await loadIssueImages(available))
+            images.push({
+              issueId: issue.id,
+              name: image.name,
+              url: `data:${image.mimeType};base64,${image.data}`,
+            });
+        }
+        if (options.signal?.aborted) break;
+        const context = loadLocalIssues()
+          .filter(
+            (issue) =>
+              pathKey(issue.projectPath) === pathKey(cwd) && !issue.archived,
+          )
+          .sort(
+            (a, b) => Number(a.status === "done") - Number(b.status === "done"),
+          )
+          .map(({ id, number, title, status, dependsOn }) => ({
+            id,
+            number,
+            title: title.slice(0, 300),
+            status,
+            dependsOn,
+          }));
+        const fullContextCount = context.length;
+        while (JSON.stringify(context).length > 80_000) context.pop();
+        if (context.length < fullContextCount)
+          warnings.push(
+            `${cwd}: existing-issue context was limited to ${context.length}/${fullContextCount} tickets. Review dependencies against omitted tickets.`,
+          );
+        const result = await invoke<TriagePlan>("task_model_triage", {
+          cwd,
+          issues: batch,
+          context,
+          runId,
+          images,
+        });
+        if (options.signal?.aborted) break;
+        // Validate the combined plan too: batches can introduce group-level deadlocks.
+        const combined = {
+          groups: [...plan.groups, ...result.groups],
+          dependencies: [...plan.dependencies, ...result.dependencies],
+        };
+        validateTriagePlan(combined, [...analyzed, ...batch]);
+        plan.groups = combined.groups;
+        plan.dependencies = combined.dependencies;
+        analyzed.push(...batch);
+        options.onProgress?.(
+          {
+            plan: structuredClone(plan),
+            snapshot: [...analyzed],
+            warnings: [...warnings],
+          },
+          `Analyzed ${analyzed.length}/${snapshot.length} issues`,
+        );
+      } catch (error) {
+        if (!options.signal?.aborted)
+          warnings.push(
+            `${cwd}, batch ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+      } finally {
+        options.signal?.removeEventListener("abort", cancel);
+      }
+    }
+    if (options.signal?.aborted) break;
   }
-  return { plan: validateTriagePlan(plan, snapshot), snapshot };
+  if (options.signal?.aborted)
+    warnings.push(
+      "Analysis cancelled. Completed batches are available below; unfinished tickets are unchanged.",
+    );
+  if (!analyzed.length)
+    throw new Error(warnings.join("\n") || "No issues were analyzed.");
+  return { plan, snapshot: analyzed, warnings };
 }
 
 export function applyTriagePlan({ plan, snapshot }: TriagePreview) {
@@ -157,10 +359,19 @@ export function applyTriagePlan({ plan, snapshot }: TriagePreview) {
           triageGroup,
           dependsOn: [
             ...new Set([
-              ...(issue.dependsOn ?? []),
+              ...(issue.dependsOn ?? []).filter(
+                (id) => !issue.triageDependencies?.includes(id),
+              ),
               ...dependencies.map((entry) => entry.dependsOn),
             ]),
           ],
+          triageDependencies: dependencies
+            .map((entry) => entry.dependsOn)
+            .filter(
+              (id) =>
+                !issue.dependsOn?.includes(id) ||
+                issue.triageDependencies?.includes(id),
+            ),
         },
         message: `Triaged into ${group.title}: ${group.reason}${dependencies.length ? ` Dependencies: ${dependencies.map((entry) => entry.reason).join("; ")}` : ""}`,
       };
@@ -173,6 +384,13 @@ export async function startIssueGroup(
   groupId: string,
   launch: (issue: LocalIssue) => Promise<void>,
 ) {
+  return withIssueDispatchLock(() => dispatchIssueGroup(groupId, launch));
+}
+
+async function dispatchIssueGroup(
+  groupId: string,
+  launch: (issue: LocalIssue) => Promise<void>,
+) {
   const all = loadLocalIssues();
   const issues = all.filter(
     (issue) =>
@@ -181,6 +399,10 @@ export async function startIssueGroup(
       issue.status !== "done",
   );
   if (!issues.length) throw new Error("This group has no unfinished issues.");
+  if (new Set(issues.map((issue) => pathKey(issue.projectPath))).size !== 1)
+    throw new Error(
+      "An assignment cannot span projects. Detach tickets moved to another project.",
+    );
   if (
     issues.some(
       (issue) =>
@@ -195,32 +417,11 @@ export async function startIssueGroup(
     );
   // Recheck the graph, since dependencies may have been edited after triage.
   validateIssueDependencies(all);
-  const ids = issues.map((issue) => issue.id);
-  const blockers = issues.flatMap((issue) => issueBlockers(issue, all, ids));
-  if (blockers.length)
-    throw new Error(
-      `Blocked by ${[...new Set(blockers.map((issue) => `MC-${issue.number}`))].join(", ")}.`,
-    );
-  // Explicit choices must agree; unspecified choices inherit the selected group's agent.
-  for (const key of ["agent", "model"] as const) {
-    if (new Set(issues.map((issue) => issue[key]).filter(Boolean)).size > 1)
-      throw new Error(
-        "Choose the same agent and model for the grouped issues before starting.",
-      );
-  }
+  const readiness = issueGroupReadiness(issues, all);
+  if (readiness) throw new Error(readiness);
   const settings = issues.filter(
     (issue) => issue.modelSettings && Object.keys(issue.modelSettings).length,
   );
-  if (
-    new Set(
-      settings.map((issue) =>
-        JSON.stringify(Object.entries(issue.modelSettings!).sort()),
-      ),
-    ).size > 1
-  )
-    throw new Error(
-      "Choose the same model options for the grouped issues before starting.",
-    );
   const runBatchId = crypto.randomUUID();
   const reserved = updateLocalIssues(
     issues.map((issue) => ({
@@ -234,5 +435,61 @@ export async function startIssueGroup(
       message: "Assigned to one group thread",
     })),
   );
-  await startLocalIssue(reserved[0]!.id, launch);
+  await startReservedLocalIssue(reserved[0]!.id, launch);
+}
+
+/** Used both by the group card and dispatch so disabled controls explain the real blocker. */
+export function issueGroupReadiness(
+  issues: LocalIssue[],
+  all = loadLocalIssues(),
+): string | undefined {
+  const first = issues[0];
+  if (!first) return "No unfinished issues.";
+  if (new Set(issues.map((issue) => pathKey(issue.projectPath))).size !== 1)
+    return "An assignment cannot span projects.";
+  if (issues.some(isIssueRunning)) return "Agent working";
+  const occupied = repositoryAssignmentBlocker(first, all);
+  if (occupied)
+    return `Waiting for MC-${occupied.number} to finish and commit its assignment.`;
+  const blockers = issues.flatMap((issue) =>
+    issueBlockers(
+      issue,
+      all,
+      issues.map((member) => member.id),
+    ),
+  );
+  if (blockers.length)
+    return `Blocked by ${[...new Set(blockers.map((issue) => `MC-${issue.number}`))].join(", ")}.`;
+  for (const key of ["agent", "model"] as const) {
+    if (new Set(issues.map((issue) => issue[key]).filter(Boolean)).size > 1)
+      return "Choose the same agent and model for the grouped issues before starting.";
+  }
+  if (
+    new Set(
+      issues
+        .filter(
+          (issue) =>
+            issue.modelSettings && Object.keys(issue.modelSettings).length,
+        )
+        .map((issue) =>
+          JSON.stringify(Object.entries(issue.modelSettings!).sort()),
+        ),
+    ).size > 1
+  )
+    return "Choose the same model options for the grouped issues before starting.";
+}
+
+export function detachUnstartedIssue(id: string) {
+  const issue = loadLocalIssues().find((entry) => entry.id === id);
+  if (!issue || issue.sessionId || issue.runBatchId || isIssueRunning(issue))
+    throw new Error(
+      "Only an unstarted ticket can be detached. Existing work keeps its shared review and commit.",
+    );
+  updateLocalIssues([
+    {
+      id,
+      patch: { triageGroup: undefined },
+      message: "Detached from assignment group",
+    },
+  ]);
 }

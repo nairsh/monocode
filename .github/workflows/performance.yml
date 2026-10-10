@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   resources:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,10 +29,15 @@ jobs:
           MONOCODE_PERF_OUTPUT_DIR: ${{ runner.temp }}/monocode-performance
       - name: Publish regression measurements
         if: always()
-        run: cat "$RUNNER_TEMP/monocode-performance/performance-report.md" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          report="$RUNNER_TEMP/monocode-performance/performance-report.md"
+          if [[ -f "$report" ]]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: monocode-performance-results
           path: ${{ runner.temp }}/monocode-performance/
           retention-days: 30
+          if-no-files-found: ignore

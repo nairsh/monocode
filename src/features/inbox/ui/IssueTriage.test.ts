@@ -87,6 +87,7 @@ it("shows a triage plan, applies it, then starts one shared assignment", async (
     root.render(createElement(Harness, { launch, onError: error })),
   );
   await click("Triage");
+  await click("Analyze 2 issues");
   expect(container.textContent).toContain("Proposed assignments");
   expect(container.textContent).toContain("Shared stream state");
   expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
@@ -116,6 +117,7 @@ it("dismisses a proposal without changing tickets and reports endpoint failures"
     root.render(createElement(Harness, { launch: vi.fn(), onError: error })),
   );
   await click("Triage");
+  await click("Analyze 1 issues");
   await act(async () =>
     container
       .querySelector<HTMLButtonElement>('[aria-label="Dismiss triage plan"]')!
@@ -126,8 +128,11 @@ it("dismisses a proposal without changing tickets and reports endpoint failures"
     new Error("Configure a triage model"),
   );
   await click("Triage");
+  await click("Analyze 1 issues");
   expect(error).toHaveBeenCalledWith(
-    expect.objectContaining({ message: "Configure a triage model" }),
+    expect.objectContaining({
+      message: expect.stringContaining("Configure a triage model"),
+    }),
   );
 });
 
@@ -168,4 +173,33 @@ it("allows adding and removing prerequisites and surfaces a cycle without applyi
       .click(),
   );
   expect(loadLocalIssues()[0]!.dependsOn).toEqual([]);
+});
+
+it("persists edited groups and rejected dependencies across remounts before applying", async () => {
+  const a = seed("Streaming"); const b = seed("Authentication");
+  vi.mocked(invoke).mockResolvedValue({
+    groups: [{ title: "Combined", reason: "Initial proposal", files: ["src/app.ts"], issueIds: [a.id, b.id] }],
+    dependencies: [{ issueId: b.id, dependsOn: a.id, reason: "Proposed ordering" }],
+  });
+  const error = vi.fn();
+  const props = { launch: vi.fn(), onError: error };
+  await act(async () => root.render(createElement(Harness, props)));
+  await click("Triage"); await click("Analyze 2 issues");
+  await act(async () => {
+    const select = container.querySelector<HTMLSelectElement>(`[aria-label="Assignment for MC-${b.number}: Authentication"]`)!;
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "new");
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(container.querySelector('[aria-label="Group 2 title"]')).not.toBeNull();
+  await click("Reject");
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness, props)));
+  expect(container.querySelector('[aria-label="Group 2 title"]')).not.toBeNull();
+  expect(container.textContent).not.toContain("Proposed ordering");
+  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
+  await click("Apply triage plan");
+  expect(loadLocalIssues()[0].triageGroup!.id).not.toBe(loadLocalIssues()[1].triageGroup!.id);
+  expect(loadLocalIssues()[1].dependsOn).toEqual([]);
+  expect(error).not.toHaveBeenCalled();
 });

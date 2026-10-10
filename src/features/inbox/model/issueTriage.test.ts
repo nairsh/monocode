@@ -3,6 +3,9 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   applyTriagePlan,
+  detachUnstartedIssue,
+  loadTriageDraft,
+  saveTriageDraft,
   startIssueGroup,
   triageBacklog,
   validateTriagePlan,
@@ -10,8 +13,12 @@ import {
 } from "./issueTriage";
 import {
   createLocalIssue,
+  issueAssignment,
+  issueBlockers,
   loadLocalIssues,
   localIssueAssignmentPrompt,
+  moveLocalIssue,
+  parseIssueOutcomes,
   startLocalIssue,
   updateIssueAssignment,
   updateLocalIssue,
@@ -256,9 +263,9 @@ it("preserves per-ticket review history and requires the entire group to be revi
   await startLocalIssue(
     a.id,
     async (issue) => {
-      expect(loadLocalIssues().every((entry) => entry.status === "done")).toBe(
-        true,
-      );
+      expect(
+        loadLocalIssues().every((entry) => entry.status === "in_review"),
+      ).toBe(true);
       updateIssueAssignment(issue, { commitSha: "abc", runState: "completed" });
     },
     { kind: "commit" },
@@ -278,4 +285,222 @@ it("prevents partial writes when any dependency edit is invalid", () => {
     ]),
   ).toThrow("same project");
   expect(loadLocalIssues()[0]!.title).toBe("A");
+});
+
+it("keeps dependents blocked during a commit and after it fails", async () => {
+  const a = seed("Prerequisite");
+  const b = seed("Dependent");
+  updateLocalIssue(a.id, {
+    status: "in_review",
+    sessionId: "thread",
+    runState: "completed",
+  });
+  updateLocalIssue(b.id, { dependsOn: [a.id] });
+  let reject!: (error: Error) => void;
+  const pending = startLocalIssue(
+    a.id,
+    () =>
+      new Promise((_resolve, fail) => {
+        reject = fail;
+      }),
+    { kind: "commit" },
+  );
+  expect(loadLocalIssues()[0].status).toBe("in_review");
+  expect(issueBlockers(loadLocalIssues()[1])).toHaveLength(1);
+  await expect(startLocalIssue(b.id, vi.fn())).rejects.toThrow();
+  reject(new Error("commit failed"));
+  await expect(pending).rejects.toThrow("commit failed");
+  expect(issueBlockers(loadLocalIssues()[1])).toHaveLength(1);
+  updateLocalIssue(a.id, {
+    status: "done",
+    runState: "completed",
+    commitSha: "committed",
+  });
+  const launch = vi.fn(async () => {});
+  await startLocalIssue(b.id, launch);
+  expect(launch).toHaveBeenCalledOnce();
+});
+
+it("detaches project moves before dispatch and rejects legacy mixed-project groups", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  applyTriagePlan({ plan: planFor([a, b]), snapshot: [a, b] });
+  const group = loadLocalIssues()[0].triageGroup!;
+  updateLocalIssue(b.id, { projectPath: "/other" });
+  expect(loadLocalIssues()[1].triageGroup).toBeUndefined();
+  updateLocalIssues([{ id: b.id, patch: { triageGroup: group } }]);
+  await expect(startIssueGroup(group.id, vi.fn())).rejects.toThrow(
+    "span projects",
+  );
+  updateLocalIssue(b.id, { projectPath: "/repo" });
+  await startIssueGroup(group.id, async (issue) => {
+    updateIssueAssignment(issue, {
+      sessionId: "thread",
+      runState: "completed",
+    });
+  });
+  expect(() => updateLocalIssue(a.id, { projectPath: "/other" })).toThrow(
+    "cannot change projects",
+  );
+});
+
+it("serializes working-copy assignments through review, including archived unfinished work", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  await startLocalIssue(a.id, async (issue) => {
+    updateLocalIssue(issue.id, {
+      sessionId: "a",
+      runState: "completed",
+      status: "in_review",
+    });
+  });
+  await expect(startLocalIssue(b.id, vi.fn())).rejects.toThrow(
+    "Waiting for MC",
+  );
+  updateLocalIssue(a.id, { archived: true });
+  await expect(startLocalIssue(b.id, vi.fn())).rejects.toThrow(
+    "Waiting for MC",
+  );
+  updateLocalIssue(a.id, {
+    archived: false,
+    status: "done",
+    commitSha: "a",
+    runKind: "commit",
+    runState: "completed",
+  });
+  await expect(startLocalIssue(b.id, async () => {})).resolves.toBeUndefined();
+});
+
+it("never resumes archived members and prevents accidental individual dispatch of a proposed group", async () => {
+  const a = seed("A");
+  const b = seed("B");
+  applyTriagePlan({ plan: planFor([a, b]), snapshot: [a, b] });
+  await expect(moveLocalIssue(a.id, "todo", vi.fn())).rejects.toThrow(
+    "Start group",
+  );
+  await startIssueGroup(loadLocalIssues()[0].triageGroup!.id, async (issue) => {
+    updateIssueAssignment(issue, {
+      sessionId: "shared",
+      runState: "completed",
+      status: "in_review",
+    });
+  });
+  updateLocalIssue(b.id, { archived: true });
+  await startLocalIssue(
+    a.id,
+    async (issue) => {
+      expect(issueAssignment(issue).map((entry) => entry.id)).toEqual([a.id]);
+    },
+    { feedback: "Revise A" },
+  );
+  expect(loadLocalIssues()[1]).toMatchObject({
+    archived: true,
+    status: "in_review",
+    runState: "completed",
+  });
+  await expect(startLocalIssue(b.id, vi.fn())).rejects.toThrow("Restore");
+});
+
+it("records partial outcomes and does not assume omitted tickets are complete", () => {
+  const a = seed("A");
+  const b = seed("B");
+  const c = seed("C");
+  updateLocalIssues(
+    [a, b, c].map((issue) => ({
+      id: issue.id,
+      patch: { runBatchId: "batch" },
+    })),
+  );
+  const output =
+    "```issue-results\n" +
+    JSON.stringify({
+      [`MC-${a.number}`]: { status: "ready", summary: "Tested" },
+      [`MC-${b.number}`]: { status: "blocked", summary: "Needs credentials" },
+    }) +
+    "\n```";
+  updateIssueAssignment(
+    loadLocalIssues()[0],
+    { runState: "completed" },
+    "Results",
+    parseIssueOutcomes(output, loadLocalIssues()),
+  );
+  expect(
+    loadLocalIssues().map((issue) => [issue.status, issue.workOutcome?.status]),
+  ).toEqual([
+    ["in_review", "ready"],
+    ["todo", "blocked"],
+    ["todo", "needs_work"],
+  ]);
+});
+
+it("retriages selected tickets without retaining obsolete model dependencies or changing manual ones", () => {
+  const a = seed("A");
+  const b = seed("B");
+  const manual = seed("Manual prerequisite");
+  updateLocalIssue(a.id, { dependsOn: [manual.id] });
+  const first = planFor([loadLocalIssues()[0], b]);
+  first.dependencies.push({
+    issueId: a.id,
+    dependsOn: b.id,
+    reason: "Initial ordering",
+  });
+  applyTriagePlan({ plan: first, snapshot: loadLocalIssues().slice(0, 2) });
+  expect(loadLocalIssues()[0].triageDependencies).toEqual([b.id]);
+  applyTriagePlan({
+    plan: planFor([a, b]),
+    snapshot: loadLocalIssues().slice(0, 2),
+  });
+  expect(loadLocalIssues()[0].dependsOn).toEqual([manual.id]);
+  detachUnstartedIssue(a.id);
+  expect(loadLocalIssues()[0].triageGroup).toBeUndefined();
+});
+
+it("batches more than 100 tickets, saves drafts and preserves successful projects when another fails", async () => {
+  Array.from({ length: 101 }, (_, index) => seed(`Ticket ${index}`));
+  seed("Failing project", "/other");
+  vi.mocked(invoke).mockImplementation(async (_command, args) => {
+    const input = args as { cwd: string; issues: LocalIssue[] };
+    if (input.cwd === "/other") throw new Error("offline");
+    return planFor(input.issues);
+  });
+  const result = await triageBacklog(undefined, {
+    onProgress: (partial) => {
+      if (partial.snapshot.length) saveTriageDraft(partial);
+    },
+  });
+  expect(invoke).toHaveBeenCalledTimes(3);
+  expect(result.snapshot).toHaveLength(101);
+  expect(result.warnings?.join(" ")).toContain("offline");
+  expect(loadTriageDraft()?.snapshot).toHaveLength(101);
+  applyTriagePlan(result);
+  expect(loadLocalIssues().at(-1)?.triageGroup).toBeUndefined();
+});
+
+it("honors ticket selection and cancellation without applying a late model response", async () => {
+  const a = seed("A");
+  seed("Unselected");
+  const controller = new AbortController();
+  let finish!: (value: TriagePlan) => void;
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "task_model_cancel_triage") return;
+    return new Promise<TriagePlan>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const pending = triageBacklog("/repo", {
+    issueIds: [a.id],
+    signal: controller.signal,
+  });
+  expect(invoke).toHaveBeenCalledWith(
+    "task_model_triage",
+    expect.objectContaining({ issues: [a] }),
+  );
+  controller.abort();
+  finish(planFor([a]));
+  await expect(pending).rejects.toThrow("cancelled");
+  expect(invoke).toHaveBeenCalledWith(
+    "task_model_cancel_triage",
+    expect.objectContaining({ runId: expect.any(String) }),
+  );
+  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
 });

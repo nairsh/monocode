@@ -28,7 +28,7 @@ import {
 import { submitWithSettlement } from "./model/managedSubmission";
 import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
 import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
-import { issueAssignment, localIssueAssignmentPrompt, updateIssueAssignment } from "../features/inbox/model/localIssues";
+import { issueAssignment, localIssueAssignmentPrompt, updateIssueAssignment, parseIssueOutcomes } from "../features/inbox/model/localIssues";
 import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
 import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
 import { taskModelConfig } from "../features/settings/model/taskModel";
@@ -8340,6 +8340,8 @@ function Workspace({
     const assignment = issueAssignment(issue);
     const assignmentLabel = assignment.map(entry => `MC-${entry.number}`).join(", ");
     let session = issue.sessionId ? await ensureOpenSession(issue.sessionId) : undefined;
+    if (session && !sameProjectPath(session.cwd, issue.projectPath))
+      throw new Error("The saved issue thread belongs to another project. Create a new ticket in the intended project.");
     if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
     // Approval commits through the task model (no agent turn) when it is configured and the agent recorded its files.
     if (issue.runKind === "commit" && session && canCommitWithTaskModel(issue, !!(await taskModelConfig().catch(() => null)))) {
@@ -8386,7 +8388,7 @@ function Workspace({
     const prompt = committing
       ? `The user approved ${assignmentLabel}: ${issue.title}. Create one commit for this assignment's changes only. Inspect the diff and preserve unrelated existing changes. Do not push. If a safe scoped commit is not possible, explain the blocker instead of claiming success. Return the commit hash and a summary.`
       : issue.feedback
-        ? `${localIssueFeedbackPrompt(assigned, issue.feedback)}\n\nThis assignment covers ${assignmentLabel}; keep all its tickets together in this thread.`
+        ? `${localIssueFeedbackPrompt(assigned, issue.feedback)}\n\nOnly these tickets are active in this assignment: ${assignmentLabel}; keep them together in this thread, and do not resume former members. End with one combined commit-files block and an issue-results JSON fence mapping each active MC-number to {"status":"ready"|"blocked"|"needs_work","summary":"Result or blocker"}.`
         : localIssueAssignmentPrompt(assigned);
     const accepted = await submitWithSettlement({
       submit: onSettled => submitSession(sessionId, `/operator\n${prompt}`, images, {
@@ -8396,7 +8398,7 @@ function Workspace({
         ciContext: prompt,
         onSettled,
         onStarted: () => {
-          // A commit run belongs to an already-approved (Done) issue; only work runs are In Progress.
+          // Committing stays in review until success; only work runs are In Progress.
           if (!settled) updateIssueAssignment(issue, { ...(committing ? {} : { status: "in_progress" as const }), runState: "running", runHeartbeatAt: new Date().toISOString() }, "Agent started working");
         },
         draftBlockId,
@@ -8442,7 +8444,8 @@ function Workspace({
               ...(plan?.files.length ? { commitFiles: [...new Set([...(current.commitFiles ?? []), ...plan.files])] } : {}),
               ...(plan?.subject ? { commitSubject: plan.subject } : {}),
               ...(committed && history?.head ? { commitSha: history.head, commitMeta: issueCommitMeta(commit, "") } : {}),
-            }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
+            }, committing ? "Committed approved changes; issue done" : "Agent finished; individual results recorded",
+              committing ? undefined : parseIssueOutcomes(output, issueAssignment(current)));
           }
         } catch (reason) {
           // Never leave the issue "running" because saving the result failed.

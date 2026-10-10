@@ -5,14 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   release-channel:
     name: Release channel isolation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -22,10 +26,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node --test scripts/release-channel.test.cjs
+      - run: node --test scripts/release-channel.test.cjs scripts/fork-updater.test.mjs scripts/upstream-sync.test.mjs
+
+  workflows:
+    name: Workflow validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate workflow syntax and expressions
+        # Pin the validator; no repository dependency or install script needed.
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.7 -color -shellcheck= -pyflakes=
 
   browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -49,6 +66,7 @@ jobs:
           if-no-files-found: ignore
 
   host:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -62,9 +80,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:host
-      - run: npm run host:package
+      # test:host already builds and type-checks the host via pretest:host.
+      - run: node host/package.mjs
 
   check:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -86,13 +106,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: Swatinem/rust-cache@v2
+
       - run: npm ci
       - run: npm test
       - run: npx tsc --noEmit
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo check
-      - run: cargo test
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked
         env:
           MONOCODE_PERF_OUTPUT_DIR: ${{ runner.temp }}/monocode-native-performance
       - uses: actions/upload-artifact@v4
@@ -106,6 +127,7 @@ jobs:
   appimage:
     name: AppImage host libraries
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     permissions:
       contents: read
     # A full tauri release build is too expensive for every PR. Run when
@@ -153,6 +175,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.packaging.outputs.run == 'true'
 
+      - uses: Swatinem/rust-cache@v2
+        if: steps.packaging.outputs.run == 'true'
+
       - name: Install Linux system dependencies
         if: steps.packaging.outputs.run == 'true'
         run: bash scripts/install-linux-deps-debian.sh
@@ -170,6 +195,7 @@ jobs:
 
   rpm:
     name: RPM build (${{ matrix.image }})
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     strategy:
@@ -198,6 +224,11 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Both containers run on Linux, but have different system libraries.
+          key: ${{ matrix.image }}
 
       - run: npm ci
       - run: npm run build:fedora
@@ -239,6 +270,7 @@ jobs:
 
   rpm-clean-install:
     name: Clean rpm install
+    timeout-minutes: 15
     needs: rpm
     runs-on: ubuntu-latest
     # Deliberately no setup script: this is the only job that can catch an rpm

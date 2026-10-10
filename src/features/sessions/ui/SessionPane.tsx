@@ -1159,9 +1159,9 @@ const LocalSessionPane = memo(function LocalSessionPane({
               ref={composerDockMotion.dockedRef}
               data-session-composer
               inert={btw.open}
-              // A Mono covers the usage footer (h-7 + border) that lifts the
-              // thread composer; keep the input at the same height.
-              className={`mx-auto w-full max-w-3xl shrink-0 ${agent ? "pb-[29px]" : ""}`}
+              // A Mono covers the usage footer (h-7 + border); compensate
+              // for it, while threads get a small gap above the footer.
+              className={`mx-auto w-full max-w-3xl shrink-0 ${agent ? "pb-[29px]" : "pb-2"}`}
             >
               {agent ? (
                 <>

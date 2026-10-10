@@ -344,11 +344,18 @@ describe.each([false, true])("Mono rail selection (compact: %s)", (compact) => {
       : !!container.querySelector('[data-mono-rail] [aria-current="true"]');
     expect(monoSelected()).toBe(true);
 
-    await act(async () =>
-      container.querySelector<HTMLButtonElement>(`button[aria-label^="${label}"]`)!.click(),
-    );
-    expect(container.querySelector(`button[aria-label^="${label}"]`)!.classList)
-      .toContain("bg-selection");
+    if (!compact && label === "Search") {
+      // Expanded rails no longer show Search; the shell opens it via the shortcut.
+      expect(container.querySelector('button[aria-label^="Search"]')).toBeNull();
+      props = { ...props, searchActive: true };
+      await act(async () => render());
+    } else {
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>(`button[aria-label^="${label}"]`)!.click(),
+      );
+      expect(container.querySelector(`button[aria-label^="${label}"]`)!.classList)
+        .toContain("bg-selection");
+    }
     expect(monoSelected()).toBe(false);
     expect(container.querySelector('[data-mono-rail] [data-selected="true"]')).toBeNull();
     expect(props.monos?.activeId).toBe(mono.id);

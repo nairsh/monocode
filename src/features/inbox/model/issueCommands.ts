@@ -151,7 +151,20 @@ export function handleIssueCommand(
       );
     patch.description = input.description;
   }
-  if (input.status !== undefined) patch.status = status();
+  if (input.status !== undefined) {
+    patch.status = status();
+    if (
+      (issue.sessionId || issue.runBatchId || isIssueRunning(issue)) &&
+      patch.status !== issue.status
+    )
+      throw new Error(
+        "Assignment status is managed by its run and human review. Report individual results in issue-results, or comment with remaining blockers.",
+      );
+    if (patch.status === "in_progress")
+      throw new Error(
+        "In Progress is set when an agent starts. Status updates do not launch work.",
+      );
+  }
   if (input.priority !== undefined) patch.priority = priority();
   if (input.labels !== undefined)
     patch.labels = strings(input.labels, "labels");
