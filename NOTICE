@@ -1,13 +1,11 @@
 MonoCode is not affiliated with, endorsed by, or sponsored by the makers of the
 agent harnesses it can drive.
 
-Provider marks that appear in the UI (including Claude, Codex, Cursor, GitHub, GitLab, Linear, Grok, OpenCode, Pi, omp, fx, Hermes, and Nous Research) are trademarks of their respective owners and are used only to identify those products.
+Provider marks that appear in the UI (including Claude, Codex, Cursor, GitHub, GitLab, Linear, Grok, OpenCode, Pi, omp, fx, Hermes, Nous Research, Devin, and Cognition) are trademarks of their respective owners and are used only to identify those products.
 
-The incremental highlighting strategy in src/features/files/editor/codeHighlightPlugin.ts
-is adapted from T3 Code, apps/web/src/lib/incrementalHighlighting.ts (d7d7f8f3e).
-The closed-fence Markdown block reuse in
-src/features/sessions/ui/incrementalMarkdownBlocks.ts adapts the safe boundary
-principle from T3 Code, apps/web/src/markdown-incremental.ts (a9dabbf10).
+Some of this fork's performance work was informed by T3 Code (see
+docs/t3-performance-review.md). Its incremental highlighting and Markdown block
+reuse were superseded by the upstream implementations during the 0.12.0 merge.
 
 MIT License
 
