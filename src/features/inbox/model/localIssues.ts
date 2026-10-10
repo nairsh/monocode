@@ -1,5 +1,9 @@
 import { limitSection } from "../../../shared/lib/jsonText";
-import { HARNESSES, type HarnessId } from "../../sessions/model/session";
+import {
+  HARNESSES,
+  type Block,
+  type HarnessId,
+} from "../../sessions/model/session";
 
 export const ISSUE_STATUSES = [
   "backlog",
@@ -352,6 +356,29 @@ export const localIssueFeedbackPrompt = (issue: LocalIssue, feedback: string) =>
 export const hasWorkReview = (issue: Pick<LocalIssue, "reviews">) =>
   issue.reviews?.some((review) => review.kind === "work") ?? false;
 
+/** The agent's newest own summary of its work, if any. */
+export const latestWorkReview = (issue: Pick<LocalIssue, "reviews">) =>
+  [...(issue.reviews ?? [])].reverse().find((review) => review.kind === "work");
+
+/** Text of the newest visible assistant message, if any. */
+export const lastAgentReply = (blocks: readonly Block[] = []) =>
+  blocks
+    .filter(
+      (block) =>
+        block.role === "assistant" && !block.internal && block.text.trim(),
+    )
+    .pop()?.text;
+
+/** Commit details stored on an issue; `commit` is a git history entry, if the log could be read. */
+export const issueCommitMeta = (
+  commit: { subject: string; author: string; timestamp: number } | undefined,
+  fallbackSubject: string,
+) => ({
+  subject: commit?.subject ?? fallbackSubject,
+  author: commit?.author ?? "",
+  at: new Date(commit ? commit.timestamp * 1000 : Date.now()).toISOString(),
+});
+
 /** Ends a run without stranding the issue: reviewed work returns to In Review. */
 export function issueRunFailurePatch(
   issue: LocalIssue,
@@ -396,9 +423,7 @@ export function peerReviewPrompt(
   issue: LocalIssue,
   diff: { summary: string; patch: string },
 ): string {
-  const work = [...(issue.reviews ?? [])]
-    .reverse()
-    .find((review) => review.kind === "work");
+  const work = latestWorkReview(issue);
   return [
     `Review the work another agent did for local issue MC-${issue.number} in this working copy. This is read-only: do not modify, stage, or commit any files.`,
     `## Issue\n${issue.title}\n\n${limitSection(issue.description.trim() || "(no description)", 1_500)}`,

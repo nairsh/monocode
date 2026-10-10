@@ -40,6 +40,7 @@ import {
 import {
   HARNESS_LABEL,
   type Block,
+  type HarnessId,
   type ModelTarget,
   type Session,
 } from "../../sessions/model/session";
@@ -827,13 +828,14 @@ function ReviewPopover({
   onStart: (target: ModelTarget) => void;
   onDismiss: () => void;
 }) {
+  const target = (harness: HarnessId, model: string): ModelTarget => ({
+    harness,
+    model,
+    modelSettings: preferredModelSettings(resolveModel(harness, model)),
+  });
   const [choice, setChoice] = useState(() => {
     const { harness, model } = defaultSessionChoice(issue.projectPath);
-    return {
-      harness,
-      model,
-      values: preferredModelSettings(resolveModel(harness, model)),
-    };
+    return target(harness, model);
   });
   return (
     <Popover
@@ -852,31 +854,16 @@ function ReviewPopover({
         variant="plain"
         harness={choice.harness}
         model={choice.model}
-        values={choice.values}
+        values={choice.modelSettings}
         project={issue.projectPath}
         side="bottom"
         hotkeys={false}
-        onChange={(harness, model) =>
-          setChoice({
-            harness,
-            model,
-            values: preferredModelSettings(resolveModel(harness, model)),
-          })
-        }
-        onSettingsChange={(values) =>
-          setChoice((previous) => ({ ...previous, values }))
+        onChange={(harness, model) => setChoice(target(harness, model))}
+        onSettingsChange={(modelSettings) =>
+          setChoice((previous) => ({ ...previous, modelSettings }))
         }
       />
-      <button
-        className="it-primary"
-        onClick={() =>
-          onStart({
-            harness: choice.harness,
-            model: choice.model,
-            modelSettings: choice.values,
-          })
-        }
-      >
+      <button className="it-primary" onClick={() => onStart(choice)}>
         Start review
       </button>
     </Popover>
@@ -2053,7 +2040,6 @@ export function IssueTracker({
         const copy = card.cloneNode(true) as HTMLElement;
         copy.removeAttribute("data-issue-id");
         copy.setAttribute("aria-hidden", "true");
-        copy.classList.remove("is-dragging");
         ghost.append(copy);
         if (dragged.length > 1) {
           const count = document.createElement("span");

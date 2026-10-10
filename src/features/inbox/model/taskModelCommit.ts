@@ -7,7 +7,9 @@ import {
 } from "../../../platform/tauri/fs";
 import {
   loadLocalIssues,
+  issueCommitMeta,
   issueRunFailurePatch,
+  latestWorkReview,
   updateLocalIssue,
   verifiedIssueCommit,
   type LocalIssue,
@@ -44,12 +46,9 @@ export async function commitIssueWithTaskModel(
       staged.push(file);
     }
     const context = await gitStagedContext(cwd);
-    const workSummary =
-      [...(issue.reviews ?? [])].reverse().find((r) => r.kind === "work")
-        ?.text ?? "";
     const message = await taskModelCommitMessage({
       title: issue.title,
-      workSummary,
+      workSummary: latestWorkReview(issue)?.text ?? "",
       stat: context.summary,
       diff: context.patch,
       subjectHint: issue.commitSubject ?? "",
@@ -72,13 +71,7 @@ export async function commitIssueWithTaskModel(
         runOwner: undefined,
         runHeartbeatAt: undefined,
         commitSha: sha,
-        commitMeta: {
-          subject: commit?.subject ?? message.split("\n")[0]!,
-          author: commit?.author ?? "",
-          at: new Date(
-            commit ? commit.timestamp * 1000 : Date.now(),
-          ).toISOString(),
-        },
+        commitMeta: issueCommitMeta(commit, message.split("\n")[0]!),
         reviews: [
           ...(current.reviews ?? []),
           {

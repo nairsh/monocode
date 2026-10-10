@@ -30,8 +30,7 @@ export function subscribeOpenIssue(listener: () => void) {
   return () => void openListeners.delete(listener);
 }
 
-const NO_ISSUES: ReadonlyMap<string, number> = new Map();
-let issueNumbers = NO_ISSUES;
+let issueNumbers: ReadonlyMap<string, number> = new Map();
 
 function refreshIssueNumbers() {
   let next: Map<string, number>;

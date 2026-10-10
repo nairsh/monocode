@@ -27,7 +27,7 @@ import {
 } from "../features/agent-app/model/agentApp";
 import { submitWithSettlement } from "./model/managedSubmission";
 import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
-import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueRunFailurePatch, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
+import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, localIssuePrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, updateLocalIssue, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
 import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
 import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
 import { taskModelConfig } from "../features/settings/model/taskModel";
@@ -8225,8 +8225,7 @@ function Workspace({
           const completed = outcome.status === "completed";
           const failedState = outcome.status === "cancelled" ? "cancelled" as const : "failed" as const;
           const turnBlocks = sessionsRef.current.find(entry => entry.id === sessionId)?.blocks.filter(block => !priorBlockIds.has(block.id)) ?? [];
-          const replies = turnBlocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim());
-          const output = replies[replies.length - 1]?.text || outcome.text || "";
+          const output = lastAgentReply(turnBlocks) || outcome.text || "";
           // A successful turn alone does not prove that the requested commit exists: HEAD must have moved.
           const history = committing && completed ? await gitHistory(commitCwd, 10).catch(() => null) : null;
           const committed = committing && verifiedIssueCommit(previousHead, history?.head);
@@ -8256,7 +8255,7 @@ function Workspace({
               // Files accumulate across feedback runs; the newest proposed subject wins.
               ...(plan?.files.length ? { commitFiles: [...new Set([...(current.commitFiles ?? []), ...plan.files])] } : {}),
               ...(plan?.subject ? { commitSubject: plan.subject } : {}),
-              ...(committed && history?.head ? { commitSha: history.head, commitMeta: { subject: commit?.subject ?? "", author: commit?.author ?? "", at: new Date(commit ? commit.timestamp * 1000 : Date.now()).toISOString() } } : {}),
+              ...(committed && history?.head ? { commitSha: history.head, commitMeta: issueCommitMeta(commit, "") } : {}),
             }, committing ? "Committed approved changes; issue done" : "Agent finished; ready for review");
           }
         } catch (reason) {
@@ -8281,9 +8280,8 @@ function Workspace({
     if (!source || source.worktreeRemoved) throw new Error("The issue thread or its worktree is gone, so there is nothing to review.");
     const { harness, model, modelSettings } = target;
     const reviewer = resolveModel(harness, model);
-    const diff = await gitStagedContext(sessionWorkCwd(source)).then(
-      context => ({ summary: context.summary, patch: context.patch }),
-      reason => ({ summary: "", patch: `(${reason instanceof Error ? reason.message : String(reason)}; if the work was already committed, inspect git log)` }),
+    const diff = await gitStagedContext(sessionWorkCwd(source)).catch(
+      reason =>({ summary: "", patch: `(${reason instanceof Error ? reason.message : String(reason)}; if the work was already committed, inspect git log)` }),
     );
     const session = {
       ...newSession(harness, source.cwd, model, source.runtimeMode),
@@ -8311,8 +8309,7 @@ function Workspace({
             reject(new Error(outcome.error || (outcome.status === "cancelled" ? "The review was stopped before it finished." : "The review failed.")));
             return;
           }
-          const replies = sessionsRef.current.find(entry => entry.id === session.id)?.blocks.filter(block => block.role === "assistant" && !block.internal && block.text.trim()) ?? [];
-          resolve({ text: replies[replies.length - 1]?.text || outcome.text || "", sessionId: session.id });
+          resolve({ text: lastAgentReply(sessionsRef.current.find(entry => entry.id === session.id)?.blocks) || outcome.text || "", sessionId: session.id });
         },
       });
     });

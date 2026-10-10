@@ -513,9 +513,6 @@ button.it-chip:hover {
   user-select: none;
   animation: it-card-in 180ms var(--motion-ease-out, ease-out) backwards;
 }
-.it-card img {
-  -webkit-user-drag: none;
-}
 /* Keyboard focus rings the whole card, not just the button inside it. */
 .it-card:has(> .it-card-open:focus-visible) {
   border-color: var(--it-accent);
