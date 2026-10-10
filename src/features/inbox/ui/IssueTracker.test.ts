@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement } from "react";
+import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
@@ -9,7 +9,7 @@ import {
   type LocalIssue,
 } from "../model/localIssues";
 import { IssueTracker } from "./IssueTracker";
-import type { Session } from "../../sessions/model/session";
+import type { ModelTarget, Session } from "../../sessions/model/session";
 import { polishIssue } from "../../settings/model/taskModel";
 
 vi.mock("../../settings/model/taskModel", () => ({ polishIssue: vi.fn() }));
@@ -42,13 +42,17 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
 });
-async function render(onLaunch = vi.fn(async (_issue: LocalIssue) => {})) {
+async function render(
+  onLaunch = vi.fn(async (_issue: LocalIssue) => {}),
+  onReview?: ComponentProps<typeof IssueTracker>["onReview"],
+) {
   await act(async () =>
     root.render(
       createElement(IssueTracker, {
         cwd: "/tmp/web",
         recents: [],
         onLaunch,
+        onReview,
       }),
     ),
   );
@@ -642,4 +646,144 @@ it("cannot create an issue directly in the agent-owned In Progress status", asyn
   );
   expect(labels.some((label) => label?.includes("In Progress"))).toBe(false);
   expect(labels.some((label) => label?.includes("To Do"))).toBe(true);
+});
+
+function contextMenuOnCard() {
+  act(() =>
+    container.querySelector(".it-card")!.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 200,
+        clientY: 300,
+      }),
+    ),
+  );
+  return document.querySelector('[aria-label="Issue actions"]')!;
+}
+const hasReviewItem = (menu: Element) =>
+  [...menu.querySelectorAll("button")].some((entry) =>
+    entry.textContent?.includes("Review with…"),
+  );
+function startReviewFromMenu() {
+  const menu = contextMenuOnCard();
+  act(() =>
+    [...menu.querySelectorAll("button")]
+      .find((entry) => entry.textContent?.includes("Review with…"))!
+      .click(),
+  );
+  return async () =>
+    act(async () =>
+      [...document.querySelectorAll<HTMLButtonElement>("button")]
+        .find((entry) => entry.textContent === "Start review")!
+        .click(),
+    );
+}
+
+it("offers Review with… only for an idle issue that has a work session and review", async () => {
+  const fresh = seed();
+  await render();
+  expect(hasReviewItem(contextMenuOnCard())).toBe(false);
+  act(() => void updateLocalIssue(fresh.id, { sessionId: "thread" }));
+  expect(hasReviewItem(contextMenuOnCard())).toBe(false);
+  act(() => void updateLocalIssue(fresh.id, { runState: "running" }));
+  expect(hasReviewItem(contextMenuOnCard())).toBe(false);
+  act(
+    () =>
+      void updateLocalIssue(fresh.id, {
+        runState: "completed",
+        status: "in_review",
+        reviews: [{ id: "w", text: "Done", at: "a", kind: "work" }],
+      }),
+  );
+  expect(hasReviewItem(contextMenuOnCard())).toBe(true);
+});
+
+it("reviews with a picked model and posts the result as a peer comment", async () => {
+  const issue = reviewed();
+  let finish!: (value: { text: string; sessionId: string }) => void;
+  const onReview = vi.fn(
+    (_issue: LocalIssue, _target: ModelTarget) =>
+      new Promise<{ text: string; sessionId: string }>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await render(undefined, onReview);
+  const start = startReviewFromMenu();
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+    `Review MC-${issue.number} with`,
+  );
+  await start();
+  expect(onReview).toHaveBeenCalledOnce();
+  expect(onReview.mock.calls[0][0]).toMatchObject({
+    id: issue.id,
+    sessionId: "same-thread",
+  });
+  expect(onReview.mock.calls[0][1]).toMatchObject({
+    harness: expect.any(String),
+    model: expect.any(String),
+  });
+  expect(container.textContent).toContain("Reviewing with");
+  await act(async () =>
+    finish({ text: "Verdict: needs changes", sessionId: "review-thread" }),
+  );
+  const stored = loadLocalIssues()[0];
+  expect(stored).toMatchObject({
+    sessionId: "same-thread",
+    status: "in_review",
+  });
+  expect(stored.reviews?.at(-1)).toMatchObject({
+    kind: "peer",
+    sessionId: "review-thread",
+  });
+  expect(container.textContent).not.toContain("Reviewing with");
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  const review = document.querySelector(".it-review")!;
+  // The agent's own work review stays primary; the peer review is its own comment.
+  expect(review.querySelector("h3 + *")?.textContent).toContain("Validated");
+  expect(review.textContent).toContain("Verdict: needs changes");
+  expect(review.querySelector("h4")?.textContent).toMatch(/^Review · /);
+  expect(review.textContent).toContain("Open review thread");
+});
+
+it("shows a failed review on the card and leaves the issue as it was", async () => {
+  const issue = reviewed();
+  const onReview = vi.fn(
+    async (_issue: LocalIssue, _target: ModelTarget): Promise<never> => {
+      throw new Error("The review was stopped before it finished.");
+    },
+  );
+  await render(undefined, onReview);
+  await startReviewFromMenu()();
+  expect(container.textContent).toContain("Review failed");
+  const stored = loadLocalIssues()[0];
+  expect(stored).toMatchObject({
+    id: issue.id,
+    status: "in_review",
+    sessionId: "same-thread",
+    runState: "completed",
+  });
+  expect(stored.reviews).toHaveLength(1);
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  expect(document.querySelector(".it-review")?.textContent).toContain(
+    "stopped before it finished",
+  );
+});
+
+it("opens Review with… from the three-dot menu in the issue detail", async () => {
+  const issue = reviewed();
+  await render(
+    undefined,
+    vi.fn(async () => ({ text: "ok", sessionId: "r" })),
+  );
+  act(() => button(`Open MC-${issue.number}: Fix clipping`).click());
+  act(() => button("More actions").click());
+  act(() =>
+    [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((entry) => entry.textContent?.includes("Review with…"))!
+      .click(),
+  );
+  expect(
+    document.querySelector('[role="dialog"][aria-label*="Review MC-"]'),
+  ).not.toBeNull();
 });

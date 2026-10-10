@@ -27,7 +27,7 @@ import {
   SlidersHorizontal,
   X,
 } from "../../../shared/ui/icons";
-import { Popover } from "../../../shared/ui/Popover";
+import { Popover, type PopoverAnchor } from "../../../shared/ui/Popover";
 import { copyText } from "../../../platform/tauri/clipboard";
 import { LAYER } from "../../../shared/lib/layers";
 import { projectName } from "../../../shared/lib/paths";
@@ -39,6 +39,7 @@ import {
 import {
   HARNESS_LABEL,
   type Block,
+  type ModelTarget,
   type Session,
 } from "../../sessions/model/session";
 import {
@@ -56,11 +57,14 @@ import {
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,
   ISSUE_STATUS_LABELS,
+  canPeerReview,
   isIssueRunning,
   loadLocalIssues,
   localIssuePrompt,
   moveLocalIssue,
+  peerReviewOf,
   startLocalIssue,
+  startPeerReview,
   subscribeLocalIssues,
   updateLocalIssue,
   type IssueDraft,
@@ -107,6 +111,11 @@ type Props = {
   cwd: string;
   recents: RecentProject[];
   onLaunch?: (issue: LocalIssue) => Promise<void>;
+  /** Runs another model over the issue's work; resolves with its review text and thread. */
+  onReview?: (
+    issue: LocalIssue,
+    target: ModelTarget,
+  ) => Promise<{ text: string; sessionId: string }>;
   /** Shows a GitHub entry in the navigation when provided. */
   onOpenGithub?: () => void;
   onOpenSession?: (id: string) => void | Promise<void>;
@@ -683,6 +692,74 @@ function IssueProperties({
   );
 }
 
+/** Pick any model through the normal selector, then start a read-only peer review. */
+function ReviewPopover({
+  issue,
+  anchor,
+  onStart,
+  onDismiss,
+}: {
+  issue: LocalIssue;
+  anchor: PopoverAnchor;
+  onStart: (target: ModelTarget) => void;
+  onDismiss: () => void;
+}) {
+  const [choice, setChoice] = useState(() => {
+    const { harness, model } = defaultSessionChoice(issue.projectPath);
+    return {
+      harness,
+      model,
+      values: preferredModelSettings(resolveModel(harness, model)),
+    };
+  });
+  return (
+    <Popover
+      anchor={anchor}
+      width={260}
+      autoFocus
+      onDismiss={onDismiss}
+      ignore="[data-model-picker]"
+      className="issue-surface it-menu it-review-picker"
+      role="dialog"
+      aria-label={`Review MC-${issue.number} with another model`}
+      data-dialog-popover
+    >
+      <p className="it-muted">Review MC-{issue.number} with</p>
+      <ModelPicker
+        variant="plain"
+        harness={choice.harness}
+        model={choice.model}
+        values={choice.values}
+        project={issue.projectPath}
+        side="bottom"
+        hotkeys={false}
+        onChange={(harness, model) =>
+          setChoice({
+            harness,
+            model,
+            values: preferredModelSettings(resolveModel(harness, model)),
+          })
+        }
+        onSettingsChange={(values) =>
+          setChoice((previous) => ({ ...previous, values }))
+        }
+      />
+      <button
+        className="it-primary"
+        onClick={() =>
+          onStart({
+            harness: choice.harness,
+            model: choice.model,
+            modelSettings: choice.values,
+          })
+        }
+      >
+        Start review
+      </button>
+    </Popover>
+  );
+}
+
 function IssueDetail({
   issue,
   projects,
@@ -690,6 +767,7 @@ function IssueDetail({
   onMove,
   onRetry,
   onContinue,
+  onReview,
   onReadSession,
   onApproval,
   onOpenSession,
@@ -705,12 +783,15 @@ function IssueDetail({
     feedback?: string,
     kind?: "work" | "commit",
   ) => Promise<void>;
+  onReview: (id: string, target: ModelTarget) => void;
   onReadSession?: Props["onReadSession"];
   onApproval?: Props["onApproval"];
   onOpenSession?: Props["onOpenSession"];
   onError: (reason: unknown) => void;
 }) {
   const [draft, setDraft] = useState<IssueDraft>(issue);
+  const [moreMenu, setMoreMenu] = useState<HTMLElement | null>(null);
+  const [picking, setPicking] = useState(false);
   const [comment, setComment] = useState("");
   const [editingDescription, setEditingDescription] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -752,8 +833,13 @@ function IssueDetail({
   const newestReviews = [...(issue.reviews ?? [])].reverse();
   const workReview = newestReviews.find((review) => review.kind === "work");
   const commitReview = newestReviews.find((review) => review.kind === "commit");
+  const peerReviews = newestReviews.filter((review) => review.kind === "peer");
+  const peerState = peerReviewOf(issue.id);
   const previousReviews = newestReviews.filter(
-    (review) => review !== workReview && review !== commitReview,
+    (review) =>
+      review !== workReview &&
+      review !== commitReview &&
+      review.kind !== "peer",
   );
   const committing = issue.runKind === "commit";
   const commitStatus = committing
@@ -843,6 +929,20 @@ function IssueDetail({
         >
           <Copy className="it-icon" />
         </button>
+        {canPeerReview(issue) ? (
+          <button
+            className="it-icon-button"
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={!!moreMenu}
+            onClick={(event) => {
+              setPicking(false);
+              setMoreMenu(event.currentTarget);
+            }}
+          >
+            <MoreHorizontal className="it-icon" />
+          </button>
+        ) : null}
         <button
           className="it-icon-button"
           aria-label="Close issue"
@@ -851,6 +951,39 @@ function IssueDetail({
           <X className="it-icon" />
         </button>
       </header>
+      {moreMenu && !picking ? (
+        <Popover
+          anchor={moreMenu}
+          align="end"
+          width={220}
+          onDismiss={() => setMoreMenu(null)}
+          autoFocus
+          className="issue-surface it-menu"
+          role="menu"
+          aria-label="More actions"
+          data-dialog-popover
+        >
+          <button
+            role="menuitem"
+            disabled={peerState?.state === "running"}
+            onClick={() => setPicking(true)}
+          >
+            <Bot className="it-icon" />
+            Review with…
+          </button>
+        </Popover>
+      ) : null}
+      {moreMenu && picking ? (
+        <ReviewPopover
+          issue={issue}
+          anchor={moreMenu}
+          onDismiss={() => setMoreMenu(null)}
+          onStart={(target) => {
+            setMoreMenu(null);
+            onReview(issue.id, target);
+          }}
+        />
+      ) : null}
       {detailError ? (
         <div className="it-error-banner" role="alert">
           {detailError}
@@ -987,6 +1120,38 @@ function IssueDetail({
                     ) : null}
                   </div>
                 ) : null}
+                {peerState ? (
+                  <p
+                    className={
+                      peerState.state === "failed" ? "it-error" : "it-muted"
+                    }
+                  >
+                    {peerState.state === "running"
+                      ? `Reviewing with ${peerState.model}…`
+                      : `Review with ${peerState.model} failed${peerState.error ? `: ${peerState.error}` : ""}`}
+                  </p>
+                ) : null}
+                {peerReviews.map((review) => (
+                  <div className="it-commit" key={review.id}>
+                    <h4>Review · {review.model ?? "another model"}</h4>
+                    <IssueOutput cwd={issue.projectPath} text={review.text} />
+                    {review.sessionId ? (
+                      <button
+                        className="it-thread-link"
+                        onClick={() => {
+                          onClose();
+                          void Promise.resolve(
+                            onOpenSession?.(review.sessionId!),
+                          ).catch(onError);
+                        }}
+                      >
+                        <Bot className="it-icon" />
+                        Open review thread
+                        <ChevronRight className="it-icon" />
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
                 {previousReviews.length ? (
                   <details>
                     <summary>Previous reviews</summary>
@@ -1048,22 +1213,24 @@ function IssueDetail({
                   </p>
                 </div>
               ))}
-              {issue.reviews?.map((review) => (
-                <details key={review.id}>
-                  <summary>
-                    {review.kind === "commit"
-                      ? "Commit result"
-                      : "Agent review and evidence"}{" "}
-                    · {new Date(review.at).toLocaleString()}
-                  </summary>
-                  <IssueOutput
-                    cwd={issue.projectPath}
-                    text={review.text}
-                    images={review.images}
-                    evidenceError={review.evidenceError}
-                  />
-                </details>
-              ))}
+              {issue.reviews
+                ?.filter((review) => review.kind !== "peer")
+                .map((review) => (
+                  <details key={review.id}>
+                    <summary>
+                      {review.kind === "commit"
+                        ? "Commit result"
+                        : "Agent review and evidence"}{" "}
+                      · {new Date(review.at).toLocaleString()}
+                    </summary>
+                    <IssueOutput
+                      cwd={issue.projectPath}
+                      text={review.text}
+                      images={review.images}
+                      evidenceError={review.evidenceError}
+                    />
+                  </details>
+                ))}
               {issue.sessionId ? (
                 <details className="it-transcript" open={running}>
                   <summary>
@@ -1285,6 +1452,7 @@ export function IssueTracker({
   cwd,
   recents,
   onLaunch,
+  onReview,
   onOpenGithub,
   onOpenSession,
   onReadSession,
@@ -1339,6 +1507,11 @@ export function IssueTracker({
   const [checked, setChecked] = useState<string[]>([]);
   const anchor = useRef<string | null>(null);
   const [context, setContext] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [reviewAt, setReviewAt] = useState<{
     id: string;
     x: number;
     y: number;
@@ -1445,6 +1618,15 @@ export function IssueTracker({
           ? { feedback: issue.feedback }
           : undefined,
     );
+  };
+  const reviewIssue = (id: string, target: ModelTarget) => {
+    if (!onReview) return showError("Review is unavailable.");
+    // Failures are reported on the issue itself; only a refused start throws here.
+    void startPeerReview(
+      id,
+      resolveModel(target.harness, target.model).name,
+      (issue) => onReview(issue, target),
+    ).catch(showError);
   };
   const create = async (draft: IssueDraft) => {
     // Always save first in Backlog, so direct creation in To Do uses the same dispatch path.
@@ -1579,6 +1761,13 @@ export function IssueTracker({
                 ? "Starting agent"
                 : "Agent is working"}
             </>
+          ) : peerReviewOf(issue.id)?.state === "running" ? (
+            <>
+              <LoaderCircle className="it-icon animate-spin" />
+              Reviewing with {peerReviewOf(issue.id)?.model}…
+            </>
+          ) : peerReviewOf(issue.id)?.state === "failed" ? (
+            <span className="it-error">Review failed</span>
           ) : issue.runState === "failed" ? (
             <span className="it-error">Agent needs attention</span>
           ) : (
@@ -2083,6 +2272,7 @@ export function IssueTracker({
           onMove={move}
           onRetry={retry}
           onContinue={continueIssue}
+          onReview={reviewIssue}
           onReadSession={onReadSession}
           onApproval={onApproval}
           onOpenSession={onOpenSession}
@@ -2094,6 +2284,17 @@ export function IssueTracker({
           <CheckCircle className="it-icon" />
           {notice}
         </div>
+      ) : null}
+      {reviewAt && issues.some((issue) => issue.id === reviewAt.id) ? (
+        <ReviewPopover
+          issue={issues.find((issue) => issue.id === reviewAt.id)!}
+          anchor={reviewAt}
+          onDismiss={() => setReviewAt(null)}
+          onStart={(target) => {
+            reviewIssue(reviewAt.id, target);
+            setReviewAt(null);
+          }}
+        />
       ) : null}
       {context ? (
         <Popover
@@ -2182,6 +2383,21 @@ export function IssueTracker({
             <Copy className="it-icon" />
             Copy as prompt
           </button>
+          {canPeerReview(
+            issues.find((issue) => issue.id === context.id) ?? {},
+          ) ? (
+            <button
+              role="menuitem"
+              disabled={peerReviewOf(context.id)?.state === "running"}
+              onClick={() => {
+                setReviewAt(context);
+                setContext(null);
+              }}
+            >
+              <Bot className="it-icon" />
+              Review with…
+            </button>
+          ) : null}
           <button
             role="menuitem"
             disabled={isIssueRunning(

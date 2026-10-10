@@ -1351,3 +1351,9 @@ html.theme-light .it-status-todo,
 html.theme-light .it-status-backlog {
   filter: brightness(0.75);
 }
+.it-review-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
