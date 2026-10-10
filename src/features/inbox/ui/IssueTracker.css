@@ -1351,3 +1351,30 @@ html.theme-light .it-status-todo,
 html.theme-light .it-status-backlog {
   filter: brightness(0.75);
 }
+.it-sha {
+  margin-left: 6px;
+  color: var(--it-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.it-sha:hover,
+.it-sha:focus-visible {
+  color: var(--it-text);
+}
+.it-sha-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  font-size: 12px;
+  color: var(--it-muted);
+  pointer-events: none;
+}
+.it-sha-pop strong {
+  color: var(--it-text);
+  font-weight: 550;
+}
+.it-sha-pop code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
