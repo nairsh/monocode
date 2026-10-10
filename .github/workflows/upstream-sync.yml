@@ -26,10 +26,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # github.token can never push .github/workflows changes; this PAT has the workflows scope.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
       - name: Propose a merge without changing main
         id: merge
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
