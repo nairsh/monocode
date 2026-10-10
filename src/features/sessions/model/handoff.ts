@@ -22,6 +22,8 @@ export type HandoffComposerCard = {
   brief: string;
   request?: string;
   files?: number;
+  sourceSessionId?: string;
+  sourceBlockId?: string;
 };
 
 export function buildHandoffComposerCard(input: {
@@ -30,12 +32,17 @@ export function buildHandoffComposerCard(input: {
   brief: string;
   userRequest: string;
   files: string[];
+  sourceSessionId?: string;
+  sourceBlockId?: string;
 }): HandoffComposerCard {
   const request = input.userRequest.replace(/\s+/g, " ").trim();
   return {
     from: input.from,
     to: input.to,
     brief: input.brief,
+    ...(input.sourceSessionId && input.sourceBlockId
+      ? { sourceSessionId: input.sourceSessionId, sourceBlockId: input.sourceBlockId }
+      : {}),
     ...(request ? { request: request.slice(0, 240) } : {}),
     ...(input.files.length > 0 ? { files: input.files.length } : {}),
   };
@@ -404,10 +411,11 @@ export function wrapHandoffPrompt(
   from: HarnessId,
   userText: string,
   earlierRequests: string[] = [],
+  portableContext?: string,
 ): string {
   const fromTitle = HARNESS_TITLE[from];
   const request = userText.trim();
-  const body = stripGoalSections(brief);
+  const body = portableContext ?? stripGoalSections(brief);
   const earlier = earlierRequests.map((text) => text.trim()).filter(Boolean);
   const earlierBlock =
     earlier.length > 0

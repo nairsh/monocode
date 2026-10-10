@@ -321,7 +321,6 @@ import {
   appendPreparingHandoff,
   buildDeterministicHandoff,
   buildHandoffComposerCard,
-  chooseHandoffBrief,
   completeHandoff,
   consumeHandoff,
   HANDOFF_TITLE,
@@ -332,12 +331,14 @@ import {
   planComposerSwitch,
   sessionChildHarnesses,
   sessionThroughTurn,
-  shouldAskOutgoingAgent,
   type HandoffComposerCard,
   userMessagesAfterHandoff,
   wrapHandoffPrompt,
 } from "../features/sessions/model/handoff";
-import { requestOutgoingHandoff } from "../features/sessions/model/handoffTurn";
+import {
+  resolveHandoffHistory,
+  preparePortableHandoff,
+} from "../features/sessions/model/portableHandoff";
 import {
   applyBtwHarnessEvent,
   btwTurnHarness,
@@ -503,6 +504,7 @@ import {
   discardDraftSessionRecord,
   deleteSession,
   getSession,
+  getMonoTranscriptPage,
   listLinkedSessions,
   listSessionsByProject,
   persistFingerprint,
@@ -7347,7 +7349,7 @@ function Workspace({
               noteCard:
                 rawCommand || options?.ciRepair ? s.noteCard : undefined,
               handoffCard:
-                rawCommand || options?.ciRepair ? s.handoffCard : undefined,
+                rawCommand || options?.ciRepair ? s.handoffCard : handoffCard,
             };
             if (editedResend) {
               next = editedResend.replace(next);
@@ -7626,28 +7628,7 @@ function Workspace({
             }
           : queuedHandoff;
         if (pendingSwitch) {
-          let agentText = "";
-          if (
-            shouldAskOutgoingAgent(current) &&
-            isLiveHarness(pendingSwitch.from)
-          ) {
-            try {
-              agentText = await requestOutgoingHandoff({
-                harness: pendingSwitch.from,
-                sessionId,
-                cwd: workCwd,
-                model: pendingSwitch.fromModel,
-                modelSettings: pendingSwitch.fromSettings,
-                providerAccountId: pendingSwitch.fromProviderAccountId,
-                userRequest: text,
-              });
-            } catch {
-              agentText = "";
-            }
-          }
-          if (turnGen.current.get(sessionId) !== gen) return;
-          const latest = sessionsRef.current.find((s) => s.id === sessionId);
-          const brief = chooseHandoffBrief(agentText, latest ?? current, text);
+          const brief = buildDeterministicHandoff(current, text);
           await forgetHarnessSession(pendingSwitch.from, sessionId);
           if (turnGen.current.get(sessionId) !== gen) return;
           wrap = { from: pendingSwitch.from, to: current.harness, text: brief };
@@ -7699,6 +7680,15 @@ function Workspace({
         const applyTurnEvent = (event: HarnessEvent) => {
           if (!startReported && (event.type === "session.started" || event.type === "message.delta" || event.type.startsWith("tool."))) {
             startReported = true;
+            if (handoffCard) {
+              setSessions((prev) =>
+                prev.map((session) =>
+                  session.id === sessionId && session.handoffCard === handoffCard
+                    ? { ...session, handoffCard: undefined }
+                    : session,
+                ),
+              );
+            }
             options?.onStarted?.();
           }
           orchestrator.observe(sessionId, event);
@@ -7854,6 +7844,25 @@ function Workspace({
               return;
             }
           }
+          let portableContext: string | undefined;
+          if (wrap && !rawCommand) {
+            // Legacy handoff cards contain only a recap; keep those readable.
+            if (!handoffCard || handoffCard.sourceSessionId) {
+              const history = await resolveHandoffHistory(
+                current,
+                handoffCard,
+                async (id) =>
+                  sessionsRef.current.find((s) => s.id === id) ?? await getSession(id),
+                (id, before) => getMonoTranscriptPage(id, { before }),
+              );
+              portableContext = await preparePortableHandoff(
+                history,
+                turnPrompt,
+                prepared.length,
+              );
+            }
+            if (turnGen.current.get(sessionId) !== gen) return;
+          }
           const sendTurn = (text: string, turnAttachments = prepared) =>
             sendHarnessTurn({
               harness: current.harness,
@@ -7886,7 +7895,8 @@ function Workspace({
                     wrap.text,
                     wrap.from,
                     turnPrompt.trim() || CONTINUE_PROMPT,
-                    earlier,
+                    portableContext ? [] : earlier,
+                    portableContext,
                   )
                 : turnPrompt,
             ),
@@ -10053,6 +10063,8 @@ function Workspace({
           brief: buildDeterministicHandoff(sliced),
           userRequest,
           files,
+          sourceSessionId: source.id,
+          sourceBlockId: sliced.blocks[sliced.blocks.length - 1]?.id,
         }),
       };
       openSessionBeside(sourceId, session, source.cwd, true);
