@@ -9,7 +9,7 @@ import { AgentTranscript } from "./AgentTranscript";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-it("reopens a saved Cursor placeholder as a named, expandable subagent with a step count", async () => {
+it("reopens a saved Cursor placeholder as a named, expandable subagent with its token usage", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const saved = newSession("cursor", "/repo");
   saved.providerSessionId = "parent";
@@ -83,7 +83,7 @@ it("reopens a saved Cursor placeholder as a named, expandable subagent with a st
       'button[aria-label="Show Review ACP routing\'s work"]',
     );
     expect(button).not.toBeNull();
-    expect(button!.textContent).toContain("1 step");
+    expect(button!.textContent).toContain("Tokens unavailable");
     expect(button!.textContent).toContain("Grok 4.6");
     expect(
       sanitizeSessionForPersist(session!).blocks.find(
