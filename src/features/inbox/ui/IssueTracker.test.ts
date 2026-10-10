@@ -106,6 +106,44 @@ it("opens issue creation with C, focuses the description, and closes with Escape
   expect(container.inert).toBe(false);
 });
 
+it("keeps the create issue dialog open when Create more is switched on", async () => {
+  await render();
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", bubbles: true }),
+    ),
+  );
+
+  const more = document.querySelector<HTMLInputElement>(
+    '.it-create-more input[role="switch"]',
+  )!;
+  expect(more).not.toBeNull();
+  expect(more.checked).toBe(false);
+  await act(async () => {
+    more.click();
+  });
+  expect(more.checked).toBe(true);
+
+  const description = document.querySelector<HTMLTextAreaElement>(
+    '[aria-label="Issue description"]',
+  )!;
+  act(() => type(description, "First issue"));
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>(
+        '.it-create-footer button[type="submit"]',
+      )!
+      .click();
+  });
+
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(description.value).toBe("");
+  expect(loadLocalIssues()[0]).toMatchObject({
+    title: "Generated title",
+    description: "Polished details",
+  });
+});
+
 it("preserves the draft and creates nothing when polishing fails, then retries", async () => {
   vi.mocked(polishIssue).mockRejectedValueOnce(new Error("Endpoint offline"));
   await render();
