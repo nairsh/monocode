@@ -16,6 +16,13 @@ import {
 } from "./localIssues";
 
 export type TriagePlan = {
+  updates?: {
+    issueId: string;
+    title?: string;
+    description?: string;
+    priority?: number;
+    reason: string;
+  }[];
   groups: {
     title: string;
     reason: string;
@@ -104,6 +111,7 @@ export type TriageOptions = {
   signal?: AbortSignal;
   includeImages?: boolean;
   onProgress?: (preview: TriagePreview, message: string) => void;
+  onBatch?: (preview: TriagePreview) => void;
 };
 
 export function validateTriagePlan(
@@ -115,6 +123,31 @@ export function validateTriagePlan(
   const assigned = new Set<string>();
   if (!plan || !Array.isArray(plan.groups) || !Array.isArray(plan.dependencies))
     throw new Error("Triage returned an invalid plan.");
+  const updated = new Set<string>();
+  if (plan.updates !== undefined && !Array.isArray(plan.updates))
+    throw new Error("Triage returned invalid issue updates.");
+  for (const update of plan.updates ?? []) {
+    if (
+      !update ||
+      !ids.has(update.issueId) ||
+      updated.has(update.issueId) ||
+      typeof update.reason !== "string" ||
+      !update.reason.trim() ||
+      (update.title !== undefined &&
+        (typeof update.title !== "string" ||
+          !update.title.trim() ||
+          update.title.length > 500)) ||
+      (update.description !== undefined &&
+        (typeof update.description !== "string" ||
+          update.description.length > 50_000)) ||
+      (update.priority !== undefined &&
+        (!Number.isInteger(update.priority) ||
+          update.priority < 0 ||
+          update.priority > 4))
+    )
+      throw new Error("Triage returned an invalid issue update.");
+    updated.add(update.issueId);
+  }
   for (const group of plan.groups) {
     if (
       !group ||
@@ -288,16 +321,32 @@ export async function triageBacklog(
           images,
           target,
           signal: options.signal,
+          onProgress: (message) =>
+            options.onProgress?.(
+              {
+                plan: structuredClone(plan),
+                snapshot: [...analyzed],
+                warnings: [...warnings],
+              },
+              message,
+            ),
         });
         if (options.signal?.aborted) break;
         // Validate the combined plan too: batches can introduce group-level deadlocks.
         const combined = {
           groups: [...plan.groups, ...result.groups],
           dependencies: [...plan.dependencies, ...result.dependencies],
+          updates: [...(plan.updates ?? []), ...(result.updates ?? [])],
         };
         validateTriagePlan(combined, [...analyzed, ...batch]);
+        options.onBatch?.({
+          plan: result,
+          snapshot: batch,
+          warnings: [...warnings],
+        });
         plan.groups = combined.groups;
         plan.dependencies = combined.dependencies;
+        plan.updates = combined.updates;
         analyzed.push(...batch);
         options.onProgress?.(
           {
@@ -346,12 +395,20 @@ export function applyTriagePlan({ plan, snapshot }: TriagePreview) {
     const triageGroup = { ...details, id: crypto.randomUUID() };
     return issueIds.map((id) => {
       const issue = current.find((entry) => entry.id === id)!;
+      const update = plan.updates?.find((entry) => entry.issueId === id);
       const dependencies = plan.dependencies.filter(
         (entry) => entry.issueId === id,
       );
       return {
         id,
         patch: {
+          ...(update?.title !== undefined ? { title: update.title } : {}),
+          ...(update?.description !== undefined
+            ? { description: update.description }
+            : {}),
+          ...(update?.priority !== undefined
+            ? { priority: update.priority }
+            : {}),
           triageGroup,
           dependsOn: [
             ...new Set([
@@ -369,11 +426,46 @@ export function applyTriagePlan({ plan, snapshot }: TriagePreview) {
                 issue.triageDependencies?.includes(id),
             ),
         },
-        message: `Triaged into ${group.title}: ${group.reason}${dependencies.length ? ` Dependencies: ${dependencies.map((entry) => entry.reason).join("; ")}` : ""}`,
+        message: `Triaged into ${group.title}: ${group.reason}${update ? ` ${update.reason}` : ""}${dependencies.length ? ` Dependencies: ${dependencies.map((entry) => entry.reason).join("; ")}` : ""}`,
       };
     });
   });
-  updateLocalIssues(changes);
+  return { before: snapshot, after: updateLocalIssues(changes) };
+}
+
+export type TriageUndo = { before: LocalIssue[]; after: LocalIssue[] };
+/** Restore only triage-owned fields which have not subsequently been edited. */
+export function undoTriage(receipts: TriageUndo[]) {
+  const current = loadLocalIssues();
+  const keys = [
+    "title",
+    "description",
+    "priority",
+    "triageGroup",
+    "dependsOn",
+    "triageDependencies",
+  ] as const;
+  const changes = receipts.flatMap(({ before, after }) =>
+    before.flatMap((previous) => {
+      const latest = current.find((issue) => issue.id === previous.id);
+      const applied = after.find((issue) => issue.id === previous.id);
+      if (!latest || !applied || !eligibleForTriage(latest)) return [];
+      const patch: Partial<LocalIssue> = {};
+      for (const key of keys) {
+        if (JSON.stringify(latest[key]) === JSON.stringify(applied[key]))
+          Object.assign(patch, { [key]: previous[key] });
+      }
+      return [
+        {
+          id: previous.id,
+          patch,
+          message: "Undid triage changes; later edits were preserved",
+        },
+      ];
+    }),
+  );
+  if (changes.length) updateLocalIssues(changes);
+  return changes.length;
 }
 
 export async function startIssueGroup(
@@ -381,6 +473,41 @@ export async function startIssueGroup(
   launch: (issue: LocalIssue) => Promise<void>,
 ) {
   return withIssueDispatchLock(() => dispatchIssueGroup(groupId, launch));
+}
+
+/** Turn a displayed priority/ungrouped row into one explicitly requested assignment. */
+export async function startIssueSelection(
+  title: string,
+  ids: string[],
+  launch: (issue: LocalIssue) => Promise<void>,
+) {
+  return withIssueDispatchLock(async () => {
+    const all = loadLocalIssues();
+    const members = ids.map((id) => all.find((issue) => issue.id === id));
+    if (
+      !members.length ||
+      members.some((issue) => !issue || !eligibleForTriage(issue))
+    )
+      throw new Error("Start a group with fresh backlog issues only.");
+    const ready = issueGroupReadiness(members as LocalIssue[], all);
+    if (ready) throw new Error(ready);
+    const id = crypto.randomUUID();
+    updateLocalIssues(
+      members.map((issue) => ({
+        id: issue!.id,
+        patch: {
+          triageGroup: {
+            id,
+            title,
+            reason: "Grouped by the user for one shared thread",
+            files: [],
+          },
+        },
+        message: "Grouped for one shared thread",
+      })),
+    );
+    await dispatchIssueGroup(id, launch);
+  });
 }
 
 async function dispatchIssueGroup(
@@ -441,6 +568,11 @@ export function issueGroupReadiness(
 ): string | undefined {
   const first = issues[0];
   if (!first) return "No unfinished issues.";
+  if (
+    issues.some((issue) => issue.sessionId || issue.runBatchId) &&
+    !issues.some(isIssueRunning)
+  )
+    return "Continue the existing assignment from its issue or thread.";
   if (new Set(issues.map((issue) => pathKey(issue.projectPath))).size !== 1)
     return "An assignment cannot span projects.";
   if (issues.some(isIssueRunning)) return "Agent working";

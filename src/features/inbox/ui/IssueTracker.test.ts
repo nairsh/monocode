@@ -970,15 +970,23 @@ it("checks the active sort, remembers it, and collapses sidebar sections", async
   seed();
   await render();
   act(() => button("Display options").click());
+  expect(
+    document.querySelector<HTMLInputElement>('[role="switch"]')?.checked,
+  ).toBe(false);
+  act(() => button("Issue ordering").click());
   const item = (label: string) =>
     [
       ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
     ].find((entry) => entry.textContent?.includes(label))!;
   expect(item("Newest first").getAttribute("aria-checked")).toBe("true");
-  expect(item("Show empty groups").getAttribute("aria-checked")).toBe("false");
-  act(() => item("Oldest first").click());
+  act(() => {
+    item("Oldest first").dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true }),
+    );
+    item("Oldest first").click();
+  });
   expect(localStorage.getItem("monocode.issues.sort")).toBe("oldest");
-  act(() => button("Display options").click());
+  act(() => button("Issue ordering").click());
   expect(item("Oldest first").getAttribute("aria-checked")).toBe("true");
   expect(item("Newest first").getAttribute("aria-checked")).toBe("false");
   act(() =>

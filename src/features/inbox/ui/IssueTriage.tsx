@@ -1,17 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, LoaderCircle, X } from "../../../shared/ui/icons";
-import { pathKey, projectName } from "../../../shared/lib/paths";
+import { Bot, X } from "../../../shared/ui/icons";
+import { pathKey } from "../../../shared/lib/paths";
 import { TriageModelSettings } from "../../settings/ui/TriageModelSettings";
+import { Popover } from "../../../shared/ui/Popover";
 import {
   applyTriagePlan,
   detachUnstartedIssue,
   eligibleForTriage,
-  issueGroupReadiness,
-  loadTriageDraft,
-  saveTriageDraft,
-  startIssueGroup,
   triageBacklog,
-  type TriagePreview,
+  undoTriage,
+  type TriageUndo,
 } from "../model/issueTriage";
 import {
   isIssueRunning,
@@ -23,431 +21,183 @@ import {
 type TriageControls = {
   selectedIds?: string[];
   query?: string;
-  onOpenIssue?: (id: string) => void;
-  onOpenSession?: (id: string) => void;
-  onRetry?: (id: string) => void;
+  onApplied?: () => void;
 };
 
 export function useIssueTriage(
   issues: LocalIssue[],
   project: string,
-  launch: ((issue: LocalIssue) => Promise<void>) | undefined,
+  _launch: ((issue: LocalIssue) => Promise<void>) | undefined,
   onError: (reason: unknown) => void,
   controls: TriageControls = {},
 ) {
-  const [preview, setPreview] = useState<TriagePreview | null>(loadTriageDraft);
-  const [open, setOpen] = useState(() => !!loadTriageDraft());
-  const [configuring, setConfiguring] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
-  const [includeImages, setIncludeImages] = useState(true);
+  const [settings, setSettings] = useState<HTMLElement | null>(null);
+  const [receipts, setReceipts] = useState<TriageUndo[]>([]);
+  const [notice, setNotice] = useState("");
   const pending = useRef<AbortController | null>(null);
-  useEffect(() => () => pending.current?.abort(), []);
-  const scoped = issues.filter(
-    (issue) =>
-      !issue.archived &&
-      (!project || pathKey(issue.projectPath) === pathKey(project)),
-  );
-  const selected = controls.selectedIds ?? [];
-  const candidates = scoped.filter(
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      pending.current?.abort();
+    };
+  }, []);
+  const candidates = issues.filter(
     (issue) =>
       eligibleForTriage(issue) &&
-      (selected.length
-        ? selected.includes(issue.id)
+      (!project || pathKey(issue.projectPath) === pathKey(project)) &&
+      (controls.selectedIds?.length
+        ? controls.selectedIds.includes(issue.id)
         : !issue.triageGroup &&
           `${issue.title} MC-${issue.number} ${issue.description} ${issue.labels.join(" ")}`
             .toLowerCase()
             .includes((controls.query ?? "").toLowerCase())),
   );
-  const groups = [
-    ...new Set(scoped.map((issue) => issue.triageGroup?.id).filter(Boolean)),
-  ]
-    .map((id) =>
-      scoped.filter(
-        (issue) => issue.triageGroup?.id === id && issue.status !== "done",
-      ),
-    )
-    .filter((group) => group.length);
-  const name = (id: string) => {
-    const issue = issues.find((entry) => entry.id === id);
-    return issue ? `MC-${issue.number}: ${issue.title}` : id;
-  };
-  const link = (id: string) =>
-    controls.onOpenIssue ? (
-      <button
-        type="button"
-        className="it-triage-link"
-        onClick={() => controls.onOpenIssue!(id)}
-      >
-        {name(id)}
-      </button>
-    ) : (
-      <span>{name(id)}</span>
-    );
-  const persist = (next: TriagePreview | null) => {
-    saveTriageDraft(next);
-    setPreview(next);
-  };
-  const edit = (change: (draft: TriagePreview) => void) => {
-    if (!preview) return;
-    try {
-      const next = structuredClone(preview);
-      change(next);
-      persist(next);
-    } catch (reason) {
-      onError(reason);
-    }
-  };
   const run = async () => {
-    if (pending.current) return;
+    if (pending.current || !candidates.length) return;
     const controller = new AbortController();
     pending.current = controller;
     setBusy(true);
-    setConfiguring(false);
-    setOpen(true);
+    setNotice("");
+    setReceipts([]);
+    setProgress("Preparing repository inspection…");
+    const applied: TriageUndo[] = [];
     try {
       const result = await triageBacklog(project, {
         issueIds: candidates.map((issue) => issue.id),
-        includeImages,
+        includeImages: true,
         signal: controller.signal,
-        onProgress: (partial, message) => {
-          setProgress(message);
-          if (partial.snapshot.length) persist(partial);
+        onProgress: (_partial, message) => {
+          if (mounted.current) setProgress(message);
+        },
+        onBatch: (batch) => {
+          if (controller.signal.aborted) return;
+          applied.push(applyTriagePlan(batch));
+          if (mounted.current) {
+            setReceipts([...applied]);
+            controls.onApplied?.();
+          }
         },
       });
-      persist(result);
+      if (mounted.current) {
+        const count = applied.reduce(
+          (n, receipt) => n + receipt.after.length,
+          0,
+        );
+        setNotice(
+          `${count} issues triaged · ${result.plan.groups.length} topics${result.warnings?.length ? " · " + result.warnings.join(" ") : ""}`,
+        );
+      }
     } catch (reason) {
-      onError(reason);
+      if (mounted.current) {
+        if (controller.signal.aborted)
+          setNotice(
+            applied.length
+              ? "Triage stopped. Completed changes can be undone."
+              : "Triage cancelled",
+          );
+        else onError(reason);
+      }
     } finally {
       pending.current = null;
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
   return {
+    busy,
     button: (
-      <button
-        className="it-chip"
-        disabled={busy || (!candidates.length && !preview)}
-        onClick={() => {
-          setConfiguring(candidates.length > 0);
-          setOpen(true);
-        }}
-      >
-        {busy ? (
-          <LoaderCircle className="it-icon animate-spin" />
-        ) : (
+      <div className="it-triage-control">
+        <button
+          className="it-chip"
+          disabled={busy || !candidates.length}
+          onClick={() => void run()}
+          title={`Triage ${candidates.length} eligible issues`}
+        >
           <Bot className="it-icon" />
-        )}
-        Triage
-      </button>
+          <span className={busy ? "it-shimmer" : ""}>
+            {busy ? "Triaging…" : "Triage"}
+          </span>
+        </button>
+        <button
+          className="it-icon-button"
+          aria-label="Triage settings"
+          onClick={(event) => setSettings(event.currentTarget)}
+        >
+          ⌄
+        </button>
+        {settings ? (
+          <Popover
+            anchor={settings}
+            width={320}
+            ignore="[data-popover-layer]"
+            onDismiss={() => setSettings(null)}
+            className="issue-surface it-triage-settings"
+          >
+            <strong>Triage model</strong>
+            <p className="it-muted">
+              Groups related work and improves issue details. Changes apply
+              automatically and can be undone.
+            </p>
+            <TriageModelSettings project={project} />
+          </Popover>
+        ) : null}
+      </div>
     ),
     panel:
-      open || groups.length ? (
-        <section className="it-triage" aria-label="Issue triage">
-          <div className="it-triage-heading">
-            <strong>
-              {preview ? "Proposed assignments" : "Issue assignments"}
+      busy || notice ? (
+        <div className="it-triage-toast" role="status" aria-live="polite">
+          <Bot className="it-icon" />
+          <div>
+            <strong className={busy ? "it-shimmer" : ""}>
+              {busy ? "Triaging your issues" : notice}
             </strong>
-            {!busy && open ? (
+            {busy ? <span className="it-muted">{progress}</span> : null}
+          </div>
+          {busy ? (
+            <button
+              className="it-chip"
+              onClick={() => {
+                pending.current?.abort();
+                setProgress("Stopping triage…");
+              }}
+            >
+              Cancel
+            </button>
+          ) : (
+            <>
+              {receipts.length ? (
+                <button
+                  className="it-chip"
+                  onClick={() => {
+                    try {
+                      const count = undoTriage(receipts);
+                      setReceipts([]);
+                      setNotice(
+                        count
+                          ? `Undid triage for ${count} issues. Later edits were kept.`
+                          : "Issues already started or changed; nothing to undo.",
+                      );
+                    } catch (reason) {
+                      onError(reason);
+                    }
+                  }}
+                >
+                  Undo changes
+                </button>
+              ) : null}
               <button
                 className="it-icon-button"
-                aria-label="Close triage panel"
-                onClick={() => {
-                  setOpen(false);
-                  setConfiguring(false);
-                }}
+                aria-label="Dismiss triage notification"
+                onClick={() => setNotice("")}
               >
                 <X className="it-icon" />
               </button>
-            ) : null}
-          </div>
-          {configuring && !busy ? (
-            <div className="it-triage-scope">
-              <p>
-                {candidates.length} eligible{" "}
-                {selected.length ? "selected" : "unassigned backlog"} issues ·{" "}
-                {project ? projectName(project) : "all projects"}
-                {controls.query ? " · matching your search" : ""}. Accepted
-                groups are kept unless you explicitly select their tickets for
-                retriage.
-              </p>
-              {preview ? (
-                <p>
-                  Your saved proposal will be replaced as new results arrive.
-                </p>
-              ) : null}
-              <label>
-                <input
-                  type="checkbox"
-                  checked={includeImages}
-                  onChange={(event) => setIncludeImages(event.target.checked)}
-                />
-                Include screenshots (requires a vision-capable triage model)
-              </label>
-              <TriageModelSettings project={project} />
-              <button
-                className="it-primary"
-                disabled={!candidates.length}
-                onClick={() => void run()}
-              >
-                Analyze {candidates.length} issues
-              </button>
-            </div>
-          ) : null}
-          {busy ? (
-            <div role="status">
-              <p>{progress || "Preparing repository inspection…"}</p>
-              <button
-                className="it-chip"
-                onClick={() => {
-                  pending.current?.abort();
-                  setProgress(
-                    "Stopping analysis. The current model request may finish before its workspace is removed.",
-                  );
-                }}
-              >
-                Cancel analysis
-              </button>
-            </div>
-          ) : null}
-          {preview && open ? (
-            <>
-              <p className="it-workflow-help">
-                Draft saved. Move tickets between groups or choose “Separate
-                group” to split them. Triage inspected committed code;
-                uncommitted changes were not included. Applying saves
-                assignments without starting work.
-              </p>
-              {preview.warnings?.map((warning, index) => (
-                <p className="it-workflow-help" key={index}>
-                  {warning}
-                </p>
-              ))}
-              <div className="it-triage-groups">
-                {preview.plan.groups.map((group, index) => (
-                  <article className="it-triage-group" key={index}>
-                    <input
-                      className="it-label-input"
-                      aria-label={`Group ${index + 1} title`}
-                      value={group.title}
-                      disabled={busy}
-                      onChange={(event) =>
-                        edit((next) => {
-                          next.plan.groups[index].title = event.target.value;
-                        })
-                      }
-                    />
-                    <p>{group.reason}</p>
-                    <small>
-                      {projectName(
-                        preview.snapshot.find(
-                          (issue) => issue.id === group.issueIds[0],
-                        )?.projectPath ?? "",
-                      )}
-                    </small>
-                    {group.issueIds.map((id) => (
-                      <div className="it-triage-member" key={id}>
-                        {link(id)}
-                        <select
-                          aria-label={`Assignment for ${name(id)}`}
-                          value={index}
-                          disabled={busy}
-                          onChange={(event) =>
-                            edit((next) => {
-                              const target = event.target.value;
-                              const source = next.plan.groups[index];
-                              source.issueIds = source.issueIds.filter(
-                                (entry) => entry !== id,
-                              );
-                              if (target === "new")
-                                next.plan.groups.push({
-                                  title: name(id).slice(0, 120),
-                                  reason: "Separated for individual execution.",
-                                  files: [...source.files],
-                                  issueIds: [id],
-                                });
-                              else {
-                                const destination =
-                                  next.plan.groups[Number(target)];
-                                destination.issueIds.push(id);
-                                destination.files = [
-                                  ...new Set([
-                                    ...destination.files,
-                                    ...source.files,
-                                  ]),
-                                ];
-                              }
-                              next.plan.groups = next.plan.groups.filter(
-                                (entry) => entry.issueIds.length,
-                              );
-                            })
-                          }
-                        >
-                          {preview.plan.groups.map((target, targetIndex) =>
-                            preview.snapshot.find(
-                              (issue) => issue.id === target.issueIds[0],
-                            )?.projectPath ===
-                            preview.snapshot.find((issue) => issue.id === id)
-                              ?.projectPath ? (
-                              <option key={targetIndex} value={targetIndex}>
-                                {target.title}
-                              </option>
-                            ) : null,
-                          )}
-                          <option value="new">Separate group</option>
-                        </select>
-                      </div>
-                    ))}
-                    {group.files.length ? (
-                      <small>{group.files.join(", ")}</small>
-                    ) : null}
-                  </article>
-                ))}
-              </div>
-              {preview.plan.dependencies.map((dependency, index) => (
-                <div key={index} className="it-triage-dependency">
-                  {link(dependency.issueId)} depends on{" "}
-                  {link(dependency.dependsOn)} · {dependency.reason}
-                  <button
-                    className="it-chip"
-                    disabled={busy}
-                    aria-label={`Reject dependency ${name(dependency.issueId)} on ${name(dependency.dependsOn)}`}
-                    onClick={() =>
-                      edit((next) => {
-                        next.plan.dependencies.splice(index, 1);
-                      })
-                    }
-                  >
-                    Reject
-                  </button>
-                </div>
-              ))}
-              <div className="it-triage-actions it-triage-plan-actions">
-                <button
-                  className="it-primary"
-                  disabled={busy || !preview.plan.groups.length}
-                  onClick={() => {
-                    try {
-                      applyTriagePlan(preview);
-                      persist(null);
-                      setOpen(false);
-                    } catch (reason) {
-                      onError(reason);
-                    }
-                  }}
-                >
-                  Apply triage plan
-                </button>
-                <button
-                  className="it-chip"
-                  disabled={busy}
-                  aria-label="Dismiss triage plan"
-                  onClick={() => {
-                    try {
-                      persist(null);
-                      setConfiguring(false);
-                    } catch (reason) {
-                      onError(reason);
-                    }
-                  }}
-                >
-                  Discard proposal
-                </button>
-              </div>
             </>
-          ) : null}
-          {groups.length ? (
-            <details open={open && !preview && !configuring}>
-              <summary>
-                {groups.length} groups · one thread per assignment
-              </summary>
-              <div className="it-triage-groups">
-                {groups.map((group) => {
-                  const first = group[0];
-                  const fresh = group.every((issue) =>
-                    eligibleForTriage(issue),
-                  );
-                  const readiness = issueGroupReadiness(group, issues);
-                  const running = group.some(isIssueRunning);
-                  return (
-                    <article
-                      className="it-triage-group"
-                      key={first.triageGroup!.id}
-                    >
-                      <strong>
-                        {first.triageGroup!.title} · {group.length}
-                      </strong>
-                      <p>{first.triageGroup!.reason}</p>
-                      <small>{projectName(first.projectPath)}</small>
-                      {group.map((issue) => (
-                        <div className="it-triage-member" key={issue.id}>
-                          {link(issue.id)}
-                          {issue.workOutcome ? (
-                            <small>
-                              {issue.workOutcome.status.replace("_", " ")} ·{" "}
-                              {issue.workOutcome.summary}
-                            </small>
-                          ) : null}
-                        </div>
-                      ))}
-                      {readiness ? <p>{readiness}</p> : null}
-                      <div className="it-triage-actions">
-                        {fresh ? (
-                          <button
-                            className="it-chip"
-                            disabled={!launch || !!readiness}
-                            onClick={() =>
-                              void startIssueGroup(
-                                first.triageGroup!.id,
-                                launch!,
-                              ).catch(onError)
-                            }
-                          >
-                            Start group
-                          </button>
-                        ) : null}
-                        {first.sessionId && controls.onOpenSession ? (
-                          <button
-                            className="it-chip"
-                            onClick={() =>
-                              controls.onOpenSession!(first.sessionId!)
-                            }
-                          >
-                            Open thread
-                          </button>
-                        ) : null}
-                        {!fresh && !running && controls.onOpenIssue ? (
-                          <button
-                            className="it-chip"
-                            onClick={() => controls.onOpenIssue!(first.id)}
-                          >
-                            Review results
-                          </button>
-                        ) : null}
-                        {!fresh &&
-                        !running &&
-                        group.some(
-                          (issue) =>
-                            issue.runState === "failed" ||
-                            issue.runState === "cancelled",
-                        ) &&
-                        controls.onRetry ? (
-                          <button
-                            className="it-chip"
-                            disabled={!!readiness}
-                            onClick={() => controls.onRetry!(first.id)}
-                          >
-                            Retry group
-                          </button>
-                        ) : null}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </details>
-          ) : null}
-        </section>
+          )}
+        </div>
       ) : null,
   };
 }

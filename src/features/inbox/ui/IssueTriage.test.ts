@@ -68,7 +68,7 @@ const click = async (label: string) =>
     target!.click();
   });
 
-it("shows a triage plan, applies it, then starts one shared assignment", async () => {
+it("triages immediately, applies issue updates, and undoes without losing later edits", async () => {
   const a = seed("Streaming tokens");
   const b = seed("Streaming reconnect");
   vi.mocked(runTriageAgent).mockResolvedValue({
@@ -80,61 +80,55 @@ it("shows a triage plan, applies it, then starts one shared assignment", async (
         issueIds: [a.id, b.id],
       },
     ],
-    dependencies: [],
-  });
-  const launch = vi.fn(async () => {});
-  const error = vi.fn();
-  await act(async () =>
-    root.render(createElement(Harness, { launch, onError: error })),
-  );
-  await click("Triage");
-  await click("Analyze 2 issues");
-  expect(container.textContent).toContain("Proposed assignments");
-  expect(container.textContent).toContain("Shared stream state");
-  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
-  await click("Apply triage plan");
-  expect(container.textContent).toContain("1 groups");
-  await act(async () => {
-    container.querySelector("details")!.open = true;
-  });
-  await click("Start group");
-  expect(launch).toHaveBeenCalledTimes(1);
-  expect(loadLocalIssues()[0]!.runBatchId).toBe(
-    loadLocalIssues()[1]!.runBatchId,
-  );
-  expect(error).not.toHaveBeenCalled();
-});
-
-it("dismisses a proposal without changing tickets and reports agent failures", async () => {
-  const a = seed("A");
-  vi.mocked(runTriageAgent).mockResolvedValueOnce({
-    groups: [
-      { title: "A", reason: "Source context", files: [], issueIds: [a.id] },
+    dependencies: [
+      { issueId: b.id, dependsOn: a.id, reason: "Needs stream state" },
     ],
-    dependencies: [],
+    updates: [
+      {
+        issueId: a.id,
+        description: "## Task\nImprove streaming",
+        priority: 2,
+        reason: "Clarifies scope",
+      },
+    ],
   });
   const error = vi.fn();
   await act(async () =>
     root.render(createElement(Harness, { launch: vi.fn(), onError: error })),
   );
   await click("Triage");
-  await click("Analyze 1 issues");
-  await act(async () =>
-    container
-      .querySelector<HTMLButtonElement>('[aria-label="Dismiss triage plan"]')!
-      .click(),
-  );
-  expect(loadLocalIssues()[0]!.triageGroup).toBeUndefined();
+  expect(container.textContent).toContain("2 issues triaged");
+  expect(container.textContent).not.toContain("Proposed assignments");
+  expect(loadLocalIssues()[0].priority).toBe(2);
+  expect(loadLocalIssues()[1].dependsOn).toEqual([a.id]);
+  await act(async () => {
+    updateLocalIssue(a.id, { title: "User's later title" });
+  });
+  await click("Undo changes");
+  expect(loadLocalIssues()[0].title).toBe("User's later title");
+  expect(loadLocalIssues()[0].priority).toBe(0);
+  expect(loadLocalIssues()[0].description).toBe(a.description);
+  expect(loadLocalIssues()[0].triageGroup).toBeUndefined();
+  expect(loadLocalIssues()[1].dependsOn).toBeUndefined();
+  expect(error).not.toHaveBeenCalled();
+});
+
+it("reports agent failures without changing tickets", async () => {
+  const a = seed("A");
   vi.mocked(runTriageAgent).mockRejectedValueOnce(
     new Error("Configure a triage model"),
   );
+  const error = vi.fn();
+  await act(async () =>
+    root.render(createElement(Harness, { launch: vi.fn(), onError: error })),
+  );
   await click("Triage");
-  await click("Analyze 1 issues");
   expect(error).toHaveBeenCalledWith(
     expect.objectContaining({
       message: expect.stringContaining("Configure a triage model"),
     }),
   );
+  expect(loadLocalIssues()[0]).toEqual(a);
 });
 
 it("allows adding and removing prerequisites and surfaces a cycle without applying it", async () => {
@@ -174,55 +168,4 @@ it("allows adding and removing prerequisites and surfaces a cycle without applyi
       .click(),
   );
   expect(loadLocalIssues()[0]!.dependsOn).toEqual([]);
-});
-
-it("persists edited groups and rejected dependencies across remounts before applying", async () => {
-  const a = seed("Streaming");
-  const b = seed("Authentication");
-  vi.mocked(runTriageAgent).mockResolvedValue({
-    groups: [
-      {
-        title: "Combined",
-        reason: "Initial proposal",
-        files: ["src/app.ts"],
-        issueIds: [a.id, b.id],
-      },
-    ],
-    dependencies: [
-      { issueId: b.id, dependsOn: a.id, reason: "Proposed ordering" },
-    ],
-  });
-  const error = vi.fn();
-  const props = { launch: vi.fn(), onError: error };
-  await act(async () => root.render(createElement(Harness, props)));
-  await click("Triage");
-  await click("Analyze 2 issues");
-  await act(async () => {
-    const select = container.querySelector<HTMLSelectElement>(
-      `[aria-label="Assignment for MC-${b.number}: Authentication"]`,
-    )!;
-    Object.getOwnPropertyDescriptor(
-      HTMLSelectElement.prototype,
-      "value",
-    )!.set!.call(select, "new");
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  expect(
-    container.querySelector('[aria-label="Group 2 title"]'),
-  ).not.toBeNull();
-  await click("Reject");
-  await act(async () => root.unmount());
-  root = createRoot(container);
-  await act(async () => root.render(createElement(Harness, props)));
-  expect(
-    container.querySelector('[aria-label="Group 2 title"]'),
-  ).not.toBeNull();
-  expect(container.textContent).not.toContain("Proposed ordering");
-  expect(loadLocalIssues().every((issue) => !issue.triageGroup)).toBe(true);
-  await click("Apply triage plan");
-  expect(loadLocalIssues()[0].triageGroup!.id).not.toBe(
-    loadLocalIssues()[1].triageGroup!.id,
-  );
-  expect(loadLocalIssues()[1].dependsOn).toEqual([]);
-  expect(error).not.toHaveBeenCalled();
 });

@@ -166,6 +166,8 @@ function SelectionToolbar({ editor }: { editor: Editor }) {
 const SOURCE_ONLY = /<\/?[a-z][a-z0-9-]*(?:\s[^>]*)?\/?>|<!--|^ {0,3}\[\^[^\]]+\]:/im;
 
 type Props = {
+  label?: string;
+  placeholder?: string;
   value: string;
   onChange: (value: string) => void;
   /** Return true when the paste was handled. */
@@ -180,7 +182,7 @@ export function NoteMarkdownEditor(props: Props) {
   return sourceOnly ? (
     <div aria-label="Note body">
       <MarkdownSourceEditor
-        label="Note text"
+        label={props.label ?? "Note text"}
         value={props.value}
         onChange={props.onChange}
         lineNumbers={false}
@@ -197,6 +199,8 @@ function RichNoteEditor({
   onChange,
   onPaste,
   editorRef,
+  label = "Note text",
+  placeholder = "Write a note…",
 }: Props) {
   // Only real edits emit, so opening a note never rewrites its Markdown.
   const emitted = useRef(value);
@@ -214,12 +218,17 @@ function RichNoteEditor({
       TaskList,
       TaskItem.configure({ nested: true }),
       TableKit,
-      Placeholder.configure({ placeholder: "Write a note…" }),
+      Placeholder.configure({ placeholder }),
     ],
     content: value,
     contentType: "markdown",
     editorProps: {
-      attributes: { class: "note-editor", "aria-label": "Note text" },
+      attributes: {
+        class: "note-editor",
+        "aria-label": label,
+        role: "textbox",
+        "aria-multiline": "true",
+      },
       handlePaste: (_view, event) => handlers.current.onPaste(event),
       handleClick: (_view, _pos, event) => {
         const href = (event.target as HTMLElement).closest("a")?.href;

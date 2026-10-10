@@ -1,71 +1,70 @@
 # Backlog triage and agent issue access
 
-Choose a **Triage model** using the normal agent/model dropdown in the triage
-scope panel or **Settings → Inbox**. The provider, model and model options are
-saved automatically, independently of the task model. Triage uses that agent's
-normal connection and selected project account; no task-model endpoint or API
-key is required. The initial choice follows your normal conversation default.
-Old endpoint-based triage settings are ignored; choose your preferred agent once.
+Click **Triage** to inspect fresh backlog issues immediately. Selected tickets take
+precedence; otherwise the current project and search select ungrouped backlog
+tickets. The button shimmers while working and a compact notification reports
+the current source inspection. Use the adjacent dropdown or **Settings → Inbox**
+to choose the normal agent/model independently of the task model.
 
-Click **Triage** in Issues to review the scope, then **Analyze N issues**. Checked
-tickets take precedence; otherwise the current project and search select fresh,
-ungrouped backlog tickets. Existing groups stay intact unless you explicitly
-select their tickets for retriage. Repositories are analyzed separately, in
-batches of at most 100 tickets with a bounded input size. Successful batches
-remain available if a later batch fails. Review groups across batches for merges.
-The agent inspects code in a temporary detached Git worktree of HEAD, through
-its normal reading/search tools. Uncommitted changes are not included. The run
-uses supervised plan mode, denies permission requests, skips questions, and has
-no MonoCode app-tool access. Provider plan-mode restrictions still depend on the
-selected agent; this is not a new universal filesystem sandbox. A proposal is
-rejected if the checkout was modified. The provider session is stopped before
-the temporary worktree is removed on completion or failure. Every group must
-cite existing tracked files inside that checkout. Native tool execution is owned
-by the provider, so citations are validated as source paths rather than proof of
-an exact read call. Priority, agent/model choices and recent activity are
-included. Screenshot analysis is optional and requires a vision-capable model;
-up to eight screenshots of at most 2 MB each are included per batch. Skipped
-images are identified in the proposal. Cancel interrupts that triage session and
-stops subsequent batches without affecting normal chats. Each batch has a
-five-minute cancellation deadline; provider startup/shutdown may delay cleanup.
+Each validated batch applies automatically. Triage can refine each issue's title,
+Markdown description and priority, assign a topic, and add prerequisites. Each
+issue records its rationale in activity. The app validates the scoped per-issue
+updates; the isolated triage agent does not receive unrestricted app CLI access.
+A notification offers **Undo changes** and a dismiss button. Undo restores
+triage-owned fields that have not subsequently changed, preserves later edits,
+and skips assignments already started. Undo is available for the current run
+while the issue view remains mounted. A new run replaces the previous undo.
+Dependencies are validated again before undo; if later graph changes make the
+restoration invalid, no partial undo is written.
 
-The proposed plan explains each group, lists affected files, and gives reasons
-for dependencies. Draft proposals and edits survive navigation and restart.
-Rename groups, move tickets between groups, choose **Separate group**, or reject
-individual dependency suggestions before applying. **Apply triage plan** saves
-the plan without launching work. Retriage replaces its previous generated
-dependencies while retaining manual prerequisites.
-Discarding a plan leaves tickets unchanged. Plans are rejected if tickets changed
-while analysis ran, references are invalid, tickets are omitted or repeated, or
-dependencies would create an issue cycle or mutually blocked groups.
+Topics are rows in the board (or sections in the list), with statuses as columns.
+Each row can be collapsed. Its three-dot menu selects all members or starts them
+in one thread. **Display options → Rows** switches between Topic, Priority and
+No grouping. Priority and ungrouped rows can also be launched as an explicit
+shared assignment. The group menu explains blockers and links existing threads.
+Search, status, priority and label filters combine; display options control
+ordering, empty columns and card properties. The details button opens view counts.
 
-Expand **Issue assignments** and click **Start group** to launch all its tickets
-in one thread. Explicit agent, model and model options must agree; unset choices
-inherit the group's selected choice or the project default. Internal
-prerequisites are ordered in the prompt. Unfinished prerequisites outside the
-group block dispatch, including prerequisites still committing. **Done** is set
-only after a successful commit. Issue assignments in the same repository wait
-for earlier assignments to finish and commit, including work awaiting review.
-This prevents separate issue threads from sharing uncommitted edits. This is a
-manual launch, not an automatic queue; unrelated ordinary chats and external
-editors are not scheduled by this guard.
+Issue descriptions support direct formatted editing, Markdown shortcuts and a
+selection toolbar. The pencil opens Markdown source editing. Sub-issues retain
+their own properties, activity and execution; parent links are organizational,
+not implicit execution dependencies. Parents must exist in the same project,
+and nesting cannot form a cycle.
 
-Each ticket retains its identity, properties and activity. An assigned group
-shares its thread, work result, feedback, review and eventual commit. Open any
-ticket to give feedback or **Approve group and commit**. Approval covers the
-entire active assignment; every member must be in review. Group replies report
-each ticket in an `issue-results` JSON fence, keyed by MC-number, with a `status`
-of `ready`, `blocked`, or `needs_work` and a `summary`. Omitted or invalid group
-results require more work instead of automatically becoming reviewable. Send
-feedback to continue, or explicitly confirm an individual ticket is ready.
-Archived members are never resumed. Archiving does not discard existing edits;
-restore an unfinished standalone assignment to complete its review and commit.
-Failed runs can be retried from the group card or a member ticket. Group cards
-link to tickets, threads and review results, and explain why dispatch is blocked.
-Detach an unstarted ticket in its details before starting it individually.
-Changing an unstarted ticket's project detaches it; assigned tickets cannot
-change projects. Add or remove prerequisites under **Depends on** in ticket
-details; the reverse **Blocks** relation is derived automatically.
+Repositories are analyzed separately, in batches of at most 100 tickets with
+bounded input size. Successful batches remain applied if a later batch fails.
+The agent inspects a temporary detached checkout of committed HEAD; uncommitted
+changes are not included. It uses supervised plan mode, denies permission
+requests, skips questions, and has no MonoCode app-tool access. Provider plan-mode
+restrictions still depend on the selected agent; this is not a universal
+filesystem sandbox. A result is rejected if the checkout was modified. Every
+group must cite existing tracked files. Citations validate source paths, not
+proof of an exact read call. The provider session is stopped before checkout
+cleanup. Up to eight screenshots of at most 2 MB each are included per batch;
+a vision-capable model is needed. Warnings report omitted images. Cancel stops
+subsequent batches and does not apply a late response. Each batch has a five-minute
+deadline; provider startup/shutdown may delay cleanup.
+
+Updates are rejected if tickets changed during analysis, references are invalid,
+tickets are omitted/repeated, or dependencies create issue or group cycles.
+Retriage replaces generated prerequisites and retains manual ones. Explicit
+agent/model choices must agree before dispatch. Unfinished prerequisites outside
+the group block dispatch, including prerequisites still committing. Assignments
+in the same repository wait for earlier assignments to finish and commit,
+including work awaiting review. Unrelated ordinary chats and external editors
+are not scheduled by this guard.
+
+A group shares its thread, work result, feedback, review and eventual commit.
+Open a member to give feedback or **Approve group and commit**. Approval covers
+the entire active assignment; every member must be in review. Group replies
+report each ticket in an `issue-results` JSON fence keyed by MC-number, with
+`ready`, `blocked`, or `needs_work` status and a summary. Missing results require
+more work. **Done** follows successful commit. Archived members are never
+resumed. Archiving does not discard edits; restore an unfinished assignment to
+finish review and commit. Failed runs can be retried from a member ticket.
+Detach an unstarted ticket in its details to start it individually. Assigned
+tickets cannot change projects. **Depends on** edits prerequisites; **Blocks**
+is derived from them.
 
 ## Agent CLI
 

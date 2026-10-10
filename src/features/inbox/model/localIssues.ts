@@ -38,6 +38,7 @@ export type LocalIssue = {
   priority: number;
   projectPath: string;
   labels: string[];
+  parentIssueId?: string;
   /** Whether the agent should verify its work and provide supporting evidence. */
   verificationRequired?: boolean;
   dependsOn?: string[];
@@ -94,6 +95,7 @@ export type IssueDraft = Pick<
   | "model"
   | "modelSettings"
   | "images"
+  | "parentIssueId"
 >;
 export const LOCAL_ISSUES_KEY = "monocode.localIssues.v1";
 /** Identifies this window's runs; every window shares the same localStorage. */
@@ -253,6 +255,8 @@ function validIssue(value: unknown): value is LocalIssue {
     (issue.workOutcome === undefined ||
       (["ready", "blocked", "needs_work"].includes(issue.workOutcome.status) &&
         typeof issue.workOutcome.summary === "string")) &&
+    (issue.parentIssueId === undefined ||
+      typeof issue.parentIssueId === "string") &&
     (issue.runBatchId === undefined || typeof issue.runBatchId === "string") &&
     (issue.triageGroup === undefined ||
       (typeof issue.triageGroup?.id === "string" &&
@@ -314,6 +318,21 @@ function save(issues: LocalIssue[]) {
 /** Validate the whole graph before writing any dependency changes. */
 export function validateIssueDependencies(issues: LocalIssue[]) {
   const byId = new Map(issues.map((issue) => [issue.id, issue]));
+  for (const issue of issues) {
+    const ancestors = new Set([issue.id]);
+    let parentId = issue.parentIssueId;
+    while (parentId) {
+      const parent = byId.get(parentId);
+      if (!parent || pathKey(parent.projectPath) !== pathKey(issue.projectPath))
+        throw new Error(
+          "Sub-issues must belong to a parent in the same project.",
+        );
+      if (ancestors.has(parentId))
+        throw new Error("Sub-issues cannot form a cycle.");
+      ancestors.add(parentId);
+      parentId = parent.parentIssueId;
+    }
+  }
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (issue: LocalIssue) => {
@@ -568,6 +587,7 @@ export function createLocalIssue(
     ],
   };
   if (!validIssue(issue)) throw new Error("Some issue details are invalid.");
+  validateIssueDependencies([...issues, issue]);
   save([...issues, issue]);
   return issue;
 }
@@ -872,8 +892,11 @@ export async function startReservedLocalIssue(
     );
   if (
     options?.kind === "commit" &&
-    assignment.some((candidate) => candidate.status !== "in_review" ||
-      (candidate.workOutcome && candidate.workOutcome.status !== "ready"))
+    assignment.some(
+      (candidate) =>
+        candidate.status !== "in_review" ||
+        (candidate.workOutcome && candidate.workOutcome.status !== "ready"),
+    )
   )
     throw new Error(
       "Every issue in the group must be in review before approving its shared commit.",

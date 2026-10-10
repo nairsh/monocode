@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import type { Editor } from "@tiptap/react";
 import { createPortal } from "react-dom";
 import type { IssueImage } from "../model/localIssueImages";
 import { AttachmentChip } from "../../sessions/ui/AttachmentChip";
@@ -76,14 +85,27 @@ import {
   type IssueStatus,
   type LocalIssue,
 } from "../model/localIssues";
-import { subscribeOpenIssue, takeOpenIssueRequest } from "../model/issueReference";
+import {
+  subscribeOpenIssue,
+  takeOpenIssueRequest,
+} from "../model/issueReference";
 import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
 import { AgentTranscript } from "../../sessions/ui/AgentTranscript";
 import type { ApprovalDecision } from "../../../integrations/harness";
 import "./IssueTracker.css";
 import { IssueDependencies, useIssueTriage } from "./IssueTriage";
+import {
+  issueGroupReadiness,
+  startIssueGroup,
+  startIssueSelection,
+} from "../model/issueTriage";
 
 const SORT_KEY = "monocode.issues.sort";
+const IssueMarkdownEditor = lazy(() =>
+  import("../../notes/ui/NoteMarkdownEditor").then((module) => ({
+    default: module.NoteMarkdownEditor,
+  })),
+);
 const SHOW_EMPTY_KEY = "monocode.issues.showEmpty";
 const HIDDEN_KEY = "monocode.issues.hiddenColumns";
 const readSetting = (key: string) => {
@@ -377,6 +399,8 @@ function Choice({
   );
 }
 
+let openIssueDialogs = 0;
+let issueRootWasInert = false;
 function IssueDialog({
   title,
   onClose,
@@ -392,6 +416,21 @@ function IssueDialog({
   leaving?: boolean;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
+  const [bounds, setBounds] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!wide) return;
+    const main = document.querySelector(".it-main");
+    if (!main) return;
+    const update = () => setBounds(main.getBoundingClientRect());
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(main);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [wide]);
   const previousFocus = useRef(document.activeElement);
   const close = useRef(onClose);
   close.current = onClose;
@@ -399,7 +438,7 @@ function IssueDialog({
   exiting.current = leaving;
   useEffect(() => {
     const root = document.getElementById("root");
-    const wasInert = root?.inert;
+    if (openIssueDialogs++ === 0) issueRootWasInert = root?.inert ?? false;
     if (root) root.inert = true;
     (
       dialog.current?.querySelector<HTMLElement>("input, textarea") ??
@@ -436,14 +475,34 @@ function IssueDialog({
     document.addEventListener("keydown", key);
     return () => {
       document.removeEventListener("keydown", key);
-      if (root) root.inert = wasInert ?? false;
-      if (previousFocus.current instanceof HTMLElement)
+      const next = [
+        ...document.querySelectorAll<HTMLElement>(
+          ".it-dialog-backdrop:not(.is-leaving) .it-dialog",
+        ),
+      ].find((element) => element !== dialog.current);
+      openIssueDialogs--;
+      if (root) root.inert = openIssueDialogs > 0 || issueRootWasInert;
+      if (next)
+        next.querySelector<HTMLElement>("textarea, input, button")?.focus();
+      else if (previousFocus.current instanceof HTMLElement)
         previousFocus.current.focus();
     };
   }, []);
   return createPortal(
     <div
       className={`it-dialog-backdrop ${wide ? "it-dialog-backdrop-wide" : ""} ${leaving ? "is-leaving" : ""}`}
+      style={
+        wide && bounds
+          ? {
+              left: bounds.left,
+              top: bounds.top,
+              width: bounds.width,
+              height: bounds.height,
+              right: "auto",
+              bottom: "auto",
+            }
+          : undefined
+      }
       inert={leaving}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -683,10 +742,7 @@ function NewIssue({
               )
             }
           >
-            <span
-              className="it-create-verification-track"
-              aria-hidden="true"
-            />
+            <span className="it-create-verification-track" aria-hidden="true" />
             {draft.verificationRequired !== false
               ? "Verification required"
               : "Verification not required"}
@@ -714,11 +770,6 @@ function NewIssue({
             onChange={(event) => change("description", event.target.value)}
             required
           />
-          <p className="it-muted">
-            The issue is saved immediately. Your task model generates a title
-            and polishes the description in the background. Configure it in
-            Settings → Inbox → Task model.
-          </p>
           <IssueImages
             images={draft.images}
             onChange={(value) => change("images", value)}
@@ -758,7 +809,6 @@ function NewIssue({
           ) : null}
         </fieldset>
         <footer className="it-create-footer">
-          <span className="it-muted">Saved on this device</span>
           <label className="it-create-more">
             <span className="it-create-more-control">
               <input
@@ -956,7 +1006,11 @@ function IssueDetail({
   onOpenSession,
   onError: reportGlobalError,
   leaving,
+  onOpenIssue,
+  onCreateSubissue,
 }: {
+  onOpenIssue: (id: string) => void;
+  onCreateSubissue: () => void;
   leaving?: boolean;
   issue: LocalIssue;
   projects: string[];
@@ -984,6 +1038,7 @@ function IssueDetail({
   const [picking, setPicking] = useState(false);
   const [comment, setComment] = useState("");
   const [editingDescription, setEditingDescription] = useState(false);
+  const descriptionEditor = useRef<Editor | null>(null);
   const [saving, setSaving] = useState(false);
   const [imagesBusy, setImagesBusy] = useState(false);
   const [detailError, setDetailError] = useState("");
@@ -997,8 +1052,7 @@ function IssueDetail({
     ) {
       setDraft((current) => ({
         ...current,
-        title:
-          current.title === previous.title ? issue.title : current.title,
+        title: current.title === previous.title ? issue.title : current.title,
         description:
           current.description === previous.description
             ? issue.description
@@ -1259,10 +1313,7 @@ function IssueDetail({
               }}
             />
           ) : (
-            <div
-              className="it-description-preview"
-              onDoubleClick={() => setEditingDescription(true)}
-            >
+            <div className="it-description-preview">
               <button
                 className="it-icon-button it-edit-description"
                 aria-label="Edit issue description"
@@ -1271,16 +1322,23 @@ function IssueDetail({
               >
                 <Pencil className="it-icon" />
               </button>
-              {draft.description ? (
-                <AgentMarkdown text={draft.description} />
-              ) : (
-                <button
-                  className="it-muted"
-                  onClick={() => setEditingDescription(true)}
-                >
-                  Add description…
-                </button>
-              )}
+              <Suspense fallback={<AgentMarkdown text={draft.description} />}>
+                <IssueMarkdownEditor
+                  value={draft.description}
+                  label="Edit formatted description"
+                  placeholder="Add description…"
+                  editorRef={descriptionEditor}
+                  onPaste={() => false}
+                  onChange={(description) => {
+                    setDraft((previous) => ({ ...previous, description }));
+                    try {
+                      updateLocalIssue(issue.id, { description });
+                    } catch (reason) {
+                      onError(reason);
+                    }
+                  }}
+                />
+              </Suspense>
             </div>
           )}
           <IssueImages
@@ -1297,6 +1355,56 @@ function IssueDetail({
             }}
             onError={onError}
           />
+          <section className="it-subissues" aria-label="Sub-issues">
+            {issue.parentIssueId ? (
+              <button
+                className="it-subissue-row"
+                onClick={() => {
+                  persist();
+                  onOpenIssue(issue.parentIssueId!);
+                }}
+              >
+                Parent issue ·{" "}
+                {
+                  loadLocalIssues().find(
+                    (entry) => entry.id === issue.parentIssueId,
+                  )?.title
+                }
+              </button>
+            ) : null}
+            {loadLocalIssues()
+              .filter(
+                (entry) => entry.parentIssueId === issue.id && !entry.archived,
+              )
+              .map((child) => (
+                <button
+                  className="it-subissue-row"
+                  key={child.id}
+                  onClick={() => {
+                    persist();
+                    onOpenIssue(child.id);
+                  }}
+                >
+                  <StatusIcon status={child.status} />
+                  <span className="it-muted">MC-{child.number}</span>
+                  <span>{child.title}</span>
+                </button>
+              ))}
+            <button
+              className="it-add-subissue"
+              onClick={() => {
+                try {
+                  persist();
+                  onCreateSubissue();
+                } catch (reason) {
+                  onError(reason);
+                }
+              }}
+            >
+              <Plus className="it-icon" />
+              Add sub-issue
+            </button>
+          </section>
           <div className="it-activity">
             {issue.reviews?.length ||
             (issue.status === "in_review" &&
@@ -1405,7 +1513,9 @@ function IssueDetail({
                       }
                     }}
                   >
-                    {issue.runBatchId ? "Approve group and commit" : "Approve and commit"}
+                    {issue.runBatchId
+                      ? "Approve group and commit"
+                      : "Approve and commit"}
                   </button>
                 ) : null}
               </section>
@@ -1571,13 +1681,7 @@ function IssueDetail({
               }
             }}
           />
-          <h3>Agent workflow</h3>
           <IssueDependencies issue={issue} onError={onError} />
-          <p className="it-workflow-help">
-            Move an issue to To Do to start (or resume) its dedicated thread
-            with the title, description, and attached images. Approving a review
-            commits in the same thread. The issue becomes Done only after the commit succeeds.
-          </p>
           {issue.sessionId ? (
             <button
               className="it-thread-link"
@@ -1604,7 +1708,9 @@ function IssueDetail({
               )}
               {issue.runState === "completed"
                 ? issue.status === "done"
-                  ? issue.commitSha ? "Approved and committed" : "Marked done"
+                  ? issue.commitSha
+                    ? "Approved and committed"
+                    : "Marked done"
                   : issue.workOutcome?.status === "blocked"
                     ? "Ticket blocked"
                     : issue.workOutcome?.status === "needs_work"
@@ -1699,6 +1805,31 @@ export function IssueTracker({
   const [project, setProject] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
+  const [priorityFilter, setPriorityFilter] = useState("");
+  const [labelFilter, setLabelFilter] = useState("");
+  const [filterAnchor, setFilterAnchor] = useState<HTMLElement | null>(null);
+  const [displayAnchor, setDisplayAnchor] = useState<HTMLElement | null>(null);
+  const [grouping, setGrouping] = useState(
+    () => readSetting("monocode.issues.grouping") ?? "topic",
+  );
+  const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
+  const [groupMenu, setGroupMenu] = useState<{
+    anchor: HTMLElement;
+    id: string;
+  } | null>(null);
+  const [showProperties, setShowProperties] = useState(
+    () => readSetting("monocode.issues.properties") !== "0",
+  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  useEffect(
+    () => writeSetting("monocode.issues.grouping", grouping),
+    [grouping],
+  );
+  useEffect(
+    () =>
+      writeSetting("monocode.issues.properties", showProperties ? "1" : "0"),
+    [showProperties],
+  );
   const [sort, setSort] = useState(() => {
     const saved = readSetting(SORT_KEY);
     return saved === "oldest" || saved === "priority" ? saved : "newest";
@@ -1733,6 +1864,7 @@ export function IssueTracker({
   );
   useEffect(() => writeSetting(HIDDEN_KEY, JSON.stringify(hidden)), [hidden]);
   const [createStatus, setCreateStatus] = useState<IssueStatus | null>(null);
+  const [createParent, setCreateParent] = useState<LocalIssue | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checked, setChecked] = useState<string[]>([]);
   const anchor = useRef<string | null>(null);
@@ -1767,9 +1899,7 @@ export function IssueTracker({
   const triage = useIssueTriage(issues, project, onLaunch, showError, {
     selectedIds: checked,
     query,
-    onOpenIssue: setSelectedId,
-    onOpenSession: (id) => { void Promise.resolve(onOpenSession?.(id)).catch(showError); },
-    onRetry: (id) => { void retry(id).catch(showError); },
+    onApplied: () => setGrouping("topic"),
   });
   useEffect(() => {
     const refresh = () => {
@@ -1788,7 +1918,9 @@ export function IssueTracker({
     const open = () => {
       const number = takeOpenIssueRequest();
       try {
-        const id = number && loadLocalIssues().find((issue) => issue.number === number)?.id;
+        const id =
+          number &&
+          loadLocalIssues().find((issue) => issue.number === number)?.id;
         if (id) setSelectedId(id);
       } catch {
         // The store banner already reports unreadable storage.
@@ -1889,6 +2021,12 @@ export function IssueTracker({
     const dispatch = draft.status === "todo" || draft.status === "in_progress";
     const issue = createLocalIssue({
       ...draft,
+      ...(createParent
+        ? {
+            parentIssueId: createParent.id,
+            projectPath: createParent.projectPath,
+          }
+        : {}),
       status: dispatch ? "backlog" : draft.status,
     });
     setNotice(`Created MC-${issue.number}`);
@@ -1909,6 +2047,9 @@ export function IssueTracker({
       if (Boolean(issue.archived) !== (view === "archive")) return false;
       if (project && !sameProjectPath(issue.projectPath, project)) return false;
       if (!statuses.includes(issue.status)) return false;
+      if (priorityFilter && issue.priority !== Number(priorityFilter))
+        return false;
+      if (labelFilter && !issue.labels.includes(labelFilter)) return false;
       return `${issue.title} MC-${issue.number} ${issue.description} ${issue.labels.join(" ")}`
         .toLowerCase()
         .includes(query.toLowerCase());
@@ -1930,10 +2071,44 @@ export function IssueTracker({
         visible.some((issue) => issue.status === status)),
   );
   const collapsed = statuses.filter((status) => !columns.includes(status));
+  const rowGroups =
+    grouping === "priority"
+      ? [1, 2, 3, 4, 0]
+          .map((priority) => ({
+            id: `priority-${priority}`,
+            title: ISSUE_PRIORITIES[priority],
+            issues: visible.filter((issue) => issue.priority === priority),
+          }))
+          .filter((group) => group.issues.length)
+      : grouping === "topic" && visible.some((issue) => issue.triageGroup)
+        ? [
+            ...new Set(
+              visible.map((issue) => issue.triageGroup?.id ?? "ungrouped"),
+            ),
+          ].map((id) => ({
+            id,
+            title:
+              visible.find((issue) => issue.triageGroup?.id === id)?.triageGroup
+                ?.title ?? "Ungrouped",
+            issues: visible.filter(
+              (issue) => (issue.triageGroup?.id ?? "ungrouped") === id,
+            ),
+          }))
+        : [];
   // Visual order (column by column), so shift-click ranges match what's on screen.
-  const ordered = columns.flatMap((status) =>
-    visible.filter((issue) => issue.status === status),
-  );
+  const ordered = rowGroups.length
+    ? rowGroups
+        .filter((group) => !collapsedGroups.includes(group.id))
+        .flatMap((group) =>
+          layout === "list"
+            ? group.issues
+            : columns.flatMap((status) =>
+                group.issues.filter((issue) => issue.status === status),
+              ),
+        )
+    : columns.flatMap((status) =>
+        visible.filter((issue) => issue.status === status),
+      );
   const clickIssue = (event: React.MouseEvent, id: string) => {
     // The click that ends a drag must not open the card it started on.
     if (performance.now() < skipClickUntil.current) return;
@@ -1979,11 +2154,16 @@ export function IssueTracker({
     open.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     return true;
   };
-  const groups = columns
-    .map((status) =>
-      visible.filter((issue) => issue.status === status).map(({ id }) => id),
-    )
-    .filter((group) => group.length);
+  const groups =
+    layout === "list"
+      ? [ordered.map((issue) => issue.id)]
+      : columns
+          .map((status) =>
+            ordered
+              .filter((issue) => issue.status === status)
+              .map(({ id }) => id),
+          )
+          .filter((group) => group.length);
   live.current.issues = issues;
   live.current.move = move;
   live.current.showError = showError;
@@ -2270,7 +2450,7 @@ export function IssueTracker({
           <StatusIcon status={issue.status} />
           <span>{issue.title}</span>
         </span>
-        <span className="it-card-meta">
+        <span className="it-card-meta" hidden={!showProperties}>
           <span className={`it-priority it-priority-${issue.priority}`}>
             {issue.priority ? ISSUE_PRIORITIES[issue.priority] : "···"}
           </span>
@@ -2280,29 +2460,61 @@ export function IssueTracker({
               {projectName(issue.projectPath)}
             </span>
           ) : null}
-          {(() => {
-            const harness =
-              issue.agent || defaultSessionChoice(issue.projectPath).harness;
-            const model = resolveModel(harness, issue.model);
-            const settings = issue.modelSettings ?? {};
-            const reasoning = modelEffortLabel(model, settings) ??
-              settings.reasoningEffort ?? settings.reasoning ?? settings.thinking;
-            const modelName = issue.model ? model.name : `${model.name} (default)`;
-            return (
-              <span
-                className="it-chip it-card-model-chip"
-                title={`${modelName}${reasoning ? ` · ${reasoning} reasoning` : ""}`}
-              >
-                <HarnessIcon harness={harness} className="it-icon" />
-                <span>{modelName}</span>
-                {reasoning ? <span className="it-card-reasoning">{reasoning}</span> : null}
-              </span>
-            );
-          })()}
-          {issue.triageGroup ? <span className="it-chip" title="Assignment group">{issue.triageGroup.title}</span> : null}
-          {issueBlockers(issue, issues, issues.filter((member) => !member.archived && issue.runBatchId && member.runBatchId === issue.runBatchId).map((member) => member.id)).length ?
-            <span className="it-chip it-blocked">Blocked</span> : null}
-          {issue.workOutcome && issue.workOutcome.status !== "ready" ? <span className="it-chip it-blocked">{issue.workOutcome.status === "blocked" ? "Needs prerequisite" : "Needs work"}</span> : null}
+          {issue.agent || issue.model
+            ? (() => {
+                const harness =
+                  issue.agent ||
+                  defaultSessionChoice(issue.projectPath).harness;
+                const model = resolveModel(harness, issue.model);
+                const settings = issue.modelSettings ?? {};
+                const reasoning =
+                  modelEffortLabel(model, settings) ??
+                  settings.reasoningEffort ??
+                  settings.reasoning ??
+                  settings.thinking;
+                const modelName = issue.model
+                  ? model.name
+                  : `${model.name} (default)`;
+                return (
+                  <span
+                    className="it-chip it-card-model-chip"
+                    title={`${modelName}${reasoning ? ` · ${reasoning} reasoning` : ""}`}
+                  >
+                    <HarnessIcon harness={harness} className="it-icon" />
+                    <span>{modelName}</span>
+                    {reasoning ? (
+                      <span className="it-card-reasoning">{reasoning}</span>
+                    ) : null}
+                  </span>
+                );
+              })()
+            : null}
+          {issue.triageGroup && grouping !== "topic" ? (
+            <span className="it-chip" title="Assignment group">
+              {issue.triageGroup.title}
+            </span>
+          ) : null}
+          {issueBlockers(
+            issue,
+            issues,
+            issues
+              .filter(
+                (member) =>
+                  !member.archived &&
+                  issue.runBatchId &&
+                  member.runBatchId === issue.runBatchId,
+              )
+              .map((member) => member.id),
+          ).length ? (
+            <span className="it-chip it-blocked">Blocked</span>
+          ) : null}
+          {issue.workOutcome && issue.workOutcome.status !== "ready" ? (
+            <span className="it-chip it-blocked">
+              {issue.workOutcome.status === "blocked"
+                ? "Needs prerequisite"
+                : "Needs work"}
+            </span>
+          ) : null}
           {issue.labels.slice(0, 2).map((label) => (
             <span className="it-label" key={label}>
               {label}
@@ -2596,54 +2808,212 @@ export function IssueTracker({
               >
                 <ListFilter className="it-icon" />
               </Choice>
-              <Choice
-                label="Display options"
-                value={layout}
-                options={[
-                  {
-                    value: "board",
-                    label: "Kanban",
-                    icon: <DashboardSquare className="it-icon" />,
-                  },
-                  {
-                    value: "list",
-                    label: "List",
-                    icon: <ListBullet className="it-icon" />,
-                  },
-                  {
-                    value: "empty",
-                    label: "Show empty groups",
-                    checked: showEmpty,
-                  },
-                  {
-                    value: "newest",
-                    label: "Newest first",
-                    checked: sort === "newest",
-                  },
-                  {
-                    value: "oldest",
-                    label: "Oldest first",
-                    checked: sort === "oldest",
-                  },
-                  {
-                    value: "priority",
-                    label: "Priority",
-                    checked: sort === "priority",
-                  },
-                ]}
-                onChange={(value) => {
-                  if (value === "board" || value === "list") {
-                    setLayout(value);
-                    try {
-                      localStorage.setItem("monocode.issues.layout", value);
-                    } catch {}
-                  } else if (value === "empty") setShowEmpty((value) => !value);
-                  else setSort(value);
-                }}
+              <button
                 className="it-round-button"
+                aria-label="Add filter"
+                aria-expanded={!!filterAnchor}
+                onClick={(event) => setFilterAnchor(event.currentTarget)}
+              >
+                <Plus className="it-icon" />
+              </button>
+              <button
+                className="it-round-button"
+                aria-label="Display options"
+                aria-expanded={!!displayAnchor}
+                onClick={(event) => setDisplayAnchor(event.currentTarget)}
               >
                 <SlidersHorizontal className="it-icon" />
-              </Choice>
+              </button>
+              <button
+                className={`it-round-button ${detailsOpen ? "is-selected" : ""}`}
+                aria-label="Open details"
+                aria-expanded={detailsOpen}
+                onClick={() => setDetailsOpen((value) => !value)}
+              >
+                <PanelLeft
+                  className="it-icon"
+                  style={{ transform: "rotate(180deg)" }}
+                />
+              </button>
+              {filterAnchor ? (
+                <Popover
+                  anchor={filterAnchor}
+                  align="end"
+                  width={280}
+                  ignore="[data-dialog-popover]"
+                  onDismiss={(reason) => {
+                    if (
+                      reason !== "escape" ||
+                      !document.querySelector("[data-dialog-popover]")
+                    )
+                      setFilterAnchor(null);
+                  }}
+                  className="issue-surface it-display-menu"
+                >
+                  <strong>Filter issues</strong>
+                  <div className="it-option-row">
+                    <span>Priority</span>
+                    <Choice
+                      label="Filter priority"
+                      value={priorityFilter}
+                      options={[
+                        { value: "", label: "Any priority" },
+                        ...PRIORITY_OPTIONS,
+                      ]}
+                      onChange={setPriorityFilter}
+                    >
+                      {priorityFilter
+                        ? ISSUE_PRIORITIES[Number(priorityFilter)]
+                        : "Any priority"}
+                    </Choice>
+                  </div>
+                  <div className="it-option-row">
+                    <span>Label</span>
+                    <Choice
+                      label="Filter label"
+                      value={labelFilter}
+                      options={[
+                        { value: "", label: "Any label" },
+                        ...[
+                          ...new Set(issues.flatMap((issue) => issue.labels)),
+                        ].map((label) => ({ value: label, label })),
+                      ]}
+                      onChange={setLabelFilter}
+                    >
+                      {labelFilter || "Any label"}
+                    </Choice>
+                  </div>
+                  <button
+                    className="it-chip"
+                    onClick={() => {
+                      setFilter("");
+                      setPriorityFilter("");
+                      setLabelFilter("");
+                    }}
+                  >
+                    Clear filters
+                  </button>
+                </Popover>
+              ) : null}
+              {displayAnchor ? (
+                <Popover
+                  anchor={displayAnchor}
+                  align="end"
+                  width={300}
+                  ignore="[data-dialog-popover]"
+                  onDismiss={(reason) => {
+                    if (
+                      reason !== "escape" ||
+                      !document.querySelector("[data-dialog-popover]")
+                    )
+                      setDisplayAnchor(null);
+                  }}
+                  className="issue-surface it-display-menu"
+                >
+                  <div
+                    className="it-display-layout"
+                    role="group"
+                    aria-label="Layout"
+                  >
+                    {(["list", "board"] as const).map((value) => (
+                      <button
+                        key={value}
+                        className={layout === value ? "is-active" : ""}
+                        aria-pressed={layout === value}
+                        onClick={() => {
+                          setLayout(value);
+                          writeSetting("monocode.issues.layout", value);
+                        }}
+                      >
+                        {value === "list" ? (
+                          <ListBullet className="it-icon" />
+                        ) : (
+                          <DashboardSquare className="it-icon" />
+                        )}
+                        {value === "list" ? "List" : "Board"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="it-option-row">
+                    <span>Columns</span>
+                    <span className="it-chip">Status</span>
+                  </div>
+                  <div className="it-option-row">
+                    <span>Rows</span>
+                    <Choice
+                      label="Group issues by"
+                      value={grouping}
+                      options={[
+                        { value: "none", label: "No grouping" },
+                        { value: "topic", label: "Topic" },
+                        { value: "priority", label: "Priority" },
+                      ]}
+                      onChange={setGrouping}
+                    >
+                      {grouping === "topic"
+                        ? "Topic"
+                        : grouping === "priority"
+                          ? "Priority"
+                          : "No grouping"}
+                      <ChevronDown className="it-icon" />
+                    </Choice>
+                  </div>
+                  <div className="it-option-row">
+                    <span>Ordering</span>
+                    <Choice
+                      label="Issue ordering"
+                      value={sort}
+                      options={[
+                        { value: "newest", label: "Newest first" },
+                        { value: "oldest", label: "Oldest first" },
+                        { value: "priority", label: "Priority" },
+                      ]}
+                      onChange={setSort}
+                    >
+                      {sort === "priority"
+                        ? "Priority"
+                        : sort === "oldest"
+                          ? "Oldest first"
+                          : "Newest first"}
+                      <ChevronDown className="it-icon" />
+                    </Choice>
+                  </div>
+                  <hr />
+                  <span className="it-muted">Board options</span>
+                  <label className="it-option-row">
+                    <span>Show empty columns</span>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showEmpty}
+                      onChange={(event) => setShowEmpty(event.target.checked)}
+                    />
+                  </label>
+                  <label className="it-option-row">
+                    <span>Display properties</span>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showProperties}
+                      onChange={(event) =>
+                        setShowProperties(event.target.checked)
+                      }
+                    />
+                  </label>
+                  <button
+                    className="it-display-reset"
+                    onClick={() => {
+                      setGrouping("topic");
+                      setSort("newest");
+                      setShowEmpty(false);
+                      setHidden([]);
+                      setShowProperties(true);
+                    }}
+                  >
+                    Reset to default
+                  </button>
+                </Popover>
+              ) : null}
             </>
           </div>
         </div>
@@ -2659,7 +3029,104 @@ export function IssueTracker({
             </button>
           </div>
         ) : null}
-        <div className={`it-board ${layout === "list" ? "it-list" : ""}`}>
+        {priorityFilter || labelFilter ? (
+          <div className="it-active-filters">
+            {priorityFilter ? (
+              <button className="it-chip" onClick={() => setPriorityFilter("")}>
+                {ISSUE_PRIORITIES[Number(priorityFilter)]}
+                <X className="it-icon" />
+              </button>
+            ) : null}
+            {labelFilter ? (
+              <button className="it-chip" onClick={() => setLabelFilter("")}>
+                {labelFilter}
+                <X className="it-icon" />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <div
+          className={`it-board ${layout === "list" ? "it-list" : ""} ${rowGroups.length ? "it-grouped-board" : ""}`}
+        >
+          {rowGroups.length ? (
+            <div
+              className="it-swimlanes"
+              style={{ "--it-columns": columns.length } as React.CSSProperties}
+            >
+              {layout === "board" ? (
+                <div className="it-swimlane-columns">
+                  {columns.map((status) => (
+                    <div className="it-column-header" key={status}>
+                      <StatusIcon status={status} />
+                      <h2>{ISSUE_STATUS_LABELS[status]}</h2>
+                      <span className="it-muted">
+                        {
+                          visible.filter((issue) => issue.status === status)
+                            .length
+                        }
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {rowGroups.map((group) => (
+                <section
+                  className="it-swimlane"
+                  key={group.id}
+                  aria-label={group.title}
+                >
+                  <header className="it-group-header">
+                    <button
+                      className="it-group-toggle"
+                      aria-expanded={!collapsedGroups.includes(group.id)}
+                      onClick={() =>
+                        setCollapsedGroups((previous) =>
+                          previous.includes(group.id)
+                            ? previous.filter((id) => id !== group.id)
+                            : [...previous, group.id],
+                        )
+                      }
+                    >
+                      <ChevronRight
+                        className={`it-icon ${collapsedGroups.includes(group.id) ? "" : "is-expanded"}`}
+                      />
+                      <strong>{group.title}</strong>
+                      <span className="it-muted">{group.issues.length}</span>
+                    </button>
+                    <button
+                      className="it-icon-button it-push"
+                      aria-label={`Actions for ${group.title}`}
+                      onClick={(event) =>
+                        setGroupMenu({
+                          anchor: event.currentTarget,
+                          id: group.id,
+                        })
+                      }
+                    >
+                      <MoreHorizontal className="it-icon" />
+                    </button>
+                  </header>
+                  {!collapsedGroups.includes(group.id) ? (
+                    <div className="it-swimlane-cells">
+                      {(layout === "list" ? [null] : columns).map((status) => (
+                        <div
+                          key={status ?? "list"}
+                          className={`it-column-items${status ? dropClass(status) : ""}`}
+                          data-drop-status={status ?? undefined}
+                        >
+                          {group.issues
+                            .filter(
+                              (issue) => !status || issue.status === status,
+                            )
+                            .map(issueRow)}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ))}
+            </div>
+          ) : null}
           {visible.length === 0 ? (
             <div className="it-empty">
               <Inbox className="it-empty-icon" />
@@ -2704,53 +3171,60 @@ export function IssueTracker({
               ) : null}
             </div>
           ) : null}
-          {columns.map((status) => (
-            <section
-              className={`it-column${dropClass(status)}`}
-              key={status}
-              aria-label={`${ISSUE_STATUS_LABELS[status]} issues`}
-              data-drop-status={status}
-            >
-              <div className="it-column-header">
-                <StatusIcon status={status} />
-                <h2>{ISSUE_STATUS_LABELS[status]}</h2>
-                <span className="it-muted">
-                  {visible.filter((issue) => issue.status === status).length}
-                </span>
-                <button
-                  className="it-icon-button it-push it-column-action"
-                  aria-label={`Hide ${ISSUE_STATUS_LABELS[status]} column`}
-                  onClick={() => setHidden((previous) => [...previous, status])}
+          {!rowGroups.length
+            ? columns.map((status) => (
+                <section
+                  className={`it-column${dropClass(status)}`}
+                  key={status}
+                  aria-label={`${ISSUE_STATUS_LABELS[status]} issues`}
+                  data-drop-status={status}
                 >
-                  <MoreHorizontal className="it-icon" />
-                </button>
-                {status === "in_progress" ? null : (
-                  <button
-                    className="it-icon-button it-column-action"
-                    aria-label={`Create issue in ${ISSUE_STATUS_LABELS[status]}`}
-                    onClick={() => setCreateStatus(status)}
-                  >
-                    <Plus className="it-icon" />
-                  </button>
-                )}
-              </div>
-              <div className="it-column-items">
-                {visible
-                  .filter((issue) => issue.status === status)
-                  .map(issueRow)}
-                {status === "in_progress" ? null : (
-                  <button
-                    className="it-add-row"
-                    onClick={() => setCreateStatus(status)}
-                  >
-                    <Plus className="it-icon" />
-                    Add issue
-                  </button>
-                )}
-              </div>
-            </section>
-          ))}
-          {collapsed.length && layout === "board" ? (
+                  <div className="it-column-header">
+                    <StatusIcon status={status} />
+                    <h2>{ISSUE_STATUS_LABELS[status]}</h2>
+                    <span className="it-muted">
+                      {
+                        visible.filter((issue) => issue.status === status)
+                          .length
+                      }
+                    </span>
+                    <button
+                      className="it-icon-button it-push it-column-action"
+                      aria-label={`Hide ${ISSUE_STATUS_LABELS[status]} column`}
+                      onClick={() =>
+                        setHidden((previous) => [...previous, status])
+                      }
+                    >
+                      <MoreHorizontal className="it-icon" />
+                    </button>
+                    {status === "in_progress" ? null : (
+                      <button
+                        className="it-icon-button it-column-action"
+                        aria-label={`Create issue in ${ISSUE_STATUS_LABELS[status]}`}
+                        onClick={() => setCreateStatus(status)}
+                      >
+                        <Plus className="it-icon" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="it-column-items">
+                    {visible
+                      .filter((issue) => issue.status === status)
+                      .map(issueRow)}
+                    {status === "in_progress" ? null : (
+                      <button
+                        className="it-add-row"
+                        onClick={() => setCreateStatus(status)}
+                      >
+                        <Plus className="it-icon" />
+                        Add issue
+                      </button>
+                    )}
+                  </div>
+                </section>
+              ))
+            : null}
+          {!rowGroups.length && collapsed.length && layout === "board" ? (
             <aside className="it-hidden-columns">
               <h3>
                 <ChevronDown className="it-icon" />
@@ -2778,18 +3252,171 @@ export function IssueTracker({
             </aside>
           ) : null}
         </div>
+        {groupMenu ? (
+          <Popover
+            anchor={groupMenu.anchor}
+            align="end"
+            width={280}
+            onDismiss={() => setGroupMenu(null)}
+            className="issue-surface it-menu"
+            role="menu"
+            aria-label="Group actions"
+          >
+            {(() => {
+              const group = rowGroups.find(
+                (entry) => entry.id === groupMenu.id,
+              );
+              const topicMembers = issues.filter(
+                (issue) =>
+                  !issue.archived &&
+                  issue.triageGroup?.id === groupMenu.id &&
+                  issue.status !== "done",
+              );
+              const members = topicMembers.length
+                ? topicMembers
+                : (group?.issues ?? []).filter(
+                    (issue) => issue.status !== "done",
+                  );
+              const ready = issueGroupReadiness(members, issues);
+              const sessionId = members.find(
+                (issue) => issue.sessionId,
+              )?.sessionId;
+              return (
+                <>
+                  {members.length ? (
+                    <button
+                      role="menuitem"
+                      disabled={!!ready || !onLaunch}
+                      title={ready}
+                      onClick={() => {
+                        setGroupMenu(null);
+                        void (
+                          topicMembers.length
+                            ? startIssueGroup(groupMenu.id, onLaunch!)
+                            : startIssueSelection(
+                                group?.title ?? "Issues",
+                                members.map((issue) => issue.id),
+                                onLaunch!,
+                              )
+                        ).catch(showError);
+                      }}
+                    >
+                      <Bot className="it-icon" />
+                      Start {members.length} issues in one thread
+                    </button>
+                  ) : null}
+                  {ready && members.length ? (
+                    <p className="it-group-help">{ready}</p>
+                  ) : null}
+                  {sessionId && onOpenSession ? (
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setGroupMenu(null);
+                        void Promise.resolve(onOpenSession(sessionId)).catch(
+                          showError,
+                        );
+                      }}
+                    >
+                      Open group thread
+                    </button>
+                  ) : null}
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setChecked(group?.issues.map((issue) => issue.id) ?? []);
+                      setGroupMenu(null);
+                    }}
+                  >
+                    Select all issues
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setCollapsedGroups((previous) => [
+                        ...previous,
+                        groupMenu.id,
+                      ]);
+                      setGroupMenu(null);
+                    }}
+                  >
+                    Collapse group
+                  </button>
+                </>
+              );
+            })()}
+          </Popover>
+        ) : null}
+        {detailsOpen ? (
+          <aside className="it-view-details" aria-label="View details">
+            <header>
+              <strong>All issues</strong>
+              <button
+                className="it-icon-button it-push"
+                aria-label="Close view details"
+                onClick={() => setDetailsOpen(false)}
+              >
+                <X className="it-icon" />
+              </button>
+            </header>
+            <p className="it-muted">
+              {visible.length} issues · {rowGroups.length} groups
+            </p>
+            <h3>Status</h3>
+            {ISSUE_STATUSES.map((status) => (
+              <button
+                className="it-subissue-row"
+                key={status}
+                onClick={() => setFilter(filter === status ? "" : status)}
+              >
+                <StatusIcon status={status} />
+                <span>{ISSUE_STATUS_LABELS[status]}</span>
+                <span className="it-push it-muted">
+                  {visible.filter((issue) => issue.status === status).length}
+                </span>
+              </button>
+            ))}
+            <h3>Priority</h3>
+            {ISSUE_PRIORITIES.map((label, priority) => (
+              <button
+                className="it-subissue-row"
+                key={label}
+                onClick={() =>
+                  setPriorityFilter(
+                    priorityFilter === String(priority) ? "" : String(priority),
+                  )
+                }
+              >
+                <span>{label}</span>
+                <span className="it-push it-muted">
+                  {
+                    visible.filter((issue) => issue.priority === priority)
+                      .length
+                  }
+                </span>
+              </button>
+            ))}
+          </aside>
+        ) : null}
       </main>
       {createShown ? (
         <NewIssue
-          project={project || (cwd !== "~" ? cwd : "")}
+          project={
+            createParent?.projectPath || project || (cwd !== "~" ? cwd : "")
+          }
           projects={projects}
           status={createShown}
-          onClose={() => setCreateStatus(null)}
+          onClose={() => {
+            setCreateStatus(null);
+            setCreateParent(null);
+          }}
           onCreate={create}
           onPolishError={(issue, reason) => {
             const message =
               reason instanceof Error ? reason.message : String(reason);
-            showError(`MC-${issue.number} was created but could not be polished: ${message}`);
+            showError(
+              `MC-${issue.number} was created but could not be polished: ${message}`,
+            );
           }}
           leaving={createLeaving}
         />
@@ -2798,6 +3425,12 @@ export function IssueTracker({
         <IssueDetail
           key={selected.id}
           issue={selected}
+          onOpenIssue={setSelectedId}
+          onCreateSubissue={() => {
+            setCreateParent(selected);
+            setCreateStatus("backlog");
+            setSelectedId(null);
+          }}
           projects={projects}
           onClose={() => setSelectedId(null)}
           onMove={move}
