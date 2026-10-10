@@ -12,6 +12,7 @@ import {
   latestWorkReview,
   updateLocalIssue,
   verifiedIssueCommit,
+  sanitizeCommitFiles,
   type LocalIssue,
 } from "./localIssues";
 import { taskModelCommitMessage } from "../../settings/model/taskModel";
@@ -20,7 +21,9 @@ import { taskModelCommitMessage } from "../../settings/model/taskModel";
 export const canCommitWithTaskModel = (
   issue: LocalIssue,
   taskModelConfigured: boolean,
-) => taskModelConfigured && Boolean(issue.commitFiles?.length);
+) =>
+  taskModelConfigured &&
+  Boolean(sanitizeCommitFiles(issue.commitFiles ?? []).length);
 
 /**
  * Commits an approved issue without resuming its agent thread. Stages only the recorded files
@@ -31,10 +34,12 @@ export async function commitIssueWithTaskModel(
   issue: LocalIssue,
   cwd: string,
 ): Promise<void> {
-  const files = issue.commitFiles ?? [];
+  const files = sanitizeCommitFiles(issue.commitFiles ?? []);
   const staged: string[] = [];
   let committed = false;
   try {
+    if (!files.length)
+      throw new Error("No valid issue file paths were recorded.");
     updateLocalIssue(
       issue.id,
       { runState: "running", runHeartbeatAt: new Date().toISOString() },

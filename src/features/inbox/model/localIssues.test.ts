@@ -70,6 +70,27 @@ describe("local issue workflow", () => {
     expect(localIssuePrompt(issue)).toContain("```commit-files");
     expect(localIssueFeedbackPrompt(issue, "x")).toContain("```commit-files");
   });
+  it("keeps a subject inside the file fence out of new and saved file lists", () => {
+    const subject = "fix(quick-composer): narrow permissions dropdown";
+    const file = "src/features/quick-composer/ui/QuickPermissions.tsx";
+    expect(
+      parseCommitPlan(
+        ["```commit-files", file, `Commit subject: ${subject}`, "```"].join(
+          "\r\n",
+        ),
+      ),
+    ).toEqual({ files: [file], subject });
+    const issue = createLocalIssue(draft);
+    updateLocalIssue(issue.id, {
+      commitFiles: [file, `Commit subject: ${subject}`],
+      commitSubject: subject,
+    });
+    expect(loadLocalIssues()[0]).toMatchObject({
+      commitFiles: [file],
+      commitSubject: subject,
+    });
+    expect(localIssuePrompt(issue)).toContain("outside the block");
+  });
   it("extracts distinct absolute evidence image paths, ignoring external URLs", () => {
     expect(
       issueProofPaths(

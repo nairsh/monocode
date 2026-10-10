@@ -101,32 +101,41 @@ export function verifiedIssueCommit(
 ): boolean {
   return Boolean(head && head !== previousHead);
 }
-const COMMIT_FILES_FENCE = /```commit-files\n([\s\S]*?)```/g;
+const COMMIT_FILES_FENCE = /```commit-files\r?\n([\s\S]*?)```/g;
 const COMMIT_SUBJECT_LINE = /^Commit subject:[ \t]*(.+)$/gm;
+export function sanitizeCommitFiles(files: string[]): string[] {
+  return [
+    ...new Set(
+      files
+        .map((line) =>
+          line
+            .replace(/^\s*[-*]\s+/, "")
+            .replace(/[`"']/g, "")
+            .trim(),
+        )
+        // Metadata is not a path, even when the agent puts it inside the file fence.
+        .filter(
+          (file) =>
+            file &&
+            !/^Commit subject:/i.test(file) &&
+            !file.startsWith("/") &&
+            !file.split("/").includes(".."),
+        ),
+    ),
+  ];
+}
 /** Reads the commit plan the agent ends its reply with; the last block and line win. */
 export function parseCommitPlan(text: string): {
   files: string[];
   subject?: string;
 } {
   const block = [...text.matchAll(COMMIT_FILES_FENCE)].pop()?.[1] ?? "";
-  const files = block
-    .split("\n")
-    .map((line) =>
-      line
-        .replace(/^\s*[-*]\s+/, "")
-        .replace(/[`"']/g, "")
-        .trim(),
-    )
-    // Repo-relative only: the app stages these in the project's own index.
-    .filter(
-      (file) =>
-        file && !file.startsWith("/") && !file.split("/").includes(".."),
-    );
+  const files = sanitizeCommitFiles(block.split("\n"));
   const subject = [...text.matchAll(COMMIT_SUBJECT_LINE)]
     .pop()?.[1]
     ?.replace(/^[`"']|[`"']$/g, "")
     .trim();
-  return { files: [...new Set(files)], subject: subject || undefined };
+  return { files, subject: subject || undefined };
 }
 export const capReviewText = (text: string) =>
   text.length > MAX_REVIEW_CHARS
@@ -144,11 +153,15 @@ export function loadLocalIssues(): LocalIssue[] {
     );
   }
   // Retired columns remain recoverable in the archive.
-  return parsed.map((issue) =>
-    RETIRED_STATUSES.includes(issue.status as string)
-      ? { ...issue, status: "backlog" as const, archived: true }
-      : issue,
-  );
+  return parsed.map((issue) => {
+    // Repair plans saved by older versions so approval retries use only file paths.
+    const repaired = issue.commitFiles
+      ? { ...issue, commitFiles: sanitizeCommitFiles(issue.commitFiles) }
+      : issue;
+    return RETIRED_STATUSES.includes(issue.status as string)
+      ? { ...repaired, status: "backlog" as const, archived: true }
+      : repaired;
+  });
 }
 
 const validImages = (value: unknown) =>
@@ -327,7 +340,7 @@ export function updateLocalIssue(
 }
 
 const COMMIT_PLAN_PROMPT =
-  "List the paths, relative to your working directory, of every file you changed for this issue (including deletions), one per line, in a fenced block that starts with ```commit-files, then a line `Commit subject: <one-line conventional commit subject>`. Do not commit.";
+  "List the paths, relative to your working directory, of every file you changed for this issue (including deletions), one per line, inside a ```commit-files fenced block. Put only file paths in that block and close it with ```. After the closing fence, on a separate line outside the block, write `Commit subject: <one-line conventional commit subject>`. Do not commit.";
 export function localIssuePrompt(issue: LocalIssue): string {
   return [
     `Work on local issue MC-${issue.number}: ${issue.title}`,

@@ -123,6 +123,41 @@ it("returns to review and unstages when the message cannot be generated", async 
   });
 });
 
+it("ignores saved commit metadata when retrying approval", async () => {
+  const issue = {
+    ...approved(),
+    commitFiles: ["src/a.ts", "Commit subject: fix(ui): stop clipping"],
+  };
+  vi.mocked(fs.gitHistory)
+    .mockResolvedValueOnce({ head: "aaa1111", commits: [] })
+    .mockResolvedValueOnce({ head: "bbb2222", commits: [] });
+  await commitIssueWithTaskModel(issue, "/tmp/web");
+  expect(fs.gitStageFile).toHaveBeenCalledTimes(1);
+  expect(fs.gitStageFile).toHaveBeenCalledWith("/tmp/web", "src/a.ts");
+  expect(fs.gitCommit).toHaveBeenCalledWith(
+    "/tmp/web",
+    "fix(ui): stop clipping",
+    false,
+    ["src/a.ts"],
+  );
+});
+
+it("does not commit when the recorded list contains only metadata", async () => {
+  const issue = {
+    ...approved(),
+    commitFiles: ["Commit subject: fix(ui): stop clipping"],
+  };
+  expect(canCommitWithTaskModel(issue, true)).toBe(false);
+  await commitIssueWithTaskModel(issue, "/tmp/web");
+  expect(fs.gitStageFile).not.toHaveBeenCalled();
+  expect(fs.gitCommit).not.toHaveBeenCalled();
+  expect(loadLocalIssues()[0]).toMatchObject({
+    status: "in_review",
+    runState: "failed",
+    runError: expect.stringContaining("No valid issue file paths"),
+  });
+});
+
 it("rejects a commit that did not move HEAD", async () => {
   const issue = approved();
   vi.mocked(fs.gitHistory).mockResolvedValue({ head: "aaa1111", commits: [] });
