@@ -48,6 +48,11 @@ export type LocalIssue = {
   triageGroup?: { id: string; title: string; reason: string; files: string[] };
   /** Issues in one assignment share its thread, review and commit. */
   runBatchId?: string;
+  /** Explicit request to dispatch this triage group once its prerequisites are committed. */
+  dispatchQueued?: boolean;
+  /** New group assignments run in separate working copies. Legacy assignments keep theirs. */
+  runInWorktree?: boolean;
+  worktreeCwd?: string;
   agent: HarnessId | "";
   model?: string;
   modelSettings?: Record<string, string>;
@@ -202,11 +207,15 @@ export function repositoryAssignmentBlocker(
   issue: LocalIssue,
   all = loadLocalIssues(),
 ) {
+  // A fresh isolated assignment will get its own checkout before submission.
+  if (issue.runInWorktree && !issue.sessionId) return undefined;
   return all.find(
     (other) =>
       other.id !== issue.id &&
       !(issue.runBatchId && issue.runBatchId === other.runBatchId) &&
-      pathKey(other.projectPath) === pathKey(issue.projectPath) &&
+      !(other.runInWorktree && !other.sessionId) &&
+      pathKey(other.worktreeCwd ?? other.projectPath) ===
+        pathKey(issue.worktreeCwd ?? issue.projectPath) &&
       (isIssueRunning(other) || !!other.sessionId) &&
       !isIssueResolved(other) &&
       !(
@@ -258,6 +267,12 @@ function validIssue(value: unknown): value is LocalIssue {
     (issue.parentIssueId === undefined ||
       typeof issue.parentIssueId === "string") &&
     (issue.runBatchId === undefined || typeof issue.runBatchId === "string") &&
+    (issue.dispatchQueued === undefined ||
+      typeof issue.dispatchQueued === "boolean") &&
+    (issue.runInWorktree === undefined ||
+      typeof issue.runInWorktree === "boolean") &&
+    (issue.worktreeCwd === undefined ||
+      typeof issue.worktreeCwd === "string") &&
     (issue.triageGroup === undefined ||
       (typeof issue.triageGroup?.id === "string" &&
         typeof issue.triageGroup.title === "string" &&
@@ -609,7 +624,12 @@ export function updateLocalIssue(
       throw new Error(
         "An assigned issue cannot change projects. Create a new ticket in the target project.",
       );
-    patch = { ...patch, triageGroup: undefined, triageDependencies: undefined };
+    patch = {
+      ...patch,
+      triageGroup: undefined,
+      triageDependencies: undefined,
+      dispatchQueued: undefined,
+    };
   }
   if (patch.dependsOn) {
     patch = {
@@ -1031,10 +1051,11 @@ export async function moveLocalIssue(
       "In Progress is set when an agent starts. Move the issue to To Do to dispatch it, or send review feedback.",
     );
   if (status === "todo") {
-    if (previous.triageGroup && !previous.runBatchId)
-      throw new Error(
-        "This ticket belongs to a triage group. Use Start group, or detach the ticket in its details before starting it individually.",
-      );
+    if (previous.triageGroup && !previous.runBatchId) {
+      // Queue the shared assignment without detaching or dispatching one member.
+      updateLocalIssue(id, { status, dispatchQueued: true });
+      return;
+    }
     if (!launch)
       throw new Error(
         `Agent dispatch is unavailable. The issue is still in ${ISSUE_STATUS_LABELS[previous.status]}.`,
@@ -1043,7 +1064,7 @@ export async function moveLocalIssue(
   } else if (status === "done") {
     updateLocalIssue(id, { status }, "Marked done without a commit");
   } else {
-    updateLocalIssue(id, { status });
+    updateLocalIssue(id, { status, dispatchQueued: undefined });
   }
 }
 

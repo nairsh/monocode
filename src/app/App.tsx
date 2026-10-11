@@ -29,6 +29,7 @@ import { submitWithSettlement } from "./model/managedSubmission";
 import { issueLaunchText, subscribeOpenIssue } from "../features/inbox/model/issueReference";
 import { ISSUE_HEARTBEAT_MS, ISSUE_RECOVERY_MS, issueCommitMeta, issueRunFailurePatch, lastAgentReply, loadLocalIssues, localIssueFeedbackPrompt, parseCommitPlan, peerReviewPrompt, recoverLocalIssueRuns, touchIssueRunLeases, verifiedIssueCommit, type LocalIssue } from "../features/inbox/model/localIssues";
 import { issueAssignment, localIssueAssignmentPrompt, updateIssueAssignment, parseIssueOutcomes } from "../features/inbox/model/localIssues";
+import { watchIssueQueue } from "../features/inbox/model/issueQueue";
 import { gitHistory, gitStagedContext } from "../platform/tauri/fs";
 import { canCommitWithTaskModel, commitIssueWithTaskModel } from "../features/inbox/model/taskModelCommit";
 import { taskModelConfig } from "../features/settings/model/taskModel";
@@ -126,6 +127,7 @@ import {
 import {
   assertWorktreeFilesClosed,
   createOrchestrationWorktree,
+  createIssueWorktree,
   createWorktree,
   detachSessionWorktree,
   checkWorktreeRemoval,
@@ -8343,6 +8345,9 @@ function Workspace({
     if (session && !sameProjectPath(session.cwd, issue.projectPath))
       throw new Error("The saved issue thread belongs to another project. Create a new ticket in the intended project.");
     if (session?.busy) throw new Error("The issue thread is still working. Open it before retrying.");
+    if (session?.worktreeRemoved) throw new Error("The issue working copy was removed. Restore it before retrying.");
+    if (issue.runInWorktree && session && (!session.worktreeCwd || (issue.worktreeCwd && !sameProjectPath(session.worktreeCwd, issue.worktreeCwd))))
+      throw new Error("The issue thread no longer uses its assigned working copy. Restore that working copy before retrying.");
     // Approval commits through the task model (no agent turn) when it is configured and the agent recorded its files.
     if (issue.runKind === "commit" && session && canCommitWithTaskModel(issue, !!(await taskModelConfig().catch(() => null)))) {
       const threadId = session.id;
@@ -8360,9 +8365,23 @@ function Workspace({
     // Only this issue's own draft may be consumed; any other draft belongs to the user.
     const ownDraftId = `local-issue-${issue.id}-draft`;
     if (!session) {
-      const base = issue.agent
+      let base = issue.agent
         ? newSession(issue.agent, issue.projectPath, issue.model, sessionDefaults?.runtimeMode, issue.modelSettings)
         : newDefaultSession(issue.projectPath, sessionDefaults?.runtimeMode);
+      if (issue.runInWorktree) {
+        const all = loadLocalIssues();
+        const memberIds = new Set(assignment.map(entry => entry.id));
+        const commits = [...new Set(assignment.flatMap(entry => entry.dependsOn ?? [])
+          .filter(id => !memberIds.has(id))
+          .map(id => all.find(entry => entry.id === id)?.commitSha)
+          .filter((sha): sha is string => !!sha))];
+        const tree = issue.worktreeCwd
+          ? (await listWorktrees(issue.projectPath)).worktrees.find(entry => sameProjectPath(entry.path, issue.worktreeCwd!) && !entry.missing)
+          : await createIssueWorktree(issue.projectPath, temporaryWorktreeBranchName(), commits);
+        if (!tree) throw new Error("The issue working copy is missing. Restore it before retrying.");
+        base = { ...base, worktreeCwd: tree.path, branch: tree.branch ?? undefined };
+        updateIssueAssignment(issue, { worktreeCwd: tree.path });
+      }
       session = { ...base, modelSettings: { ...base.modelSettings, ...issue.modelSettings }, title: `${assignmentLabel} ${assignment.length > 1 ? issue.triageGroup?.title ?? issue.title : issue.title}`, blocks: [{ id: ownDraftId, role: "user", text: localIssueAssignmentPrompt(issue), attachments: images, draft: true }] };
       // Persist the thread before linking or submitting, so a retry can reuse it.
       // No tab is needed to run it; "Open agent thread" opens one on demand.
@@ -8462,6 +8481,11 @@ function Workspace({
     });
     if (!accepted) throw new Error("The selected agent could not start this issue. Open its thread for details, or retry.");
   }, [ensureOpenSession, sessionDefaults?.runtimeMode, submitSession]);
+
+  useEffect(() => watchIssueQueue(onLaunchLocalIssue, reason => {
+    // Dispatch failures are saved on the group; the tracker displays their details.
+    console.error("Queued issue group could not start", reason);
+  }), [onLaunchLocalIssue]);
 
   // A peer review runs in its own thread and never touches the issue's session, status, or run state.
   const onReviewLocalIssue = useCallback(async (issue: LocalIssue, target: ModelTarget): Promise<{ text: string; sessionId: string }> => {

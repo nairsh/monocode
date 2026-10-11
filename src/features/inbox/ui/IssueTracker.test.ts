@@ -9,6 +9,8 @@ import {
   type LocalIssue,
 } from "../model/localIssues";
 import { IssueTracker } from "./IssueTracker";
+import { applyTriagePlan } from "../model/issueTriage";
+import { dispatchQueuedIssueGroups } from "../model/issueQueue";
 import type { ModelTarget, Session } from "../../sessions/model/session";
 import { polishIssue } from "../../settings/model/taskModel";
 
@@ -565,6 +567,142 @@ it("drags every checked card together", async () => {
     "in_review",
   ]);
   over.mockRestore();
+});
+
+function triageSelection(issues: LocalIssue[]) {
+  applyTriagePlan({
+    snapshot: issues,
+    plan: {
+      groups: issues.map((issue) => ({
+        title: issue.title,
+        reason: "Separate work",
+        files: [],
+        issueIds: [issue.id],
+      })),
+      dependencies: [
+        {
+          issueId: issues[1].id,
+          dependsOn: issues[0].id,
+          reason: "Needs the first change",
+        },
+      ],
+    },
+  });
+}
+
+it.each(["metaKey", "ctrlKey"] as const)(
+  "selects all displayed triaged issues with %s+A and queues a bulk drop without losing triage",
+  async (modifier) => {
+    const issues = [seed(), extra("Second"), extra("Third")];
+    triageSelection(issues);
+    const before = loadLocalIssues();
+    const launch = await render();
+    await key("a", { [modifier]: true });
+    expect(container.querySelectorAll(".it-card.is-checked")).toHaveLength(3);
+    const target = container.querySelector<HTMLElement>(
+      '[data-drop-status="todo"]',
+    )!;
+    const over = vi.spyOn(document, "elementFromPoint").mockReturnValue(target);
+    try {
+      await pointer(container.querySelector(".it-card")!, "pointerdown", 5, 5);
+      await pointer(window, "pointermove", 90, 50);
+      expect(document.querySelector(".it-drag-count")?.textContent).toBe("3");
+      await pointer(window, "pointerup", 90, 50);
+      for (const [index, issue] of loadLocalIssues().entries()) {
+        expect(issue).toMatchObject({
+          status: "todo",
+          dispatchQueued: true,
+          triageGroup: before[index].triageGroup,
+        });
+        expect(issue.dependsOn).toEqual(before[index].dependsOn);
+        expect(issue.triageDependencies).toEqual(
+          before[index].triageDependencies,
+        );
+      }
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      await act(async () =>
+        dispatchQueuedIssueGroups(launch, (reason) => {
+          throw reason;
+        }),
+      );
+      expect(launch).toHaveBeenCalledTimes(2);
+    } finally {
+      over.mockRestore();
+    }
+  },
+);
+
+it("starts all selected groups from a right-click and keeps blocked groups queued", async () => {
+  const issues = [seed(), extra("Second"), extra("Third")];
+  triageSelection(issues);
+  const launch = await render();
+  await key("a", { metaKey: true });
+  const menu = contextMenuOnCard();
+  await act(async () =>
+    [...menu.querySelectorAll<HTMLButtonElement>("button")]
+      .find((entry) => entry.textContent === "Start selected groups (3)")!
+      .click(),
+  );
+  expect(loadLocalIssues().every((issue) => issue.dispatchQueued)).toBe(true);
+  await act(async () =>
+    dispatchQueuedIssueGroups(launch, (reason) => {
+      throw reason;
+    }),
+  );
+  expect(launch).toHaveBeenCalledTimes(2);
+  expect(loadLocalIssues()[1]).toMatchObject({
+    status: "todo",
+    dispatchQueued: true,
+  });
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("opens group actions by right-clicking the header and starts every member from Backlog or Todo", async () => {
+  const a = seed();
+  const b = extra("Second");
+  applyTriagePlan({
+    snapshot: [a, b],
+    plan: {
+      groups: [
+        {
+          title: "Shared changes",
+          reason: "Shared work",
+          files: [],
+          issueIds: [a.id, b.id],
+        },
+      ],
+      dependencies: [],
+    },
+  });
+  updateLocalIssue(a.id, { status: "todo" });
+  const launch = await render();
+  act(() =>
+    container
+      .querySelector(".it-group-header")!
+      .dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 100,
+          clientY: 100,
+        }),
+      ),
+  );
+  const menu = document.querySelector('[aria-label="Group actions"]')!;
+  await act(async () =>
+    [...menu.querySelectorAll<HTMLButtonElement>("button")]
+      .find((entry) => entry.textContent === "Start 2 issues in one thread")!
+      .click(),
+  );
+  await act(async () =>
+    dispatchQueuedIssueGroups(launch, (reason) => {
+      throw reason;
+    }),
+  );
+  expect(launch).toHaveBeenCalledTimes(1);
+  const saved = loadLocalIssues();
+  expect(saved[0].runBatchId).toBe(saved[1].runBatchId);
+  expect(saved.every((issue) => issue.runState === "starting")).toBe(true);
 });
 
 it("moves card focus with arrows and j/k, hops columns, toggles, and returns focus after the detail closes", async () => {

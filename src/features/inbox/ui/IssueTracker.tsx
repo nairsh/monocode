@@ -98,10 +98,11 @@ import type { ApprovalDecision } from "../../../integrations/harness";
 import "./IssueTracker.css";
 import { IssueDependencies, useIssueTriage } from "./IssueTriage";
 import {
+  eligibleForGroupStart,
   issueGroupReadiness,
-  startIssueGroup,
   startIssueSelection,
 } from "../model/issueTriage";
+import { queueIssueGroups } from "../model/issueQueue";
 
 const SORT_KEY = "monocode.issues.sort";
 const IssueMarkdownEditor = lazy(() =>
@@ -1826,7 +1827,7 @@ export function IssueTracker({
   );
   const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
   const [groupMenu, setGroupMenu] = useState<{
-    anchor: HTMLElement;
+    anchor: HTMLElement | { x: number; y: number };
     id: string;
   } | null>(null);
   const [showProperties, setShowProperties] = useState(
@@ -2050,6 +2051,10 @@ export function IssueTracker({
   const retry = async (id: string) => {
     if (!onLaunch) throw new Error("Agent dispatch is unavailable.");
     const issue = issues.find((entry) => entry.id === id);
+    if (issue?.triageGroup && !issue.runBatchId) {
+      queueIssueGroups([id]);
+      return;
+    }
     await startLocalIssue(
       id,
       onLaunch,
@@ -2123,6 +2128,10 @@ export function IssueTracker({
       // Done is where approved work lands, so it never disappears when empty.
       (showEmpty ||
         (status === "done" && view === "issues") ||
+        // Keep a drop target available for the first queued triage group.
+        (status === "todo" &&
+          view === "issues" &&
+          visible.some((issue) => issue.triageGroup)) ||
         visible.some((issue) => issue.status === status)),
   );
   const collapsed = statuses.filter((status) => !columns.includes(status));
@@ -2194,6 +2203,20 @@ export function IssueTracker({
       : context
         ? [context.id]
         : [];
+  const targetGroupIds = new Set(
+    targets.map(
+      (id) => issues.find((issue) => issue.id === id)?.triageGroup?.id,
+    ),
+  );
+  const contextGroupMembers =
+    targetGroupIds.size && !targetGroupIds.has(undefined)
+      ? issues.filter(
+          (issue) =>
+            targetGroupIds.has(issue.triageGroup?.id) &&
+            !issue.archived &&
+            issue.status !== "done",
+        )
+      : [];
   const cardOf = (id?: string) =>
     id
       ? [
@@ -2246,6 +2269,16 @@ export function IssueTracker({
     }
     const del =
       event.metaKey && (event.key === "Backspace" || event.key === "Delete");
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      event.key.toLowerCase() === "a"
+    ) {
+      event.preventDefault();
+      setChecked(ordered.map((issue) => issue.id));
+      anchor.current = ordered[0]?.id ?? null;
+      return;
+    }
     if (!del && (event.metaKey || event.ctrlKey || event.altKey)) return;
     const key = event.key.toLowerCase();
     // `p` arms the priority chord: the next digit (0-4) sets it.
@@ -2598,6 +2631,10 @@ export function IssueTracker({
             <span className="it-error">Review failed</span>
           ) : issue.runState === "failed" ? (
             <span className="it-error">Agent needs attention</span>
+          ) : issue.dispatchQueued ? (
+            <span title="Starts automatically when the group's prerequisites are committed">
+              Queued
+            </span>
           ) : (
             `Created ${new Date(issue.createdAt).toLocaleDateString(undefined, { month: "short", year: "numeric" })}`
           )}
@@ -3179,7 +3216,16 @@ export function IssueTracker({
                   key={group.id}
                   aria-label={group.title}
                 >
-                  <header className="it-group-header">
+                  <header
+                    className="it-group-header"
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setGroupMenu({
+                        anchor: { x: event.clientX, y: event.clientY },
+                        id: group.id,
+                      });
+                    }}
+                  >
                     <button
                       className="it-group-toggle"
                       aria-expanded={!collapsedGroups.includes(group.id)}
@@ -3392,19 +3438,30 @@ export function IssueTracker({
                   {members.length ? (
                     <button
                       role="menuitem"
-                      disabled={!!ready || !onLaunch}
+                      disabled={
+                        !onLaunch ||
+                        (topicMembers.length
+                          ? !topicMembers.every(eligibleForGroupStart)
+                          : !!ready)
+                      }
                       title={ready}
                       onClick={() => {
                         setGroupMenu(null);
-                        void (
-                          topicMembers.length
-                            ? startIssueGroup(groupMenu.id, onLaunch!)
-                            : startIssueSelection(
-                                group?.title ?? "Issues",
-                                members.map((issue) => issue.id),
-                                onLaunch!,
-                              )
-                        ).catch(showError);
+                        if (topicMembers.length) {
+                          try {
+                            queueIssueGroups(
+                              topicMembers.map((issue) => issue.id),
+                            );
+                          } catch (reason) {
+                            showError(reason);
+                          }
+                        } else {
+                          void startIssueSelection(
+                            group?.title ?? "Issues",
+                            members.map((issue) => issue.id),
+                            onLaunch!,
+                          ).catch(showError);
+                        }
                       }}
                     >
                       <Bot className="it-icon" />
@@ -3628,6 +3685,27 @@ export function IssueTracker({
             <Pencil className="it-icon" />
             Open issue
           </button>
+          {contextGroupMembers.length ? (
+            <button
+              role="menuitem"
+              disabled={
+                !contextGroupMembers.every(eligibleForGroupStart) || !onLaunch
+              }
+              onClick={() => {
+                setContext(null);
+                try {
+                  queueIssueGroups(targets);
+                } catch (reason) {
+                  showError(reason);
+                }
+              }}
+            >
+              <Bot className="it-icon" />
+              {targetGroupIds.size === 1
+                ? `Start group (${contextGroupMembers.length} issues)`
+                : `Start selected groups (${targetGroupIds.size})`}
+            </button>
+          ) : null}
           <Choice
             label="Status"
             value={

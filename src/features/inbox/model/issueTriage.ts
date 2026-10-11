@@ -6,7 +6,6 @@ import type { Attachment } from "../../sessions/model/session";
 import {
   isIssueRunning,
   issueBlockers,
-  repositoryAssignmentBlocker,
   loadLocalIssues,
   startReservedLocalIssue,
   withIssueDispatchLock,
@@ -99,12 +98,15 @@ export function saveTriageDraft(value: TriagePreview | null) {
   if (value) localStorage.setItem(DRAFT_KEY, JSON.stringify(value));
   else localStorage.removeItem(DRAFT_KEY);
 }
-export const eligibleForTriage = (issue: LocalIssue) =>
+export const eligibleForGroupStart = (issue: LocalIssue) =>
   !issue.archived &&
-  issue.status === "backlog" &&
+  (issue.status === "backlog" || issue.status === "todo") &&
   !isIssueRunning(issue) &&
   !issue.sessionId &&
   !issue.runBatchId;
+
+export const eligibleForTriage = (issue: LocalIssue) =>
+  issue.status === "backlog" && eligibleForGroupStart(issue);
 
 export type TriageOptions = {
   issueIds?: string[];
@@ -471,8 +473,11 @@ export function undoTriage(receipts: TriageUndo[]) {
 export async function startIssueGroup(
   groupId: string,
   launch: (issue: LocalIssue) => Promise<void>,
+  queuedOnly = false,
 ) {
-  return withIssueDispatchLock(() => dispatchIssueGroup(groupId, launch));
+  return withIssueDispatchLock(() =>
+    dispatchIssueGroup(groupId, launch, queuedOnly),
+  );
 }
 
 /** Turn a displayed priority/ungrouped row into one explicitly requested assignment. */
@@ -486,9 +491,9 @@ export async function startIssueSelection(
     const members = ids.map((id) => all.find((issue) => issue.id === id));
     if (
       !members.length ||
-      members.some((issue) => !issue || !eligibleForTriage(issue))
+      members.some((issue) => !issue || !eligibleForGroupStart(issue))
     )
-      throw new Error("Start a group with fresh backlog issues only.");
+      throw new Error("Start a group with fresh Backlog or To Do issues only.");
     const ready = issueGroupReadiness(members as LocalIssue[], all);
     if (ready) throw new Error(ready);
     const id = crypto.randomUUID();
@@ -513,6 +518,7 @@ export async function startIssueSelection(
 async function dispatchIssueGroup(
   groupId: string,
   launch: (issue: LocalIssue) => Promise<void>,
+  queuedOnly = false,
 ) {
   const all = loadLocalIssues();
   const issues = all.filter(
@@ -521,27 +527,27 @@ async function dispatchIssueGroup(
       !issue.archived &&
       issue.status !== "done",
   );
+  if (
+    queuedOnly &&
+    !issues.some((issue) => issue.dispatchQueued && issue.status === "todo")
+  )
+    return;
   if (!issues.length) throw new Error("This group has no unfinished issues.");
   if (new Set(issues.map((issue) => pathKey(issue.projectPath))).size !== 1)
     throw new Error(
       "An assignment cannot span projects. Detach tickets moved to another project.",
     );
-  if (
-    issues.some(
-      (issue) =>
-        isIssueRunning(issue) ||
-        issue.sessionId ||
-        issue.runBatchId ||
-        issue.status !== "backlog",
-    )
-  )
+  if (issues.some((issue) => !eligibleForGroupStart(issue)))
     throw new Error(
-      "Group dispatch requires fresh backlog issues. Resume existing assignments from their tickets.",
+      "Group dispatch requires fresh Backlog or To Do issues. Resume existing assignments from their tickets.",
     );
   // Recheck the graph, since dependencies may have been edited after triage.
   validateIssueDependencies(all);
   const readiness = issueGroupReadiness(issues, all);
-  if (readiness) throw new Error(readiness);
+  if (readiness) {
+    if (queuedOnly) return;
+    throw new Error(readiness);
+  }
   const settings = issues.filter(
     (issue) => issue.modelSettings && Object.keys(issue.modelSettings).length,
   );
@@ -551,6 +557,8 @@ async function dispatchIssueGroup(
       id: issue.id,
       patch: {
         runBatchId,
+        runInWorktree: true,
+        dispatchQueued: undefined,
         agent: issues.find((entry) => entry.agent)?.agent ?? "",
         model: issues.find((entry) => entry.model)?.model,
         modelSettings: settings[0]?.modelSettings,
@@ -576,9 +584,8 @@ export function issueGroupReadiness(
   if (new Set(issues.map((issue) => pathKey(issue.projectPath))).size !== 1)
     return "An assignment cannot span projects.";
   if (issues.some(isIssueRunning)) return "Agent working";
-  const occupied = repositoryAssignmentBlocker(first, all);
-  if (occupied)
-    return `Waiting for MC-${occupied.number} to finish and commit its assignment.`;
+  if (issues.some((issue) => !eligibleForGroupStart(issue)))
+    return "Start a group with fresh Backlog or To Do issues only.";
   const blockers = issues.flatMap((issue) =>
     issueBlockers(
       issue,

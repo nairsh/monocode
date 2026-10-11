@@ -157,7 +157,7 @@ it("reserves an entire group before launching once and sends prerequisites first
   });
   await startIssueGroup(groupId, launch);
   await expect(startIssueGroup(groupId, launch)).rejects.toThrow(
-    "fresh backlog",
+    "fresh Backlog or To Do",
   );
   expect(launch).toHaveBeenCalledTimes(1);
   expect(loadLocalIssues().every((entry) => entry.sessionId === "shared")).toBe(
@@ -370,14 +370,28 @@ it("serializes working-copy assignments through review, including archived unfin
   await expect(startLocalIssue(b.id, async () => {})).resolves.toBeUndefined();
 });
 
-it("never resumes archived members and prevents accidental individual dispatch of a proposed group", async () => {
+it("preserves triage on a move to To Do, starts the group, and never resumes archived members", async () => {
   const a = seed("A");
   const b = seed("B");
-  applyTriagePlan({ plan: planFor([a, b]), snapshot: [a, b] });
-  await expect(moveLocalIssue(a.id, "todo", vi.fn())).rejects.toThrow(
-    "Start group",
-  );
+  const plan = planFor([a, b]);
+  plan.dependencies = [{ issueId: b.id, dependsOn: a.id, reason: "A first" }];
+  applyTriagePlan({ plan, snapshot: [a, b] });
+  const triaged = loadLocalIssues()[1];
+  const launch = vi.fn();
+  await expect(moveLocalIssue(b.id, "todo", launch)).resolves.toBeUndefined();
+  expect(launch).not.toHaveBeenCalled();
+  expect(loadLocalIssues()[1]).toMatchObject({
+    status: "todo",
+    triageGroup: triaged.triageGroup,
+    triageDependencies: [a.id],
+    dependsOn: [a.id],
+  });
+  expect(loadLocalIssues()[0].status).toBe("backlog");
   await startIssueGroup(loadLocalIssues()[0].triageGroup!.id, async (issue) => {
+    expect(issueAssignment(issue).map((entry) => entry.id)).toEqual([
+      a.id,
+      b.id,
+    ]);
     updateIssueAssignment(issue, {
       sessionId: "shared",
       runState: "completed",

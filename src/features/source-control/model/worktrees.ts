@@ -39,6 +39,21 @@ export async function createWorktree(
   return tree;
 }
 
+/** A fresh issue checkout includes the approved commits of its prerequisites. */
+export async function createIssueWorktree(
+  cwd: string,
+  branch: string,
+  commits: string[],
+) {
+  const tree = await invoke<Worktree>("git_issue_worktree_create", {
+    cwd,
+    branch,
+    commits,
+  });
+  notifyGitChanged();
+  return tree;
+}
+
 export async function createOrchestrationWorktree(
   cwd: string,
   branch: string,

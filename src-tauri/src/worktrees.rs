@@ -243,6 +243,58 @@ pub async fn git_worktree_create(
     .map_err(|error| error.to_string())?
 }
 
+fn create_issue(root: &Path, branch: &str, commits: &[String]) -> Result<Worktree, String> {
+    // Resolve commit IDs before creating anything or passing them to merge.
+    let commits: Vec<String> = commits
+        .iter()
+        .map(|commit| {
+            if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err("A prerequisite has an invalid commit ID".into());
+            }
+            git(
+                root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{commit}^{{commit}}"),
+                ],
+            )
+            .map(|sha| sha.trim().to_owned())
+        })
+        .collect::<Result<_, String>>()?;
+    let tree = create(root, branch, "HEAD", false)?;
+    let path = Path::new(&tree.path);
+    for commit in commits {
+        if let Err(error) = git(path, &["merge", "--no-edit", "--no-gpg-sign", &commit]) {
+            let _ = git(path, &["merge", "--abort"]);
+            // This new checkout has never run an agent or received user edits.
+            let _ = remove(root, path, true);
+            let _ = git(root, &["branch", "-D", branch]);
+            return Err(format!(
+                "Could not combine prerequisite commits for this issue group: {error}"
+            ));
+        }
+    }
+    list(root)?
+        .into_iter()
+        .find(|entry| same_path(Path::new(&entry.path), path))
+        .ok_or_else(|| "The issue working copy could not be found".into())
+}
+
+#[tauri::command(async)]
+pub async fn git_issue_worktree_create(
+    cwd: String,
+    branch: String,
+    commits: Vec<String>,
+) -> Result<Worktree, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        create_issue(&expand_home(&cwd), &branch, &commits)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn copy_checkout_state(source: &Path, target: &Path) -> Result<(), String> {
     for file in git_diff_files_for(source).files {
         let relative = resolve_repo_path(source, &file.relative)?;
@@ -813,6 +865,46 @@ mod tests {
         assert_eq!(trees[1].path, "/a\nquoted\"path");
         assert!(trees[1].locked && trees[1].prunable);
         assert!(!trees[1].is_main);
+    }
+
+    #[test]
+    fn issue_worktrees_include_prerequisite_commits_and_leave_the_main_checkout_alone() {
+        let repo = repo();
+        let root = repo.0.join("repo");
+        git(&root, &["config", "user.name", "Test"]).unwrap();
+        git(&root, &["config", "user.email", "test@example.com"]).unwrap();
+        let main_head = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        let mut commits = Vec::new();
+        for name in ["first", "second"] {
+            let tree = create_issue(&root, &format!("mc/{name}"), &[]).unwrap();
+            let path = Path::new(&tree.path);
+            std::fs::write(path.join(name), name).unwrap();
+            git(path, &["add", name]).unwrap();
+            git(path, &["commit", "-m", name]).unwrap();
+            commits.push(git(path, &["rev-parse", "HEAD"]).unwrap().trim().to_owned());
+        }
+        std::fs::write(root.join("user-work"), "keep me").unwrap();
+        git(&root, &["add", "user-work"]).unwrap();
+        let tree = create_issue(&root, "mc/dependent", &commits).unwrap();
+        let path = Path::new(&tree.path);
+        assert_eq!(
+            std::fs::read_to_string(path.join("first")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("second")).unwrap(),
+            "second"
+        );
+        assert!(git(path, &["status", "--porcelain"]).unwrap().is_empty());
+        assert!(!path.join("user-work").exists());
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]).unwrap(), main_head);
+        assert_eq!(
+            git(&root, &["diff", "--cached", "--name-only"])
+                .unwrap()
+                .trim(),
+            "user-work"
+        );
+        assert!(create_issue(&root, "mc/invalid", &["--help".into()]).is_err());
     }
 
     #[test]
