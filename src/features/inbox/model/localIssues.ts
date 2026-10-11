@@ -663,6 +663,62 @@ export function updateLocalIssue(
   return next;
 }
 
+/**
+ * Permanently remove issues, detaching their sub-issues and dependents.
+ * Returns the original records of everything touched, for `restoreLocalIssues`.
+ */
+export function deleteLocalIssues(ids: string[]): LocalIssue[] {
+  const gone = new Set(ids);
+  const issues = loadLocalIssues();
+  if (
+    gone.size !== ids.length ||
+    issues.filter((i) => gone.has(i.id)).length !== gone.size
+  )
+    throw new Error("Some issues no longer exist.");
+  if (issues.some((issue) => gone.has(issue.id) && isIssueRunning(issue)))
+    throw new Error("Stop the issue's thread before deleting it.");
+  const touched: LocalIssue[] = [];
+  const next: LocalIssue[] = [];
+  for (const issue of issues) {
+    if (gone.has(issue.id)) {
+      touched.push(issue);
+      continue;
+    }
+    const stale =
+      (issue.parentIssueId && gone.has(issue.parentIssueId)) ||
+      issue.dependsOn?.some((id) => gone.has(id)) ||
+      issue.triageDependencies?.some((id) => gone.has(id));
+    if (!stale) {
+      next.push(issue);
+      continue;
+    }
+    touched.push(issue);
+    next.push({
+      ...issue,
+      parentIssueId: gone.has(issue.parentIssueId ?? "")
+        ? undefined
+        : issue.parentIssueId,
+      dependsOn: issue.dependsOn?.filter((id) => !gone.has(id)),
+      triageDependencies: issue.triageDependencies?.filter(
+        (id) => !gone.has(id),
+      ),
+    });
+  }
+  validateIssueDependencies(next);
+  save(next);
+  return touched;
+}
+
+/** Undo `deleteLocalIssues`: put the returned records back by id. */
+export function restoreLocalIssues(originals: LocalIssue[]) {
+  const back = new Map(originals.map((issue) => [issue.id, issue]));
+  const issues = loadLocalIssues().map((issue) => back.get(issue.id) ?? issue);
+  const have = new Set(issues.map((issue) => issue.id));
+  const next = [...issues, ...originals.filter((issue) => !have.has(issue.id))];
+  validateIssueDependencies(next);
+  save(next);
+}
+
 const COMMIT_PLAN_PROMPT =
   "List the paths, relative to your working directory, of every file you changed for this issue (including deletions), one per line, inside a ```commit-files fenced block. Put only file paths in that block and close it with ```. After the closing fence, on a separate line outside the block, write `Commit subject: <one-line conventional commit subject>`. Do not commit.";
 export function localIssuePrompt(issue: LocalIssue): string {

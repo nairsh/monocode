@@ -34,6 +34,7 @@ import {
   Plus,
   Search,
   SlidersHorizontal,
+  Trash2,
   X,
 } from "../../../shared/ui/icons";
 import { Popover, type PopoverAnchor } from "../../../shared/ui/Popover";
@@ -72,11 +73,13 @@ import {
   ISSUE_STATUS_LABELS,
   canPeerReview,
   isIssueRunning,
+  deleteLocalIssues,
   issueBlockers,
   loadLocalIssues,
   localIssuePrompt,
   moveLocalIssue,
   peerReviewOf,
+  restoreLocalIssues,
   startLocalIssue,
   startPeerReview,
   subscribeLocalIssues,
@@ -1909,6 +1912,11 @@ export function IssueTracker({
     y: number;
   } | null>(null);
   const [notice, setNotice] = useState("");
+  // Records removed by the last delete, kept so the toast can undo it.
+  const [deleted, setDeleted] = useState<{
+    count: number;
+    records: LocalIssue[];
+  } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const search = useRef<HTMLInputElement>(null);
   const projects = useMemo(
@@ -1964,6 +1972,22 @@ export function IssueTracker({
     const timer = window.setTimeout(() => setNotice(""), 4500);
     return () => clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    if (!deleted) return;
+    const timer = window.setTimeout(() => setDeleted(null), 8000);
+    return () => clearTimeout(timer);
+  }, [deleted]);
+  const removeIssues = (ids: string[]) => {
+    try {
+      const records = deleteLocalIssues(ids);
+      setDeleted({ count: ids.length, records });
+      setChecked([]);
+      setContext(null);
+      setSelectedId((id) => (id && ids.includes(id) ? null : id));
+    } catch (reason) {
+      showError(reason);
+    }
+  };
   // Window listeners outlive renders, so they read the latest closures here.
   const live = useRef({
     key: (_event: KeyboardEvent) => {},
@@ -2220,7 +2244,9 @@ export function IssueTracker({
       setChecked([]);
       return;
     }
-    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const del =
+      event.metaKey && (event.key === "Backspace" || event.key === "Delete");
+    if (!del && (event.metaKey || event.ctrlKey || event.altKey)) return;
     const key = event.key.toLowerCase();
     // `p` arms the priority chord: the next digit (0-4) sets it.
     const chord = Date.now() - prioritySince.current < 1500;
@@ -2270,7 +2296,10 @@ export function IssueTracker({
     if (!current) return;
     // Actions apply to the whole selection when the focused card is part of it.
     const ids = checked.includes(current) ? checked : [current];
-    if (key === "x" || key === " ") {
+    if (del) {
+      event.preventDefault();
+      removeIssues(ids);
+    } else if (key === "x" || key === " ") {
       event.preventDefault();
       anchor.current = current;
       setChecked((previous) =>
@@ -3521,7 +3550,32 @@ export function IssueTracker({
           leaving={detailLeaving}
         />
       ) : null}
-      {notice ? (
+      {deleted ? (
+        <div className="it-toast" role="status">
+          <Trash2 className="it-icon" />
+          Deleted {deleted.count === 1 ? "issue" : `${deleted.count} issues`}
+          <button
+            className="it-toast-action"
+            onClick={() => {
+              try {
+                restoreLocalIssues(deleted.records);
+                setDeleted(null);
+              } catch (reason) {
+                showError(reason);
+              }
+            }}
+          >
+            Undo
+          </button>
+          <button
+            className="it-toast-action"
+            aria-label="Dismiss"
+            onClick={() => setDeleted(null)}
+          >
+            <X className="it-icon" />
+          </button>
+        </div>
+      ) : notice ? (
         <div className="it-toast" role="status">
           <CheckCircle className="it-icon" />
           {notice}
@@ -3667,6 +3721,18 @@ export function IssueTracker({
           >
             <Archive className="it-icon" />
             {view === "archive" ? "Restore issue" : "Archive issue"}
+          </button>
+          <button
+            role="menuitem"
+            disabled={targets.some((id) =>
+              isIssueRunning(issues.find((issue) => issue.id === id) ?? {}),
+            )}
+            onClick={() => removeIssues(targets)}
+          >
+            <Trash2 className="it-icon" />
+            {targets.length > 1
+              ? `Delete ${targets.length} issues`
+              : "Delete issue"}
           </button>
         </Popover>
       ) : null}

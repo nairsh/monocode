@@ -4,6 +4,7 @@ import {
   canPeerReview,
   capReviewText,
   createLocalIssue,
+  deleteLocalIssues,
   hasWorkReview,
   ISSUE_WINDOW_ID,
   issueRunFailurePatch,
@@ -16,6 +17,7 @@ import {
   peerReviewOf,
   peerReviewPrompt,
   recoverLocalIssueRuns,
+  restoreLocalIssues,
   staleIssueRuns,
   startLocalIssue,
   startPeerReview,
@@ -39,6 +41,23 @@ const draft: IssueDraft = {
 
 describe("local issue workflow", () => {
   beforeEach(() => localStorage.clear());
+  it("deletes issues, detaches dependents, and restores them on undo", () => {
+    const a = createLocalIssue(draft);
+    const b = createLocalIssue({ ...draft, parentIssueId: a.id });
+    const c = updateLocalIssue(createLocalIssue(draft).id, {
+      dependsOn: [a.id],
+    });
+    const touched = deleteLocalIssues([a.id]);
+    expect(loadLocalIssues().map((i) => i.id)).toEqual([b.id, c.id]);
+    expect(loadLocalIssues()[0]!.parentIssueId).toBeUndefined();
+    expect(loadLocalIssues()[1]!.dependsOn).toEqual([]);
+    restoreLocalIssues(touched);
+    expect(loadLocalIssues().find((i) => i.id === b.id)!.parentIssueId).toBe(
+      a.id,
+    );
+    expect(loadLocalIssues()).toHaveLength(3);
+    expect(() => deleteLocalIssues(["missing"])).toThrow();
+  });
   it("treats a commit as real only when git HEAD moved, whatever the agent says", () => {
     expect(verifiedIssueCommit("aaa1111", "bbb2222ccc")).toBe(true);
     expect(verifiedIssueCommit(null, "bbb2222ccc")).toBe(true);
