@@ -108,6 +108,15 @@ const IssueMarkdownEditor = lazy(() =>
 );
 const SHOW_EMPTY_KEY = "monocode.issues.showEmpty";
 const HIDDEN_KEY = "monocode.issues.hiddenColumns";
+const CARD_PROPERTIES = [
+  "ID",
+  "Status",
+  "Priority",
+  "Project",
+  "Agent",
+  "Labels",
+  "Created",
+];
 const readSetting = (key: string) => {
   try {
     return localStorage.getItem(key);
@@ -1820,6 +1829,27 @@ export function IssueTracker({
   const [showProperties, setShowProperties] = useState(
     () => readSetting("monocode.issues.properties") !== "0",
   );
+  const [hiddenProperties, setHiddenProperties] = useState(() =>
+    (readSetting("monocode.issues.hiddenProperties") ?? "")
+      .split(",")
+      .filter((value) => CARD_PROPERTIES.includes(value)),
+  );
+  const [showSubIssues, setShowSubIssues] = useState(
+    () => readSetting("monocode.issues.showSubIssues") !== "0",
+  );
+  useEffect(
+    () =>
+      writeSetting(
+        "monocode.issues.hiddenProperties",
+        hiddenProperties.join(","),
+      ),
+    [hiddenProperties],
+  );
+  useEffect(
+    () =>
+      writeSetting("monocode.issues.showSubIssues", showSubIssues ? "1" : "0"),
+    [showSubIssues],
+  );
   const [detailsOpen, setDetailsOpen] = useState(false);
   useEffect(
     () => writeSetting("monocode.issues.grouping", grouping),
@@ -2045,6 +2075,7 @@ export function IssueTracker({
   const visible = issues
     .filter((issue) => {
       if (Boolean(issue.archived) !== (view === "archive")) return false;
+      if (!showSubIssues && issue.parentIssueId) return false;
       if (project && !sameProjectPath(issue.projectPath, project)) return false;
       if (!statuses.includes(issue.status)) return false;
       if (priorityFilter && issue.priority !== Number(priorityFilter))
@@ -2455,7 +2486,7 @@ export function IssueTracker({
             {issue.priority ? ISSUE_PRIORITIES[issue.priority] : "···"}
           </span>
           {issue.projectPath ? (
-            <span className="it-chip">
+            <span className="it-chip it-card-project">
               <Folder className="it-icon" />
               {projectName(issue.projectPath)}
             </span>
@@ -2796,25 +2827,13 @@ export function IssueTracker({
               )}
             </label>
             <>
-              <Choice
-                label="Filter issues"
-                value={filter}
-                options={[
-                  { value: "", label: "All statuses" },
-                  ...STATUS_OPTIONS,
-                ]}
-                onChange={setFilter}
-                className={`it-round-button ${filter ? "is-selected" : ""}`}
-              >
-                <ListFilter className="it-icon" />
-              </Choice>
               <button
                 className="it-round-button"
                 aria-label="Add filter"
                 aria-expanded={!!filterAnchor}
                 onClick={(event) => setFilterAnchor(event.currentTarget)}
               >
-                <Plus className="it-icon" />
+                <ListFilter className="it-icon" />
               </button>
               <button
                 className="it-round-button"
@@ -2851,6 +2870,22 @@ export function IssueTracker({
                   className="issue-surface it-display-menu"
                 >
                   <strong>Filter issues</strong>
+                  <div className="it-option-row">
+                    <span>Status</span>
+                    <Choice
+                      label="Filter status"
+                      value={filter}
+                      options={[
+                        { value: "", label: "All statuses" },
+                        ...STATUS_OPTIONS,
+                      ]}
+                      onChange={setFilter}
+                    >
+                      {filter
+                        ? ISSUE_STATUS_LABELS[filter as IssueStatus]
+                        : "All statuses"}
+                    </Choice>
+                  </div>
                   <div className="it-option-row">
                     <span>Priority</span>
                     <Choice
@@ -3000,6 +3035,38 @@ export function IssueTracker({
                       }
                     />
                   </label>
+                  <div
+                    className="it-property-toggles"
+                    aria-label="Card properties"
+                  >
+                    {CARD_PROPERTIES.map((property) => (
+                      <button
+                        key={property}
+                        aria-pressed={!hiddenProperties.includes(property)}
+                        onClick={() => {
+                          setShowProperties(true);
+                          setHiddenProperties((previous) =>
+                            previous.includes(property)
+                              ? previous.filter((value) => value !== property)
+                              : [...previous, property],
+                          );
+                        }}
+                      >
+                        {property}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="it-option-row">
+                    <span>Show sub-issues</span>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showSubIssues}
+                      onChange={(event) =>
+                        setShowSubIssues(event.target.checked)
+                      }
+                    />
+                  </label>
                   <button
                     className="it-display-reset"
                     onClick={() => {
@@ -3008,6 +3075,8 @@ export function IssueTracker({
                       setShowEmpty(false);
                       setHidden([]);
                       setShowProperties(true);
+                      setHiddenProperties([]);
+                      setShowSubIssues(true);
                     }}
                   >
                     Reset to default
@@ -3029,8 +3098,14 @@ export function IssueTracker({
             </button>
           </div>
         ) : null}
-        {priorityFilter || labelFilter ? (
+        {filter || priorityFilter || labelFilter ? (
           <div className="it-active-filters">
+            {filter ? (
+              <button className="it-chip" onClick={() => setFilter("")}>
+                {ISSUE_STATUS_LABELS[filter as IssueStatus]}
+                <X className="it-icon" />
+              </button>
+            ) : null}
             {priorityFilter ? (
               <button className="it-chip" onClick={() => setPriorityFilter("")}>
                 {ISSUE_PRIORITIES[Number(priorityFilter)]}
@@ -3046,7 +3121,7 @@ export function IssueTracker({
           </div>
         ) : null}
         <div
-          className={`it-board ${layout === "list" ? "it-list" : ""} ${rowGroups.length ? "it-grouped-board" : ""}`}
+          className={`it-board ${layout === "list" ? "it-list" : ""} ${rowGroups.length ? "it-grouped-board" : ""} ${hiddenProperties.map((property) => `it-hide-${property.toLowerCase()}`).join(" ")}`}
         >
           {rowGroups.length ? (
             <div
@@ -3131,7 +3206,7 @@ export function IssueTracker({
             <div className="it-empty">
               <Inbox className="it-empty-icon" />
               <h2>
-                {query || filter
+                {query || filter || priorityFilter || labelFilter
                   ? "No matching issues"
                   : view === "archive"
                     ? "No archived issues"
@@ -3140,7 +3215,7 @@ export function IssueTracker({
                       : "Make room for your next idea"}
               </h2>
               <p>
-                {query || filter
+                {query || filter || priorityFilter || labelFilter
                   ? "Try a different search or filter."
                   : scope === "active"
                     ? "Move an issue from Backlog to To Do to start an agent."
@@ -3158,12 +3233,14 @@ export function IssueTracker({
                   Create issue
                 </button>
               ) : null}
-              {query || filter ? (
+              {query || filter || priorityFilter || labelFilter ? (
                 <button
                   className="it-chip"
                   onClick={() => {
                     setQuery("");
                     setFilter("");
+                    setPriorityFilter("");
+                    setLabelFilter("");
                   }}
                 >
                   Clear filters

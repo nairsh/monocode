@@ -1005,6 +1005,31 @@ it("checks the active sort, remembers it, and collapses sidebar sections", async
   ).toBe(true);
 });
 
+it("applies a nested priority filter and clears the resulting empty state", async () => {
+  seed();
+  await render();
+  act(() => button("Add filter").click());
+  act(() => button("Filter priority").click());
+  const urgent = [
+    ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+  ].find((entry) => entry.textContent?.includes("Urgent"))!;
+  act(() => {
+    urgent.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    urgent.click();
+  });
+  expect(container.textContent).toContain("No matching issues");
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  const clear = [
+    ...container.querySelectorAll<HTMLButtonElement>("button"),
+  ].find((entry) => entry.textContent === "Clear filters")!;
+  act(() => clear.click());
+  expect(container.querySelectorAll(".it-card")).toHaveLength(1);
+});
+
 it("cannot create an issue directly in the agent-owned In Progress status", async () => {
   await render();
   act(() =>
