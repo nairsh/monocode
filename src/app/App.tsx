@@ -1170,6 +1170,20 @@ function Workspace({
     useState<MonoActivitySelection | null>(null);
   const [monoSessions, setMonoSessions] =
     useState<MonoActivitySelection | null>(null);
+  // A launched session shown in the sessions sidebar. It belongs to the list
+  // it was opened from, so reopening or closing that list leaves it.
+  const [monoShownSession, setMonoShownSession] = useState<{
+    from: MonoActivitySelection;
+    sessionId: string;
+  } | null>(null);
+  // Whether the shown session, rather than the Mono's chat, holds focus.
+  const [monoShownSessionFocused, setMonoShownSessionFocused] = useState(false);
+  const shownMonoSessionId =
+    monoViewId && monoSessions && monoShownSession?.from === monoSessions
+      ? monoShownSession.sessionId
+      : undefined;
+  const shownMonoSessionIdRef = useRef(shownMonoSessionId);
+  shownMonoSessionIdRef.current = shownMonoSessionId;
   const onShowMonoActivity = useCallback(
     (sessionId: string, turnId: string, blocks: Block[]) => {
       setMonoDetailsOpen(false);
@@ -1505,6 +1519,8 @@ function Workspace({
   const foregroundSurfaceRef = useRef<{
     workspaceVisible: boolean;
     standaloneSessionId?: string;
+    /** A session shown beside the Mono's chat. */
+    sideSessionId?: string;
   }>({ workspaceVisible: true });
   foregroundSurfaceRef.current = {
     workspaceVisible:
@@ -1516,6 +1532,14 @@ function Workspace({
       ? inboxAskPortal?.sessionId
       : !searchViewOpen && !activeSection && !settingsOpen
         ? (monoViewId ?? undefined)
+        : undefined,
+    sideSessionId:
+      !inboxViewOpen &&
+      !searchViewOpen &&
+      !notesViewOpen &&
+      !automationsViewOpen &&
+      !settingsOpen
+        ? shownMonoSessionId
         : undefined,
   };
   const settingsOpenRef = useRef(settingsOpen);
@@ -1607,6 +1631,7 @@ function Workspace({
           // Standalone conversations live outside the workspace tab tree.
           return (
             foregroundSurfaceRef.current.standaloneSessionId === sessionId ||
+            foregroundSurfaceRef.current.sideSessionId === sessionId ||
             (foregroundSurfaceRef.current.workspaceVisible &&
               !!tab &&
               (leafIds(tab.layout).includes(sessionId) ||
@@ -2085,7 +2110,9 @@ function Workspace({
 
   const activeSessionId = inboxViewOpen
     ? inboxAskPortal?.sessionId
-    : (monoViewSession?.id ?? active?.id);
+    : shownMonoSessionId && monoShownSessionFocused
+      ? shownMonoSessionId
+      : (monoViewSession?.id ?? active?.id);
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
@@ -2212,6 +2239,7 @@ function Workspace({
     monoViewId,
     inboxViewOpen,
     inboxAskPortal?.sessionId,
+    shownMonoSessionId,
     searchViewOpen,
     activeSection,
     settingsOpen,
@@ -4047,6 +4075,13 @@ function Workspace({
   const onFocusPane = useCallback(
     (paneId: string) => {
       if (paneId === monoViewIdRef.current) {
+        setMonoShownSessionFocused(false);
+        setProjectTerminalFocused(false);
+        setComposerFocused(true);
+        return;
+      }
+      if (paneId === shownMonoSessionIdRef.current) {
+        setMonoShownSessionFocused(true);
         setProjectTerminalFocused(false);
         setComposerFocused(true);
         return;
@@ -4861,6 +4896,20 @@ function Workspace({
       await onSelectHistorySession(sessionId);
     },
     [ensureOpenSession, closeMonoView, setSidebarTab, onSelectHistorySession],
+  );
+
+  // Show a launched session in the Mono's sidebar, where it can be followed,
+  // answered or stopped without leaving the chat.
+  const onShowMonoLaunchedSession = useCallback(
+    async (from: MonoActivitySelection, sessionId: string) => {
+      const session = await ensureOpenSession(sessionId);
+      if (!session) throw new Error("This session is no longer available.");
+      setMonoShownSession({ from, sessionId });
+      setMonoShownSessionFocused(true);
+      setProjectTerminalFocused(false);
+      setComposerFocused(true);
+    },
+    [ensureOpenSession],
   );
 
   const openReminderSession = useCallback(
@@ -8729,6 +8778,7 @@ function Workspace({
       deliveryId: string,
       placement?: AppSessionPlacement,
       onSettled?: (outcome: ControlOutcome) => void,
+      openTab?: boolean,
     ) =>
       acceptQuickLaunch(
         launch,
@@ -8796,6 +8846,7 @@ function Workspace({
             flushSync(() => onSaveDraft(id, prompt, attachments, requestId)),
         },
         placement,
+        openTab,
       ),
     [appendTab, submitSession, onSaveDraft],
   );
@@ -10949,11 +11000,14 @@ function Workspace({
                   )
                 : undefined;
               try {
+                // A Mono's sessions open from its chat, not as workspace
+                // tabs, unless it places one beside an open pane.
                 await launchQuickSessionRef.current(
                   launch,
                   id,
                   placement,
                   onSettled,
+                  !isMonoSession(source.id) || !!placement,
                 );
                 rememberLaunch();
                 onSettled?.accept();
@@ -12600,6 +12654,11 @@ function Workspace({
         windowControls={monoCovers && !IS_MAC ? <WindowControls /> : undefined}
       />
     ) : null;
+  const monoShownSessionPane = shownMonoSessionId
+    ? sessions.find((session) => session.id === shownMonoSessionId)
+    : undefined;
+  const monoShownSessionActive =
+    !!monoShownSessionPane && monoShownSessionFocused;
   const monoSessionsPanel =
     monoViewMono && selectedMonoSessions ? (
       <MonoSessionsPanel
@@ -12608,7 +12667,46 @@ function Workspace({
         launches={monoSpawnedSessions(selectedMonoSessions.blocks)}
         sessions={sessions}
         history={history}
-        onOpenSession={onOpenMonoLaunchedSession}
+        onOpenSession={(sessionId) =>
+          monoSessions
+            ? onShowMonoLaunchedSession(monoSessions, sessionId)
+            : undefined
+        }
+        shown={
+          monoShownSessionPane
+            ? {
+                sessionId: monoShownSessionPane.id,
+                title: sessionDisplayTitle(
+                  monoShownSessionPane.title,
+                  monoShownSessionPane.harness,
+                ),
+                pane: (
+                  <SessionPane
+                    {...sessionPaneProps}
+                    session={monoShownSessionPane}
+                    // The Mono view covers the workspace, so a review opens
+                    // beside the chat rather than in a hidden tab.
+                    onOpenDiff={onOpenMonoDiff}
+                    visible={monoCovers}
+                    focused={monoShownSessionActive && !projectTerminalFocused}
+                    inSplit={false}
+                    addToChatTarget={false}
+                    composerFocused={
+                      monoShownSessionActive &&
+                      composerFocused &&
+                      !projectTerminalFocused
+                    }
+                    composerFocusToken={composerFocusToken}
+                  />
+                ),
+              }
+            : undefined
+        }
+        onBack={() => {
+          setMonoShownSession(null);
+          setMonoShownSessionFocused(false);
+        }}
+        onOpenInWorkspace={onOpenMonoLaunchedSession}
         onClose={() => setMonoSessions(null)}
         windowControls={monoCovers && !IS_MAC ? <WindowControls /> : undefined}
       />
@@ -13106,14 +13204,17 @@ function Workspace({
                                       session={session}
                                       visible={visible}
                                       focused={
-                                        visible && !projectTerminalFocused
+                                        visible &&
+                                        !projectTerminalFocused &&
+                                        !monoShownSessionActive
                                       }
                                       inSplit={false}
                                       addToChatTarget={visible}
                                       composerFocused={
                                         visible &&
                                         composerFocused &&
-                                        !projectTerminalFocused
+                                        !projectTerminalFocused &&
+                                        !monoShownSessionActive
                                       }
                                       composerFocusToken={composerFocusToken}
                                       onShowMonoActivity={onShowMonoActivity}
