@@ -176,7 +176,7 @@ it("resets once after confirmation", async () => {
 
 it("lets the user choose every permission mode and reflects the saved choice", async () => {
   await render("auto");
-  expect(trigger().textContent).toBe("Auto");
+  expect(trigger().textContent).toBe("Approve for me");
 
   for (const mode of RUNTIME_MODES) {
     act(() => trigger().click());

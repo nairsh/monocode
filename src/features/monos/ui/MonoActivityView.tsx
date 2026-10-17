@@ -1,11 +1,17 @@
 import type { ComponentProps } from "react";
 import { workSummaryLine } from "../../sessions/model/transcriptActivity";
 import { MonoActivityTrail } from "../../sessions/ui/AgentTranscript";
+import { useSessionDetail } from "../../../app/model/sessionPublication";
+import { resolveMonoActivity, type MonoActivitySelection } from "../model/monoActivity";
+import type { Session } from "../../sessions/model/session";
 
 /** A selected turn's trail, in the order it happened. */
 export function MonoActivityView(
-  trail: ComponentProps<typeof MonoActivityTrail>,
+  { session, selection, ...trail }: ComponentProps<typeof MonoActivityTrail> & { session?: Session; selection?: MonoActivitySelection | null },
 ) {
+  const detail = useSessionDetail(session, true);
+  const current = selection ? resolveMonoActivity(selection, detail) : null;
+  if (current) trail = { ...trail, blocks: current.blocks, live: current.live };
   // A settled turn sums up its work; a live one's steps speak for themselves.
   const summary = trail.live ? "" : workSummaryLine(trail.blocks);
   return (

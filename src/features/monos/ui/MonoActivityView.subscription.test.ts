@@ -2,7 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-import { MonoActivityPanel } from "./MonoActivityPanel";
+import { MonoActivityView } from "./MonoActivityView";
 import { SessionDetailContext, SessionPublication } from "../../../app/model/sessionPublication";
 import { newSession, type Session } from "../../sessions/model/session";
 vi.mock("../../sessions/ui/AgentTranscript", () => ({
@@ -17,9 +17,9 @@ it("keeps selected Mono activity current without root text publication", () => {
   const host = document.createElement("div"); document.body.append(host);
   const root = createRoot(host);
   try {
-    act(() => root.render(createElement(SessionDetailContext.Provider, { value: store }, createElement(MonoActivityPanel, {
-      agent: { name: "Mono", mascot: "cat", color: "#abc" }, blocks: session.blocks, live: true,
-      session, selection: { sessionId: "mono", turnId: "user", blocks: session.blocks }, onClose: () => {},
+    act(() => root.render(createElement(SessionDetailContext.Provider, { value: store }, createElement(MonoActivityView, {
+      blocks: session.blocks, live: true,
+      session, selection: { sessionId: "mono", turnId: "user", blocks: session.blocks },
     }))));
     act(() => store.replace([{ ...session, blocks: [session.blocks[0], { ...session.blocks[1], text: "latest reasoning" }] }]));
     expect(host.textContent).toContain("latest reasoning");

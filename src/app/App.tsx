@@ -12730,6 +12730,8 @@ function Workspace({
     monoViewSession && selectedMonoActivity ? (
       <MonoActivityView
         key={selectedMonoActivity.turnId}
+        session={monoViewSession}
+        selection={monoActivity}
         blocks={selectedMonoActivity.blocks}
         live={selectedMonoActivity.live}
         cwd={sessionWorkCwd(monoViewSession)}

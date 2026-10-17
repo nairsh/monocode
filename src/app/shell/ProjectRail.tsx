@@ -1120,8 +1120,8 @@ function ProjectCard({
           aria-current={headerSelected ? "true" : undefined}
           className={`flex min-w-0 flex-1 cursor-default items-center gap-2 text-left transition-[padding] duration-150 motion-reduce:transition-none ${
             threads
-              ? "group-hover:pr-12 group-has-[:focus-visible]:pr-12"
-              : "group-hover:pr-6 group-has-[:focus-visible]:pr-6"
+              ? "group-hover:pr-12 group-has-[button:focus-visible]:pr-12"
+              : "group-hover:pr-6 group-has-[button:focus-visible]:pr-6"
           }`}
         >
           <div className="project-card-logo grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
@@ -1148,7 +1148,7 @@ function ProjectCard({
             </span>
           ) : null}
           {hasChanges ? (
-            <span className="project-card-stats shrink-0 group-hover:hidden group-has-[:focus-visible]:hidden">
+            <span className="project-card-stats shrink-0 group-hover:hidden group-has-[button:focus-visible]:hidden">
               <ProjectDiffStat additions={additions} deletions={deletions} />
             </span>
           ) : null}
@@ -1194,7 +1194,7 @@ function ProjectCard({
               event.detail === 0 ? rect.bottom : event.clientY,
             );
           }}
-          className={`absolute top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[:focus-visible]:grid ${
+          className={`absolute top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[button:focus-visible]:grid ${
             threads ? "right-7" : "right-1"
           }`}
         >
@@ -1211,7 +1211,7 @@ function ProjectCard({
               event.stopPropagation();
               threads.onNew(item.path);
             }}
-            className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[:focus-visible]:grid"
+            className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid group-has-[button:focus-visible]:grid"
           >
             <Plus className="size-3.5" strokeWidth={1.75} />
           </button>

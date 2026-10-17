@@ -183,10 +183,9 @@ it("keeps the same input, current draft and attachments when a question appears 
   )![1];
   act(() => {
     input.value = "Fresh draft";
-    inputProps.onInput({ currentTarget: input });
+    inputProps.onChange({ target: input });
   });
-  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Add files or choose a mode"]')!.click());
-  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Upload file"))!.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Attach files"]')!.click());
   const questioned = {
     ...pane,
     session: {
@@ -217,7 +216,7 @@ it("keeps the same input, current draft and attachments when a question appears 
   );
   expect(pane.onSubmit).toHaveBeenCalledWith("chat", "Fresh draft", [
     expect.objectContaining({ id: "file" }),
-  ], expect.objectContaining({ intent: "default" }));
+  ]);
 });
 
 it("routes transcript quotes to the Mono draft", () => {
