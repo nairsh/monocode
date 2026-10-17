@@ -1,4 +1,6 @@
 import { NO_BRANCH_LABEL } from "../../features/source-control/model/worktrees";
+import { projectName } from "../../shared/lib/paths";
+import { sessionOrigin, subscribeSessionOrigins } from "../../features/sessions/model/sessionOrigin";
 import {
   type WorktreeFocus,
   inWorktreeFocus,
@@ -24,6 +26,7 @@ import {
   GitPullRequest,
   Inbox,
   ListFilter,
+  MoreHorizontal,
   PanelLeft,
   Pin,
   Plus,
@@ -3469,6 +3472,7 @@ export const SessionCard = memo(function SessionCard({
   dropTarget,
   compact = false,
   modelInFooter = false,
+  spawnedBy,
   statusLabel,
   project,
   now,
@@ -3499,6 +3503,7 @@ export const SessionCard = memo(function SessionCard({
   statusLabel?: string;
   /** Names its project before the branch, where sessions span several. */
   project?: string;
+  spawnedBy?: string;
   now: number;
   onSelect: (
     sessionId: string,
@@ -3518,6 +3523,8 @@ export const SessionCard = memo(function SessionCard({
   onDelete?: (sessionId: string) => void;
 }) {
   const skipClickUntil = useRef(0);
+  const origin = useSyncExternalStore(subscribeSessionOrigins, () => sessionOrigin(session.id));
+  const attribution = spawnedBy ?? origin?.name;
   const prefetchTimer = useRef<number | null>(null);
   const orchestrationTooltipRootRef = useRef<HTMLDivElement>(null);
   const orchestrationTooltipId = useId();
@@ -3536,7 +3543,8 @@ export const SessionCard = memo(function SessionCard({
     ? NO_BRANCH_LABEL
     : formatGitLabel(session.repo, session.branch);
   const time = formatRelative(session.updatedAt, now);
-  const headerRow = !(compact && !orchestrationExpanded) && !modelInFooter;
+  const headerRow = !!orchestrationExpanded && !modelInFooter;
+  const repoLabel = project || session.repo || projectName(session.cwd);
   const model =
     compact && !orchestrationExpanded
       ? null
@@ -3812,7 +3820,7 @@ export const SessionCard = memo(function SessionCard({
             : isSelected
               ? `bg-accent/15 text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
               : needsApproval
-                ? "bg-content/20 text-content border-content/30 border-dashed"
+                ? "bg-content/5 text-content border-content/10"
                 : isActive
                   ? `bg-selection text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
                   : draft
@@ -3875,7 +3883,7 @@ export const SessionCard = memo(function SessionCard({
             ) : null}
             <ParticleText
               text={title}
-              className="line-clamp-1 text-[13px] font-semibold leading-snug text-content"
+              className="line-clamp-1 text-[13px] font-medium leading-snug text-content"
             />
             {headerRow ? null : (
               <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-2">
@@ -3892,13 +3900,13 @@ export const SessionCard = memo(function SessionCard({
           />
         ) : null}
         <span className="relative mt-1 flex items-center gap-2">
-          {project && !gitLabel ? (
+          {repoLabel && !gitLabel ? (
             <span
               className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45"
               title={session.cwd}
             >
               <Folder className="size-3 shrink-0" strokeWidth={1.75} />
-              <span className="min-w-0 truncate">{project}</span>
+              <span className="min-w-0 truncate">{repoLabel}</span>
             </span>
           ) : gitLabel ? (
             <span
@@ -3911,7 +3919,7 @@ export const SessionCard = memo(function SessionCard({
             >
               <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
               <span className="min-w-0 truncate">
-                {project ? `${project} · ${gitLabel}` : gitLabel}
+                {`${repoLabel} · ${session.worktreeRemoved ? NO_BRANCH_LABEL : session.branch || gitLabel}`}
               </span>
             </span>
           ) : (
@@ -3920,7 +3928,7 @@ export const SessionCard = memo(function SessionCard({
           <span className="relative flex shrink-0 items-center gap-px">
             {/* Just the provider's mark; the model's name slides out beside
                 it while the card is hovered or focused. */}
-            {modelInFooter && model ? (
+            {(modelInFooter || !headerRow) && model ? (
               <span
                 title={model}
                 className="flex min-w-0 items-center text-[11px] text-content/50"
@@ -3934,6 +3942,7 @@ export const SessionCard = memo(function SessionCard({
                 />
               </span>
             ) : null}
+            {onContextMenu ? <button type="button" data-no-drag aria-label={`Options for ${title}`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); onContextMenu(session.id, { ...event, clientX: rect.right, clientY: rect.bottom, preventDefault: () => event.preventDefault(), stopPropagation: () => event.stopPropagation() } as unknown as ReactMouseEvent<HTMLDivElement>); }} className="grid size-5 place-items-center rounded text-content/45 opacity-0 hover:bg-content/10 group-hover:opacity-100 group-focus-within:opacity-100"><MoreHorizontal className="size-3.5" /></button> : null}
             {onArchive ? (
               <button
                 type="button"
@@ -3999,6 +4008,7 @@ export const SessionCard = memo(function SessionCard({
             ) : null}
           </span>
         </span>
+        {attribution ? <span className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-content/40" title={`Started by ${attribution}`}><Share className="size-2.5 shrink-0" aria-hidden="true" /><span className="truncate">{attribution}</span></span> : null}
       </div>
       {orchestration && orchestrationTooltipOpen ? (
         <Popover

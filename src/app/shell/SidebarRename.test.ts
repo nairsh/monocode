@@ -1170,7 +1170,7 @@ describe("sidebar orchestration card", () => {
       ).toBe("true");
       props.approvalSessionIds = new Set([lead.id]);
       act(() => render());
-      expect(card().className).toContain("border-dashed");
+      expect(card().className).toContain("border-content/10");
       expect(card().textContent).toContain("Needs input");
     },
   );
@@ -2136,5 +2136,5 @@ it("labels preserved sessions as having no branch selected", () => {
   ];
   act(render);
   expect(card().textContent).not.toContain("No branch selected");
-  expect(card().textContent).toContain("project/main");
+  expect(card().textContent).toContain("project · main");
 });
