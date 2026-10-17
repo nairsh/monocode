@@ -74,6 +74,7 @@ import type { LaunchedSessionView } from "../../monos/model/monoSpawnedSessions"
 import { ModelControlPills, ModelPicker } from "./ModelPicker";
 import { ContextMeter } from "./ContextMeter";
 import { UsageChips } from "../../../app/shell/UsageFooter";
+import { QuestionForm } from "./QuestionForm";
 import type { RateLimitProvider } from "../../providers/model/rateLimits";
 import { MonoUsageLimitNotice } from "../../monos/ui/MonoUsageLimitNotice";
 import {
@@ -1182,6 +1183,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     onResume={() => onResumeQueue(session.id)}
                     variant="messages"
                   />
+                  {session.pendingQuestion ? <QuestionForm prompt={session.pendingQuestion} onReply={replyQuestion} onInteraction={id => onQuestionInteraction?.(session.id, id)} /> : null}
                   {session.usageLimit ? (
                     <MonoUsageLimitNotice
                       session={session}
@@ -1278,8 +1280,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     }
                   />
                 </>
-              ) : null}
-              {composer}
+              ) : composer}
             </div>
           ) : null}
           <BtwSheet

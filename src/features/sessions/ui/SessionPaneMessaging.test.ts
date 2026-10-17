@@ -178,6 +178,7 @@ it("keeps the same input, current draft and attachments when a question appears 
   pane.onSubmit = vi.fn();
   render(pane);
   const input = field();
+  expect(container.querySelectorAll('[aria-label="Message Captain"]')).toHaveLength(1);
   const inputProps = Object.entries(input).find(([key]) =>
     key.startsWith("__reactProps"),
   )![1];
