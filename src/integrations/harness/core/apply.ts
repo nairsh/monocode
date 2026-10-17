@@ -17,6 +17,7 @@ import {
   stubFilePreview,
 } from "./preview";
 import { joinStreamText } from "./streamText";
+import { hasReadableText } from "../../../features/sessions/model/transcriptActivity";
 import { taskListText } from "../../../features/sessions/model/taskList";
 import { isReviewablePlan } from "../../../features/sessions/model/plan";
 import { resolveModel } from "../../../features/sessions/model/models";
@@ -534,7 +535,12 @@ export function stopStreaming(session: Session, endedAt = Date.now()): Session {
     busy: false,
     turnReady: false,
     pendingQuestion: undefined,
-    blocks: stampTurnDuration(settled.blocks.map(stopBlockProgress), endedAt),
+    blocks: stampTurnDuration(
+      settled.blocks
+        .filter((block) => !isBareProseStream(block))
+        .map(stopBlockProgress),
+      endedAt,
+    ),
   };
 }
 
@@ -1235,8 +1241,17 @@ function sealLastStream(blocks: Block[]): Block[] {
     return blocks.slice();
   }
   const next = blocks.slice();
-  next[index] = { ...last, streaming: false };
+  if (isBareProseStream(last)) next.splice(index, 1);
+  else next[index] = { ...last, streaming: false };
   return next;
+}
+
+function isBareProseStream(block: Block): boolean {
+  return (
+    block.role === "assistant" &&
+    !!block.streaming &&
+    !hasReadableText(block.text)
+  );
 }
 
 function displayLabel(
@@ -1341,10 +1356,9 @@ function isCallId(value: string): boolean {
 function finishRole(session: Session, role: Block["role"]): Session {
   return {
     ...session,
-    blocks: session.blocks.map((block) =>
-      block.role === role && block.streaming
-        ? { ...block, streaming: false }
-        : block,
-    ),
+    blocks: session.blocks.flatMap((block) => {
+      if (block.role !== role || !block.streaming) return [block];
+      return isBareProseStream(block) ? [] : [{ ...block, streaming: false }];
+    }),
   };
 }

@@ -32,11 +32,13 @@ function Harness({
   enabled = true,
   busy = true,
   historicalBlockIds,
+  smoothReveals = false,
 }: {
   blocks: Block[];
   enabled?: boolean;
   busy?: boolean;
   historicalBlockIds?: ReadonlySet<string>;
+  smoothReveals?: boolean;
 }) {
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   useBottomChatMotion(
@@ -47,6 +49,9 @@ function Harness({
     false,
     busy,
     historicalBlockIds,
+    true,
+    undefined,
+    smoothReveals,
   );
   return createElement(
     "div",
@@ -88,10 +93,17 @@ function render(
   enabled = true,
   busy = true,
   historicalBlockIds?: ReadonlySet<string>,
+  smoothReveals = false,
 ) {
   act(() =>
     root.render(
-      createElement(Harness, { blocks, enabled, busy, historicalBlockIds }),
+      createElement(Harness, {
+        blocks,
+        enabled,
+        busy,
+        historicalBlockIds,
+        smoothReveals,
+      }),
     ),
   );
 }
@@ -194,6 +206,44 @@ afterEach(() => {
 });
 
 describe("bottom chat motion", () => {
+  it("glides through a whole Mono reply without skipping most of its height", () => {
+    const blocks: Block[] = [{ id: "user", role: "user", text: "Hello" }];
+    render(blocks, true, true, undefined, true);
+    const view = viewport();
+    scrollHeight += 940;
+    render(blocks, true, false, undefined, true);
+    expect(offset(view.content)).toBe(940);
+
+    // An answer landing in one commit must not be treated as a fast stream.
+    for (let frame = 0; frame < 12; frame++) advance(1000 / 60);
+    expect(offset(view.content)).toBeGreaterThan(600);
+    expect(offset(view.content)).toBeLessThan(940);
+    for (let frame = 0; frame < 120; frame++) advance(1000 / 60);
+    expect(view.content.style.transform).toBe("");
+    expect(top).toBe(940);
+  });
+
+  it("hands off a large Mono reveal at its visible position when scrolling up", () => {
+    scrollHeight = 1000;
+    const blocks: Block[] = [{ id: "user", role: "user", text: "Hello" }];
+    render(blocks, true, true, undefined, true);
+    const view = viewport();
+    scrollHeight += 940;
+    render(blocks, true, false, undefined, true);
+    advance(40);
+    const visibleTop = top - offset(view.content);
+    act(() =>
+      view.scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 })),
+    );
+    expect(top).toBeCloseTo(visibleTop);
+    expect(following.current).toBe(false);
+    expect(view.content.style.transform).toBe("");
+    scrollHeight += 100;
+    view.resize();
+    expect(top).toBeCloseTo(visibleTop);
+    expect(frames.size).toBe(0);
+  });
+
   it.each(["short", "scrolling"])(
     "eases growing %s conversations upward",
     (length) => {

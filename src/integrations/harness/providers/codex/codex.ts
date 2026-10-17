@@ -19,6 +19,7 @@ import {
   watchChild,
 } from "../../core/child";
 import {
+  addCodexTurnUsage,
   asRecord,
   buildThreadStartParams,
   buildTurnStartParams,
@@ -32,6 +33,7 @@ import {
   stringField,
   toCodexApprovalDecision,
   type CodexApprovalKind,
+  type CodexTurnUsage,
 } from "./codexProtocol";
 import { JsonRpcClient, type JsonRpcId } from "../../core/jsonRpc";
 import {
@@ -135,6 +137,7 @@ type Live = {
   rateLimits: Map<string, Record<string, unknown>>;
   /** The active turn failed on a spent usage limit. */
   usageLimited: boolean;
+  turnUsage: CodexTurnUsage;
 };
 
 function trackNotificationQueue(live: Live, queued: Promise<void>): void {
@@ -891,6 +894,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       openAgentRows: new Map(),
       rateLimits: new Map(),
       usageLimited: false,
+      turnUsage: { turn: {} },
     };
     liveRef.current = live;
     liveByThread.set(input.sessionId, live);
@@ -939,6 +943,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   live.emittedReasoningByItem.clear();
   live.emittedGeneratedImages.clear();
   live.emittedAsyncQuestions.clear();
+  live.turnUsage.turn = {};
   live.turnGeneration += 1;
 
   const turnPromise = new Promise<void>((resolve, reject) => {
@@ -979,6 +984,7 @@ async function runCompaction(live: Live): Promise<void> {
   live.emittedAssistantByItem.clear();
   live.emittedReasoningByItem.clear();
   live.emittedGeneratedImages.clear();
+  live.turnUsage.turn = {};
   const turnPromise = new Promise<void>((resolve, reject) => {
     live.turnDone = resolve;
     live.turnFailed = reject;
@@ -1089,6 +1095,15 @@ function handleNotification(
       continue;
     }
     live.onEvent(event);
+  }
+  // A resumed thread can replay an earlier turn's reading; count only this turn's.
+  const usageTurnId = stringField(rec, "turnId");
+  if (
+    method === "thread/tokenUsage/updated" &&
+    (!usageTurnId || usageTurnId === live.activeTurnId)
+  ) {
+    const metrics = addCodexTurnUsage(live.turnUsage, params);
+    if (metrics) live.onEvent({ type: "turn.metrics", ...metrics });
   }
   if (method === "item/completed") showCodexAsyncQuestion(live, rec);
   // Metadata and steps can arrive before the spawn. Create its row first.

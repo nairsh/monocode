@@ -29,6 +29,8 @@ const SPRING_MAX_LEAD_PX = 32;
 const SPRING_SETTLE_GRACE_MS = 500;
 /** Longest stretch of time one growth sample is spread over. */
 const SPRING_MAX_SAMPLE_FRAMES = 60;
+/** Mono replies can appear together; keep their glide below 1080px/second. */
+const CHAT_FOLLOW_MAX_SPEED = 18;
 
 export type FollowSpring = { velocity: number; growth: number };
 
@@ -47,10 +49,14 @@ export function stepFollowSpring(
   grew: number,
   frames: number,
   sampleFrames = frames,
+  maxSpeed = Infinity,
 ): number {
   if (grew < -1) spring.growth = 0;
   else {
-    const observed = Math.max(0, grew) / Math.max(0.25, sampleFrames);
+    const observed = Math.min(
+      maxSpeed,
+      Math.max(0, grew) / Math.max(0.25, sampleFrames),
+    );
     spring.growth += SPRING_GROWTH_EMA * (observed - spring.growth);
   }
   const lead = Math.min(spring.growth * 9, SPRING_MAX_LEAD_PX);
@@ -63,6 +69,7 @@ export function stepFollowSpring(
       h *
       ((SPRING_DAMPING * velocity + SPRING_STIFFNESS * diff) / SPRING_MASS -
         velocity);
+    velocity = Math.min(velocity, maxSpeed - spring.growth);
     offset = Math.max(0, offset - (velocity + spring.growth) * h);
   }
   spring.velocity = velocity;
@@ -99,6 +106,8 @@ export function useBottomChatMotion(
    * off the main thread; pinning would snap it back to the end.
    */
   holdUntil?: RefObject<number>,
+  /** Preserve the full movement and bound its speed for whole Mono replies. */
+  smoothReveals = false,
 ) {
   const latest = useRef({
     blocks,
@@ -209,6 +218,7 @@ export function useBottomChatMotion(
             SPRING_MAX_SAMPLE_FRAMES,
             Math.max(0, now - lastStep) / SPRING_FRAME_MS,
           ),
+          smoothReveals ? CHAT_FOLLOW_MAX_SPEED : Infinity,
         );
       } else {
         offset *= Math.exp(-elapsed / FOLLOW_TIME_MS);
@@ -283,7 +293,12 @@ export function useBottomChatMotion(
           reset();
         } else {
           const limit = Math.max(0, height * 0.75);
-          offset = Math.max(-limit, Math.min(limit, offset + shift));
+          // Capping a whole reply's offset skips the rest of its movement
+          // immediately. Mono keeps that distance in the bounded glide.
+          offset = Math.max(
+            -limit,
+            smoothReveals ? offset + shift : Math.min(limit, offset + shift),
+          );
           grown += shift;
           if (Math.abs(offset) >= SETTLED_PX) {
             content.style.transform = `translateY(${offset}px)`;
@@ -383,7 +398,7 @@ export function useBottomChatMotion(
       reducedMotion?.removeEventListener?.("change", stop);
       stop();
     };
-  }, [scroller, enabled, stickToBottom, holdUntil]);
+  }, [scroller, enabled, stickToBottom, holdUntil, smoothReveals]);
 
   // Run after the transcript's pin/restore effects, before this commit paints.
   useLayoutEffect(() => update.current?.());

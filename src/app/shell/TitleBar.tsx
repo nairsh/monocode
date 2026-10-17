@@ -110,8 +110,11 @@ type Props = {
    * project-scoped belongs beside it.
    */
   mono?: { look: MonoLook; state: MonoState };
-  onShowMonoDetails?: () => void;
-  /** The full-height Mono details panel owns these while it is open. */
+  /** Shows or hides the Mono's overview panel beside its chat. */
+  onToggleMonoOverview?: () => void;
+  monoOverviewOpen?: boolean;
+  onOpenMonoSettings?: () => void;
+  /** The full-height Mono panel owns these while it is open. */
   hideWindowControls?: boolean;
   projectRailOpen?: boolean;
   sessionSidebarOpen?: boolean;
@@ -133,6 +136,8 @@ type Props = {
   onOpenNotes?: () => void;
   onClose: (id: string) => void;
   onCloseMany: (ids: string[], fallbackId: string) => void;
+  /** Closes the given tabs, keeping the active one as a blank session. */
+  onCloseAll?: (ids: string[]) => void;
   onArchiveTab?: (id: string) => void;
   onDeleteTab?: (id: string) => void;
   onReorder: (ids: string[], movedId?: string) => void;
@@ -210,6 +215,11 @@ export function tabStripOverflow(
 
 export function titleTabClosable(tab: Tab, tabCount: number): boolean {
   return tabCount > 1 || !tab.blank;
+}
+
+/** Close All has work unless the only tab left is already blank. */
+export function titleTabsCanCloseAll(tabs: readonly Tab[]): boolean {
+  return tabs.some((tab) => titleTabClosable(tab, tabs.length));
 }
 
 export type TitleTabContextAction = "others" | "right" | "left";
@@ -532,7 +542,7 @@ export function IconButton({
             }
           : undefined
       }
-      className={`grid size-6.5 place-items-center rounded-md ${
+      className={`grid size-6 place-items-center rounded-md ${
         disabled
           ? "text-content/25"
           : accent
@@ -647,7 +657,9 @@ function TitleBarComponent({
   activeId,
   cwd,
   mono,
-  onShowMonoDetails,
+  onToggleMonoOverview,
+  monoOverviewOpen = false,
+  onOpenMonoSettings,
   hideWindowControls = false,
   projectRailOpen = true,
   sessionSidebarOpen = true,
@@ -668,6 +680,7 @@ function TitleBarComponent({
   onOpenNotes,
   onClose,
   onCloseMany,
+  onCloseAll,
   onArchiveTab,
   onDeleteTab,
   onReorder,
@@ -878,6 +891,17 @@ function TitleBarComponent({
           label: "Close Tabs to the Left",
           disabled: contextCloseIds?.left.length === 0,
         },
+        ...(onCloseAll
+          ? [
+              {
+                kind: "item" as const,
+                id: "all",
+                label: "Close All Tabs",
+                shortcut: `${MOD}${SHIFT}W`,
+                disabled: !titleTabsCanCloseAll(tabs),
+              },
+            ]
+          : []),
         ...(contextTab.sessionCount > 0 && (onArchiveTab || onDeleteTab)
           ? [
               { kind: "sep" as const },
@@ -928,6 +952,10 @@ function TitleBarComponent({
       onDeleteTab?.(contextTab.id);
       return;
     }
+    if (id === "all") {
+      onCloseAll?.(tabIds);
+      return;
+    }
     if (id === "others" || id === "right" || id === "left") {
       onCloseMany(contextCloseIds[id], contextTab.id);
     }
@@ -952,25 +980,38 @@ function TitleBarComponent({
     Boolean(onOpenInbox || onOpenNotes || onOpenSettings);
   const trailingControls =
     showTrailingActions ||
-    (mono && onShowMonoDetails) ||
     sidebarOnRight ||
+    (mono && (onToggleMonoOverview || onOpenMonoSettings)) ||
     (!IS_MAC && !hideWindowControls) ? (
       <div className="ml-auto flex h-full shrink-0 items-stretch">
-        {sidebarOnRight ? (
-          <div className="flex items-center px-1.5">
-            <IconButton
-              label={`Toggle Session Sidebar (${MOD}${SHIFT}B)`}
-              onClick={onToggleSessionSidebar}
-            >
-              <PanelRightToggle className="size-3.5" strokeWidth={1.75} />
-            </IconButton>
-          </div>
-        ) : null}
-        {mono && onShowMonoDetails ? (
-          <div className="flex items-center px-3">
-            <IconButton label="Show Mono details" onClick={onShowMonoDetails}>
-              <PanelRightToggle className="size-3.5" strokeWidth={1.75} />
-            </IconButton>
+        {sidebarOnRight ? <div className="flex items-center px-1.5"><IconButton label={`Toggle Session Sidebar (${MOD}${SHIFT}B)`} onClick={onToggleSessionSidebar}><PanelRightToggle className="size-3.5" strokeWidth={1.75} /></IconButton></div> : null}
+        {mono && (onToggleMonoOverview || onOpenMonoSettings) ? (
+          <div className="flex items-center gap-1 px-3">
+            {onToggleMonoOverview ? (
+              <button
+                type="button"
+                aria-pressed={monoOverviewOpen}
+                title={monoOverviewOpen ? "Hide overview" : "Show overview"}
+                data-tauri-drag-region="false"
+                onClick={onToggleMonoOverview}
+                className={`flex h-6 items-center gap-1.5 rounded-md px-2 text-[12px] ${
+                  monoOverviewOpen
+                    ? "bg-content/10 text-content"
+                    : "bg-content/5 text-content/70 hover:bg-content/8 hover:text-content"
+                }`}
+              >
+                <DashboardSquare className="size-3.5" strokeWidth={1.75} />
+                Overview
+              </button>
+            ) : null}
+            {onOpenMonoSettings ? (
+              <IconButton
+                label={`${mono.look.name} settings`}
+                onClick={onOpenMonoSettings}
+              >
+                <Settings className="size-3.5" strokeWidth={1.75} />
+              </IconButton>
+            ) : null}
           </div>
         ) : null}
         {showTrailingActions ? (

@@ -26,7 +26,7 @@ import {
   type BlockProps,
   type Components,
 } from "streamdown";
-import type { PluggableList } from "unified";
+import type { Pluggable, PluggableList } from "unified";
 import { ExplorerMenu, type ExplorerMenuItem } from "../../files/ui/ExplorerMenu";
 import { FileActionError } from "../../files/ui/FileActionError";
 import { FileTypeIcon } from "../../files/ui/FileTypeIcon";
@@ -35,6 +35,7 @@ import { createLazyMermaidPlugin } from "../../files/editor/mermaidPlugin";
 import {
   displayPath,
   isExtensionlessFileName,
+  resolveDocumentImage,
   resolveWorkspaceFileReference,
 } from "../../../shared/lib/paths";
 import type { EditorNavigation, OpenFileFn } from "../../search/model/search";
@@ -48,6 +49,12 @@ import { INBOX_MEDIA_PREFIXES, isInboxMediaUrl } from "../../inbox/model/inboxMe
 import { isNoteImagePath } from "../../notes";
 import { IS_MAC, IS_WIN } from "../../../platform/tauri/platform";
 import { InboxMedia } from "../../inbox/ui/InboxMedia";
+import { DocumentImage, ImageAltText } from "./DocumentImage";
+import { isLocalMediaPath, LocalMedia } from "./LocalMedia";
+import {
+  rehypeHoldImageSources,
+  rehypeRestoreImageSources,
+} from "./documentImageSources";
 import { rehypeHardBreaks } from "./hardBreaks";
 import {
   pacedRevealPreferred,
@@ -76,20 +83,32 @@ const mermaid = createLazyMermaidPlugin({
 
 const MARKDOWN_PLUGINS = { code: boundedCode, mermaid };
 
+const MARKDOWN_HARDEN: Pluggable = [
+  harden,
+  {
+    // MarkdownImage remains the final allowlist. The wildcard lets app-owned
+    // relative note URLs reach that component without changing link parsing.
+    allowedImagePrefixes: ["*"],
+    allowedLinkPrefixes: ["*"],
+    allowDataImages: true,
+    imageBlockPolicy: "remove" as const,
+  },
+];
+
 const MARKDOWN_REHYPE_PLUGINS: PluggableList = [
   defaultRehypePlugins.raw,
   defaultRehypePlugins.sanitize,
-  [
-    harden,
-    {
-      // MarkdownImage remains the final allowlist. The wildcard lets app-owned
-      // relative note URLs reach that component without changing link parsing.
-      allowedImagePrefixes: ["*"],
-      allowedLinkPrefixes: ["*"],
-      allowDataImages: true,
-      imageBlockPolicy: "remove" as const,
-    },
-  ],
+  MARKDOWN_HARDEN,
+];
+
+// A project document keeps its image paths as written for MarkdownImage, which
+// resolves them and keeps them inside the project.
+const DOCUMENT_REHYPE_PLUGINS: PluggableList = [
+  defaultRehypePlugins.raw,
+  defaultRehypePlugins.sanitize,
+  rehypeHoldImageSources,
+  MARKDOWN_HARDEN,
+  rehypeRestoreImageSources,
 ];
 
 const INBOX_MEDIA_REHYPE_PLUGINS: PluggableList = [
@@ -118,6 +137,11 @@ const FADING_INBOX_MEDIA_REHYPE_PLUGINS: PluggableList = [
   rehypeWordFade,
 ];
 
+const FADING_DOCUMENT_REHYPE_PLUGINS: PluggableList = [
+  ...DOCUMENT_REHYPE_PLUGINS,
+  rehypeWordFade,
+];
+
 type FileLinkMenu = {
   x: number;
   y: number;
@@ -133,9 +157,16 @@ const FileOpenContext = createContext<{
     path: string,
     navigation?: EditorNavigation,
   ) => void;
+  /**
+   * The Markdown file a preview shows and the project it may load images
+   * from. Unset in chat, where images keep their own rules.
+   */
+  documentImages?: { documentPath: string; root: string };
 }>({});
 
 const RemoteMediaContext = createContext(false);
+/** Show local images and videos a reply links to, rather than the links. */
+const LocalMediaContext = createContext(false);
 const MarkdownFadeContext = createContext(false);
 
 const REVEAL_LABEL = IS_MAC
@@ -250,11 +281,12 @@ function MarkdownLink({
   const { cwd, onOpenFile, onFileContextMenu } = useContext(FileOpenContext);
   const file = href ? resolveWorkspaceFileReference(href, cwd) : undefined;
   const label = textContent(children);
+  const localMedia = useContext(LocalMediaContext);
   if (allowRemoteMedia && href && isInboxMediaUrl(href)) {
     return <InboxMedia src={href} alt={label} />;
   }
 
-  return (
+  const link = (
     <a
       href={href}
       className={`text-sky-400/90 hover:text-sky-300 hover:underline ${className ?? ""}`}
@@ -284,6 +316,17 @@ function MarkdownLink({
       {children}
     </a>
   );
+  if (localMedia && file && isLocalMediaPath(file.path)) {
+    return (
+      <LocalMedia
+        path={file.path}
+        label={label}
+        onOpen={onOpenFile ? () => onOpenFile(file.path) : undefined}
+        fallback={link}
+      />
+    );
+  }
+  return link;
 }
 
 type MarkdownCodeProps = ComponentProps<"code"> & { node?: unknown };
@@ -477,6 +520,8 @@ export function MarkdownImage({
   ...props
 }: MarkdownImageProps) {
   const allowRemoteMedia = useContext(RemoteMediaContext);
+  const localMedia = useContext(LocalMediaContext);
+  const { cwd, onOpenFile, documentImages } = useContext(FileOpenContext);
   const url = typeof src === "string" ? src.trim() : "";
   if (url.startsWith("data:image/")) {
     return <img {...props} src={url} alt={alt ?? ""} />;
@@ -484,14 +529,62 @@ export function MarkdownImage({
   if (isNoteImagePath(url)) {
     return <NoteAssetImage {...props} asset={url} alt={alt} />;
   }
+  if (documentImages) {
+    const image = resolveDocumentImage(
+      url,
+      documentImages.documentPath,
+      documentImages.root,
+    );
+    if (!image) return <ImageAltText alt={alt} title={url || undefined} />;
+    return (
+      <DocumentImage
+        path={image.path}
+        root={documentImages.root}
+        relative={image.relative}
+        alt={alt}
+        title={props.title}
+        width={props.width}
+        height={props.height}
+        align={(props as { align?: string }).align}
+      />
+    );
+  }
+  const file =
+    localMedia && url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)
+      ? resolveWorkspaceFileReference(url, cwd)
+      : undefined;
+  if (file && isLocalMediaPath(file.path)) {
+    return (
+      <LocalMedia
+        path={file.path}
+        label={alt ?? ""}
+        onOpen={onOpenFile ? () => onOpenFile(file.path) : undefined}
+        fallback={null}
+      />
+    );
+  }
   if (!allowRemoteMedia || !url || !isInboxMediaUrl(url)) return null;
   return <InboxMedia src={url} alt={alt} />;
+}
+
+/**
+ * A document's `<picture>` shows its `<img>`, which loads through
+ * MarkdownImage. A `<source>` would make the webview fetch its own URL
+ * instead, so documents drop them.
+ */
+function MarkdownPictureSource({
+  node: _node,
+  ...props
+}: ComponentProps<"source"> & { node?: unknown }) {
+  const { documentImages } = useContext(FileOpenContext);
+  return documentImages ? null : <source {...props} />;
 }
 
 const MARKDOWN_COMPONENTS = {
   a: MarkdownLink,
   code: MarkdownCode,
   img: MarkdownImage,
+  source: MarkdownPictureSource,
 } satisfies Components;
 
 /**
@@ -528,7 +621,9 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   cwd,
   onOpenFile,
   allowRemoteMedia,
+  localMedia,
   hardBreaks,
+  documentPath,
 }: {
   text: string;
   streaming?: boolean;
@@ -538,8 +633,15 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   cwd?: string;
   onOpenFile?: OpenFileFn;
   allowRemoteMedia?: boolean;
+  /** Show local images and videos the text links to, in place of the links. */
+  localMedia?: boolean;
   /** Show a newline inside a block as a line break, as a document does (#591). */
   hardBreaks?: boolean;
+  /**
+   * The Markdown file this text is, which shows the images it refers to in its
+   * project, `cwd`.
+   */
+  documentPath?: string;
 }) {
   const [fileMenu, setFileMenu] = useState<FileLinkMenu | null>(null);
   const [fileActionError, setFileActionError] = useState<string | null>(null);
@@ -552,8 +654,14 @@ export const AgentMarkdown = memo(function AgentMarkdown({
     [],
   );
   const fileOpen = useMemo(
-    () => ({ cwd, onOpenFile, onFileContextMenu }),
-    [cwd, onOpenFile, onFileContextMenu],
+    () => ({
+      cwd,
+      onOpenFile,
+      onFileContextMenu,
+      documentImages:
+        documentPath && cwd ? { documentPath, root: cwd } : undefined,
+    }),
+    [cwd, onOpenFile, onFileContextMenu, documentPath],
   );
   const remarkPlugins = useMemo<PluggableList>(
     () => [
@@ -580,13 +688,18 @@ export const AgentMarkdown = memo(function AgentMarkdown({
   // element. Dropping one mid-fade would remount it and fade it again. Once
   // the fade is over they come off, or a finished reply would keep a span per
   // word for as long as this transcript stays mounted.
+  const isDocument = !!fileOpen.documentImages;
   const baseRehypePlugins = fading
     ? remoteMedia
       ? FADING_INBOX_MEDIA_REHYPE_PLUGINS
-      : FADING_MARKDOWN_REHYPE_PLUGINS
+      : isDocument
+        ? FADING_DOCUMENT_REHYPE_PLUGINS
+        : FADING_MARKDOWN_REHYPE_PLUGINS
     : remoteMedia
       ? INBOX_MEDIA_REHYPE_PLUGINS
-      : MARKDOWN_REHYPE_PLUGINS;
+      : isDocument
+        ? DOCUMENT_REHYPE_PLUGINS
+        : MARKDOWN_REHYPE_PLUGINS;
   // Hard breaks go last, so nothing after them undoes them, and after the word
   // fade, whose word spans would otherwise hide the newlines from them.
   const rehypePlugins = useMemo(
@@ -634,46 +747,48 @@ export const AgentMarkdown = memo(function AgentMarkdown({
 
   return (
     <RemoteMediaContext.Provider value={remoteMedia}>
-      <FileOpenContext.Provider value={fileOpen}>
-        <>
-          <MarkdownFadeContext.Provider value={fading}>
-            {/* Streamdown takes no style; a contents box passes the fade timing down. */}
-            <div className="contents" style={fadeStyle}>
-              <Streamdown
-                BlockComponent={DirectionalBlock}
-                className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${fading ? "word-fading" : ""} ${className ?? ""}`}
-                components={MARKDOWN_COMPONENTS}
-                controls={false}
-                dir="auto"
-                isAnimating={!!streaming || paced.revealing}
-                parseIncompleteMarkdown={false}
-                parseMarkdownIntoBlocksFn={parseStreamingMarkdown}
-                plugins={MARKDOWN_PLUGINS}
-                remarkPlugins={remarkPlugins}
-                rehypePlugins={rehypePlugins}
-              >
-                {paced.text}
-              </Streamdown>
-            </div>
-          </MarkdownFadeContext.Provider>
-          {fileMenu ? (
-            <ExplorerMenu
-              x={fileMenu.x}
-              y={fileMenu.y}
-              items={fileLinkMenuItems(!!onOpenFile, !!cwd)}
-              ariaLabel="File link actions"
-              onPick={onFileMenuPick}
-              onClose={() => setFileMenu(null)}
-            />
-          ) : null}
-          {fileActionError ? (
-            <FileActionError
-              message={fileActionError}
-              onDismiss={() => setFileActionError(null)}
-            />
-          ) : null}
-        </>
-      </FileOpenContext.Provider>
+      <LocalMediaContext.Provider value={!!localMedia}>
+        <FileOpenContext.Provider value={fileOpen}>
+          <>
+            <MarkdownFadeContext.Provider value={fading}>
+              {/* Streamdown takes no style; a contents box passes the fade timing down. */}
+              <div className="contents" style={fadeStyle}>
+                <Streamdown
+                  BlockComponent={DirectionalBlock}
+                  className={`agent-markdown min-w-0 font-sans text-sm leading-6 ${fading ? "word-fading" : ""} ${className ?? ""}`}
+                  components={MARKDOWN_COMPONENTS}
+                  controls={false}
+                  dir="auto"
+                  isAnimating={!!streaming || paced.revealing}
+                  parseIncompleteMarkdown={false}
+                  parseMarkdownIntoBlocksFn={parseStreamingMarkdown}
+                  plugins={MARKDOWN_PLUGINS}
+                  remarkPlugins={remarkPlugins}
+                  rehypePlugins={rehypePlugins}
+                >
+                  {paced.text}
+                </Streamdown>
+              </div>
+            </MarkdownFadeContext.Provider>
+            {fileMenu ? (
+              <ExplorerMenu
+                x={fileMenu.x}
+                y={fileMenu.y}
+                items={fileLinkMenuItems(!!onOpenFile, !!cwd)}
+                ariaLabel="File link actions"
+                onPick={onFileMenuPick}
+                onClose={() => setFileMenu(null)}
+              />
+            ) : null}
+            {fileActionError ? (
+              <FileActionError
+                message={fileActionError}
+                onDismiss={() => setFileActionError(null)}
+              />
+            ) : null}
+          </>
+        </FileOpenContext.Provider>
+      </LocalMediaContext.Provider>
     </RemoteMediaContext.Provider>
   );
 });
@@ -685,6 +800,7 @@ export const MarkdownPreview = memo(function MarkdownPreview({
   onOpenFile,
   header,
   hardBreaks,
+  documentPath,
 }: {
   text: string;
   streaming?: boolean;
@@ -692,6 +808,8 @@ export const MarkdownPreview = memo(function MarkdownPreview({
   onOpenFile?: OpenFileFn;
   header?: ReactNode;
   hardBreaks?: boolean;
+  /** The Markdown file shown, whose images load from the project, `cwd`. */
+  documentPath?: string;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
 
@@ -711,6 +829,7 @@ export const MarkdownPreview = memo(function MarkdownPreview({
           cwd={cwd}
           onOpenFile={onOpenFile}
           hardBreaks={hardBreaks}
+          documentPath={documentPath}
         />
       </div>
     </div>
