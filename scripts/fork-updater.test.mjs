@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 test("fork releases have increasing versions, a fork-only feed, and signed macOS downloads", () => {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.fork.conf.json", import.meta.url)));
   assert.deepEqual(buildConfig(config, "12", true), {
-    version: "0.12.0-fork.12", bundle: { createUpdaterArtifacts: true },
+    version: "0.14.0-fork.12", bundle: { createUpdaterArtifacts: true },
   });
   assert.equal(buildConfig(config, "13", false).bundle.createUpdaterArtifacts, false);
   assert.equal(config.bundle.createUpdaterArtifacts, true);
