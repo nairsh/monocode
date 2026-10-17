@@ -103,6 +103,7 @@ import {
   startIssueSelection,
 } from "../model/issueTriage";
 import { queueIssueGroups } from "../model/issueQueue";
+import { IssueVoice } from "./IssueVoice";
 
 const SORT_KEY = "monocode.issues.sort";
 const IssueMarkdownEditor = lazy(() =>
@@ -2802,6 +2803,7 @@ export function IssueTracker({
           ) : null}
           <strong>{viewTitle}</strong>
           {view !== "archive" ? triage.button : null}
+          {view !== "archive" && !storeError ? <IssueVoice projects={projects} initialProject={project || cwd} onLaunch={onLaunch} /> : null}
           <button
             className="it-chip it-push"
             disabled={storeError}

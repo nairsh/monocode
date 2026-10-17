@@ -28,7 +28,7 @@ function strings(value: unknown, field: string): string[] {
 
 /** CLI mutations go through the same synchronous store and graph checks as the UI. */
 export function handleIssueCommand(
-  source: Session,
+  source: Pick<Session, "id">,
   requestId: string,
   action: string,
   input: Record<string, unknown>,
