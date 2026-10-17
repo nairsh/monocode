@@ -114,7 +114,7 @@ provider callbacks. A separate speech test simulates recognition events and
 capture cleanup; it is not live microphone evidence. Existing transcript,
 animation responsiveness, tab movement/revisit and media tests also pass.
 The separate console/response check identified only a missing fixture favicon;
-the new fixture now references the existing app icon. The focused flows and
+both target fixtures now reference the existing app icon. The focused flows and
 console check were rerun after that test-only correction.
 
 The real Linux Tauri app was launched in Xvfb with isolated XDG state under
