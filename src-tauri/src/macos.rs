@@ -907,6 +907,10 @@ fn dev_bundle_plist(app_name: &str, version: &str, bundle_version: &str) -> Vec<
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MonoCode uses your microphone when you start recording an issue command.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MonoCode transcribes spoken issue commands for you to review before applying them.</string>
 </dict>
 </plist>
 "#

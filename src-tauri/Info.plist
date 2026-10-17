@@ -10,5 +10,9 @@
 	<string>MonoCode opens project folders you choose, including Documents.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>MonoCode opens project folders you choose, including Downloads.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MonoCode uses your microphone when you start recording an issue command.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MonoCode transcribes spoken issue commands for you to review before applying them.</string>
 </dict>
 </plist>

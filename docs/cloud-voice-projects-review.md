@@ -45,6 +45,9 @@ The issue/kanban header opens a project-scoped command dialog. Supported runtime
 use browser speech recognition; capture has an optional real audio meter and
 releases recognition, microphone tracks and Web Audio resources on stop/unmount.
 An unavailable speech runtime exposes the typed command path explicitly.
+macOS packaging declares microphone/speech usage descriptions and the audio-input
+entitlement; these declarations do not establish recognition support or prove
+that a user granted access on macOS.
 
 Explicit create, priority/status and Start-agent commands work without a model
 turn. More general commands use the configured triage provider/model/account to
@@ -90,6 +93,7 @@ session's origin from its folder name.
 | `cargo build --locked` with cloud activation | Native Linux debug build passed |
 | Chromium browser suite | All 22 tests passed, including the 3 added project/voice flows |
 | Whitespace | `git diff --check` passed |
+| macOS permission declarations | Release and generated dev-bundle plists parsed; microphone/speech descriptions and audio-input entitlement checked; execution remains unverified |
 
 The first host run without the child-reaper wrapper had three process-tree tests
 fail because container PID 1 retained terminated orphan descendants as zombies.
