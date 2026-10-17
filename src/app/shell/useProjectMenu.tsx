@@ -76,6 +76,7 @@ import { useProjectNotificationPreferences } from "../../features/notifications/
 import { useNotificationProjects } from "../../features/notifications/hooks/useNotificationProjects";
 import { updateNotificationPreferences } from "../../features/notifications/model/notificationPreferences";
 import type { ExplorerMenuItem } from "../../features/files/ui/ExplorerMenu";
+import { requestProjectCoordinator } from "../../features/projects/model/projectCoordinator";
 
 const REVEAL_LABEL = IS_MAC
   ? "Reveal in Finder"
@@ -110,6 +111,7 @@ function projectMenuExtraItems(
     },
   ];
   const items: TabGroupMenuExtraItem[] = [
+    { id: "coordinator", label: "Project coordinator", icon: AppWindow },
     {
       id: "background",
       label: "Background image",
@@ -325,7 +327,9 @@ export function useProjectMenu({
   const onPick = (action: string) => {
     if (!projectMenu) return;
     const { path, projectKey: key } = projectMenu;
-    if (action === "project-group:new") {
+    if (action === "coordinator") {
+      requestProjectCoordinator(path);
+    } else if (action === "project-group:new") {
       createGroup(projectMenu.x, projectMenu.y, path);
     } else if (action === "project-group:none") {
       setProjectGroupAssignment(path, null);

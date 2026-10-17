@@ -9,6 +9,7 @@ import {
   MessageMultiple,
   Plus,
   Search,
+  Maximize2,
 } from "../../../shared/ui/icons";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { artifactLabel, type ArtifactCard } from "../../artifacts/artifacts";
@@ -38,6 +39,8 @@ import { HARNESSES, type HarnessId } from "../../sessions/model/session";
 import { MonoSidebar, MonoSidebarHeader } from "./MonoSidebar";
 import type { SessionChangeTotals } from "../../sessions/ui/SessionReview";
 import { MonoChangesView, type MonoChangesRequest } from "./MonoChangesView";
+import { projectCoordinatorPreferences } from "../../projects/model/projectCoordinator";
+import { ProjectLibrary } from "../../projects/ui/ProjectLibrary";
 
 export type MonoOverviewTab =
   "activity" | "sessions" | "habits" | "documents" | "changes";
@@ -97,6 +100,8 @@ type Props = {
   onOpenFile?: (path: string) => void;
   onOpenDocument: (id: string) => void;
   onClose: () => void;
+  onStartSession?: (id: string) => Promise<void>;
+  coordinatorSessionId?: string;
   windowControls?: ReactNode;
 };
 
@@ -128,7 +133,11 @@ export function MonoOverview({
   onOpenDocument,
   onClose,
   windowControls,
+  onStartSession,
+  coordinatorSessionId,
 }: Props) {
+  const coordinator = projectCoordinatorPreferences(monoId);
+  const [fullScreen, setFullScreen] = useState(false);
   const lock = useLockOverscroll<HTMLDivElement>();
   const habits = useHabits(monoId, state.status);
   const actions = habitActions(monoId);
@@ -236,17 +245,19 @@ export function MonoOverview({
       label={`${agent.name} overview`}
       color={agent.color}
       windowControls={windowControls}
+      fullScreen={fullScreen}
     >
       <PanelStack pages={pages}>
         {/* Pages replace this header too, keeping their back button at the top. */}
         <MonoSidebarHeader
           title="Overview"
           heading={
-            <OverviewTabs tab={tab} counts={counts} onChange={onTabChange} />
+            <OverviewTabs tab={tab} counts={counts} onChange={onTabChange} coordinator={!!coordinator} />
           }
           onClose={onClose}
           actions={
             <>
+              <IconButton label={fullScreen ? "Exit full screen overview" : "Full screen overview"} active={fullScreen} onClick={() => setFullScreen(!fullScreen)}><Maximize2 className="size-3.5" /></IconButton>
               {tab === "habits" ? (
                 <IconButton
                   label={
@@ -336,6 +347,8 @@ export function MonoOverview({
                   query={query}
                   filters={filters}
                   onOpenSession={onOpenSession}
+                  groupKey={coordinator ? monoId : undefined}
+                  onStartSession={onStartSession}
                 />
               </div>
             ) : (
@@ -356,6 +369,8 @@ export function MonoOverview({
                 </EmptyState>
               }
             />
+          ) : coordinator && coordinatorSessionId ? (
+            <ProjectLibrary monoId={monoId} sessionId={coordinatorSessionId} cwd={coordinator.project} documents={documents} onOpen={onOpenDocument} />
           ) : documents.length ? (
             <ul className="flex flex-col gap-px">
               {[...documents].reverse().map((card) => (
@@ -457,10 +472,12 @@ function OverviewTabs({
   tab,
   counts,
   onChange,
+  coordinator = false,
 }: {
   tab: MonoOverviewTab;
   counts: Record<(typeof TABS)[number]["id"], number | undefined>;
   onChange: (tab: MonoOverviewTab) => void;
+  coordinator?: boolean;
 }) {
   return (
     <div
@@ -469,6 +486,7 @@ function OverviewTabs({
       className="-ml-2 flex items-center gap-0.5"
     >
       {TABS.map(({ id, label, icon }) => {
+        if (coordinator) label = id === "sessions" ? "Threads" : id === "documents" ? "Library" : id === "habits" ? "Scheduled tasks" : label;
         const selected = id === tab;
         return (
           <TabButton

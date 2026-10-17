@@ -29,8 +29,10 @@ import { ConfirmReset } from "./ConfirmReset";
 import { MemoryPage, SoulPage, useMonoFiles } from "./MonoFilePages";
 import { MonoProjects } from "./MonoProjects";
 import { ColorPicker, MascotPicker, SwitchRow } from "./monoPanelParts";
+import { ProjectCoordinatorSettings } from "../../projects/ui/ProjectCoordinatorSettings";
+import { projectCoordinatorPreferences } from "../../projects/model/projectCoordinator";
 
-export type MonoSettingsSection = "general" | "soul" | "memory";
+export type MonoSettingsSection = "general" | "soul" | "memory" | "instructions" | "environment";
 
 const SECTIONS: {
   id: MonoSettingsSection;
@@ -59,6 +61,9 @@ type Props = {
   onModelSettingsChange: (settings: Record<string, string>) => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onReset?: () => Promise<void>;
+  onPause?: (paused: boolean) => Promise<void>;
+  onArchive?: () => Promise<void>;
+  onDelete?: () => Promise<void>;
   onClose: () => void;
 };
 
@@ -76,6 +81,8 @@ export function MonoSettingsDialog({
 }: Props) {
   const [section, setSection] = useState(initialSection);
   const files = useMonoFiles(monoId, status);
+  const coordinator = projectCoordinatorPreferences(monoId);
+  const sections = coordinator ? [...SECTIONS, { id: "instructions" as const, label: "Thread instructions", icon: StickyNote }, { id: "environment" as const, label: "Environment", icon: Settings }] : SECTIONS;
   return (
     <Modal
       title={`${agent.name} settings`}
@@ -99,7 +106,7 @@ export function MonoSettingsDialog({
           <p className="px-2.5 pb-2 pt-1.5 text-[11px] text-content/45">
             Settings
           </p>
-          {SECTIONS.map(({ id, label, icon: Icon }) => (
+          {sections.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
@@ -121,8 +128,10 @@ export function MonoSettingsDialog({
             <GeneralSection monoId={monoId} agent={agent} {...general} />
           ) : section === "soul" ? (
             <SoulPage monoId={monoId} agent={agent} files={files} />
-          ) : (
+          ) : section === "memory" ? (
             <MemoryPage monoId={monoId} files={files} />
+          ) : (
+            <div className="overflow-y-auto px-6"><ProjectCoordinatorSettings monoId={monoId} fallback={{ harness: general.harness, model: general.model, modelSettings: general.modelSettings }} mode={section} /></div>
           )}
         </div>
       </div>
@@ -143,6 +152,9 @@ function GeneralSection({
   onModelSettingsChange,
   onRuntimeModeChange,
   onReset,
+  onPause,
+  onArchive,
+  onDelete,
 }: Omit<Props, "status" | "initialSection" | "onClose">) {
   const lock = useLockOverscroll<HTMLDivElement>();
   const shown = useSyncExternalStore(
@@ -165,6 +177,7 @@ function GeneralSection({
         <NameField key={monoId} monoId={monoId} fallback={agent.mascot} />
       </div>
 
+      <ProjectCoordinatorSettings monoId={monoId} fallback={{ harness, model, modelSettings }} onPause={onPause} onArchive={onArchive} onDelete={onDelete} />
       <GroupHeading title="Model" />
       <SettingGroup>
         <SettingRow

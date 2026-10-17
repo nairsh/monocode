@@ -59,6 +59,8 @@ export function MonoSessionList({
   query = "",
   filters = DEFAULT_SESSION_SIDEBAR_FILTERS,
   onOpenSession,
+  groupKey,
+  onStartSession,
 }: {
   agent: MonoLook;
   launches: readonly MonoSpawnedSession[];
@@ -68,6 +70,8 @@ export function MonoSessionList({
   query?: string;
   filters?: SessionSidebarFilters;
   onOpenSession: (sessionId: string) => void | Promise<void>;
+  groupKey?: string;
+  onStartSession?: (sessionId: string) => Promise<void>;
 }) {
   const launchesKey = JSON.stringify(
     launches.map((entry) => [entry.sessionId, entry.cwd]),
@@ -95,6 +99,40 @@ export function MonoSessionList({
   }));
   const [opening, setOpening] = useState<string>();
   const [error, setError] = useState<string>();
+  const [starting, setStarting] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(
+        localStorage.getItem(`monocode.threadGroups.${groupKey}`) ?? "null",
+      );
+      const groups = ["Suggested", "Waiting on you", "In progress", "Resolved"];
+      return Array.isArray(saved) &&
+        saved.length === 4 &&
+        new Set(saved).size === 4 &&
+        saved.every((value) => groups.includes(value))
+        ? saved
+        : groups;
+    } catch {
+      return ["Suggested", "Waiting on you", "In progress", "Resolved"];
+    }
+  });
+  const start = async (ids: string[]) => {
+    if (!onStartSession || starting) return;
+    setStarting(true);
+    setError(undefined);
+    try {
+      for (const id of ids) {
+        await onStartSession(id);
+        setSelected((current) => current.filter((value) => value !== id));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStarting(false);
+    }
+  };
   useEffect(() => {
     let cancelled = false;
     const refs: [string, string][] = JSON.parse(launchesKey);
@@ -278,108 +316,257 @@ export function MonoSessionList({
       </EmptyState>
     );
 
+  const renderCard = (launch: MonoSpawnedSession) => {
+    const live = sessions.find((entry) => entry.id === launch.sessionId);
+    const saved =
+      history.find((entry) => entry.id === launch.sessionId) ??
+      stored.byId.get(launch.sessionId);
+    // Once it is known, it gets the sidebar's own card: model, status,
+    // title, branch or worktree, and any linked PR or issue.
+    const summary: SessionSummary | undefined = live
+      ? {
+          ...saved,
+          ...summaryFromSession(live, saved),
+          updatedAt: saved?.updatedAt ?? Date.now(),
+        }
+      : saved;
+    if (summary)
+      return (
+        <div key={launch.sessionId} data-mono-session={launch.sessionId}>
+          <SessionCard
+            session={summary}
+            modelInFooter
+            spawnedBy={agent.name}
+            isActive={false}
+            isSelected={false}
+            busy={!!live?.busy}
+            done={false}
+            linkedUpdate={false}
+            needsApproval={
+              !!live &&
+              (hasPendingApproval(live.blocks) || !!live.pendingQuestion)
+            }
+            project={
+              agent.projects.find((project) => project.path === summary.cwd)
+                ?.name ?? projectName(summary.cwd)
+            }
+            now={Date.now()}
+            onSelect={(id) => {
+              if (!opening) void open(id);
+            }}
+          />
+        </div>
+      );
+    // Not known, either deleted or not looked up: the sidebar's card
+    // still, from what the launch recorded.
+    const unavailable = unavailableIds.has(launch.sessionId);
+    const failed = !unavailable && stored.failed.has(launch.cwd);
+    const loading = !unavailable && !failed;
+    return (
+      <div
+        key={launch.sessionId}
+        data-mono-session={loading ? undefined : launch.sessionId}
+        data-mono-session-loading={loading ? launch.sessionId : undefined}
+        data-mono-session-unavailable={unavailable ? "" : undefined}
+        // Until it is known, hold its place without a card of another
+        // look that the real one would replace a moment later.
+        aria-hidden={loading || undefined}
+        aria-disabled={unavailable || undefined}
+        inert={loading || unavailable}
+        className={loading ? "invisible" : unavailable ? "opacity-50" : ""}
+      >
+        <SessionCard
+          session={{
+            id: launch.sessionId,
+            cwd: launch.cwd,
+            harness: launch.harness,
+            model: launch.model,
+            runtimeMode: "auto",
+            title: launch.title,
+            createdAt: 0,
+            updatedAt: 0,
+          }}
+          modelInFooter
+          statusLabel={
+            unavailable
+              ? "Unavailable"
+              : opening === launch.sessionId
+                ? "Opening…"
+                : failed
+                  ? "Status unavailable"
+                  : ""
+          }
+          isActive={false}
+          isSelected={false}
+          busy={false}
+          done={false}
+          linkedUpdate={false}
+          needsApproval={false}
+          project={projectLabel(launch.cwd)}
+          now={0}
+          onSelect={(id) => {
+            if (failed && !opening) void open(id);
+          }}
+        />
+      </div>
+    );
+  };
+  const groupFor = (launch: MonoSpawnedSession) => {
+    const live = sessions.find((session) => session.id === launch.sessionId);
+    const row = rows.find((row) => row.id === launch.sessionId);
+    if (row?.draft) return "Suggested";
+    if (
+      live &&
+      (hasPendingApproval(live.blocks) ||
+        live.pendingQuestion ||
+        live.usageLimit ||
+        live.blocks[live.blocks.length - 1]?.notice === "error")
+    )
+      return "Waiting on you";
+    if (live?.busy) return "In progress";
+    return "Resolved";
+  };
+  const suggested = matching.filter(
+    (launch) => groupFor(launch) === "Suggested",
+  );
+  const selectedSuggestions = suggested.filter((launch) =>
+    selected.includes(launch.sessionId),
+  );
   return (
     <div ref={list}>
+      {groupKey && onStartSession && suggested.length ? (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-stroke p-2 text-[12px]">
+          <span>{suggested.length} suggested threads</span>
+          <button
+            className="rounded-md bg-content/8 px-2 py-1"
+            disabled={starting}
+            onClick={() =>
+              void start(
+                (selectedSuggestions.length
+                  ? selectedSuggestions
+                  : suggested
+                ).map((launch) => launch.sessionId),
+              )
+            }
+          >
+            {starting
+              ? "Starting…"
+              : selectedSuggestions.length
+                ? "Start selected"
+                : "Start all"}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-col gap-1">
-        {shown.map((launch) => {
-          const live = sessions.find((entry) => entry.id === launch.sessionId);
-          const saved =
-            history.find((entry) => entry.id === launch.sessionId) ??
-            stored.byId.get(launch.sessionId);
-          // Once it is known, it gets the sidebar's own card: model, status,
-          // title, branch or worktree, and any linked PR or issue.
-          const summary: SessionSummary | undefined = live
-            ? {
-                ...saved,
-                ...summaryFromSession(live, saved),
-                updatedAt: saved?.updatedAt ?? Date.now(),
-              }
-            : saved;
-          if (summary)
-            return (
-              <div key={launch.sessionId} data-mono-session={launch.sessionId}>
-                <SessionCard
-                  session={summary}
-                  modelInFooter
-                  isActive={false}
-                  isSelected={false}
-                  busy={!!live?.busy}
-                  done={false}
-                  linkedUpdate={false}
-                  needsApproval={
-                    !!live &&
-                    (hasPendingApproval(live.blocks) || !!live.pendingQuestion)
-                  }
-                  project={
-                    agent.projects.find(
-                      (project) => project.path === summary.cwd,
-                    )?.name ?? projectName(summary.cwd)
-                  }
-                  now={Date.now()}
-                  onSelect={(id) => {
-                    if (!opening) void open(id);
-                  }}
-                />
-              </div>
-            );
-          // Not known, either deleted or not looked up: the sidebar's card
-          // still, from what the launch recorded.
-          const unavailable = unavailableIds.has(launch.sessionId);
-          const failed = !unavailable && stored.failed.has(launch.cwd);
-          const loading = !unavailable && !failed;
-          return (
-            <div
-              key={launch.sessionId}
-              data-mono-session={loading ? undefined : launch.sessionId}
-              data-mono-session-loading={loading ? launch.sessionId : undefined}
-              data-mono-session-unavailable={unavailable ? "" : undefined}
-              // Until it is known, hold its place without a card of another
-              // look that the real one would replace a moment later.
-              aria-hidden={loading || undefined}
-              aria-disabled={unavailable || undefined}
-              inert={loading || unavailable}
-              className={
-                loading ? "invisible" : unavailable ? "opacity-50" : ""
-              }
-            >
-              <SessionCard
-                session={{
-                  id: launch.sessionId,
-                  cwd: launch.cwd,
-                  harness: launch.harness,
-                  model: launch.model,
-                  runtimeMode: "auto",
-                  title: launch.title,
-                  createdAt: 0,
-                  updatedAt: 0,
-                }}
-                modelInFooter
-                statusLabel={
-                  unavailable
-                    ? "Unavailable"
-                    : opening === launch.sessionId
-                      ? "Opening…"
-                      : failed
-                        ? "Status unavailable"
-                        : ""
-                }
-                isActive={false}
-                isSelected={false}
-                busy={false}
-                done={false}
-                linkedUpdate={false}
-                needsApproval={false}
-                project={projectLabel(launch.cwd)}
-                now={0}
-                onSelect={(id) => {
-                  if (failed && !opening) void open(id);
-                }}
-              />
-            </div>
-          );
-        })}
+        {groupKey
+          ? order.map((group, index) => {
+              const members = shown.filter(
+                (launch) => groupFor(launch) === group,
+              );
+              if (!members.length) return null;
+              return (
+                <section
+                  key={group}
+                  aria-label={`${group} threads`}
+                  className="mb-3"
+                >
+                  <div className="mb-1 flex items-center gap-2 px-1 text-[11px] text-content/50">
+                    <button
+                      aria-expanded={!collapsed.includes(group)}
+                      className="flex-1 text-left"
+                      onClick={() =>
+                        setCollapsed((current) =>
+                          current.includes(group)
+                            ? current.filter((value) => value !== group)
+                            : [...current, group],
+                        )
+                      }
+                    >
+                      {collapsed.includes(group) ? "▸" : "▾"} {group}{" "}
+                      <span className="ml-1">
+                        {
+                          matching.filter(
+                            (launch) => groupFor(launch) === group,
+                          ).length
+                        }
+                      </span>
+                    </button>
+                    {[-1, 1].map((direction) => (
+                      <button
+                        key={direction}
+                        aria-label={`Move ${group} ${direction < 0 ? "up" : "down"}`}
+                        disabled={
+                          index + direction < 0 ||
+                          index + direction >= order.length
+                        }
+                        onClick={() => {
+                          const next = [...order];
+                          [next[index], next[index + direction]] = [
+                            next[index + direction],
+                            next[index],
+                          ];
+                          setOrder(next);
+                          localStorage.setItem(
+                            `monocode.threadGroups.${groupKey}`,
+                            JSON.stringify(next),
+                          );
+                        }}
+                      >
+                        {direction < 0 ? "↑" : "↓"}
+                      </button>
+                    ))}
+                  </div>
+                  {!collapsed.includes(group)
+                    ? members.map((launch) => (
+                        <div key={launch.sessionId} className="mb-1">
+                          {group === "Suggested" && onStartSession ? (
+                            <div className="flex items-center justify-between px-3 text-[11px] text-content/55">
+                              <label className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Select ${launch.title}`}
+                                  checked={selected.includes(launch.sessionId)}
+                                  onChange={(event) =>
+                                    setSelected((current) =>
+                                      event.target.checked
+                                        ? [...current, launch.sessionId]
+                                        : current.filter(
+                                            (value) =>
+                                              value !== launch.sessionId,
+                                          ),
+                                    )
+                                  }
+                                />
+                                Suggested
+                              </label>
+                              <button
+                                disabled={starting}
+                                onClick={() => void start([launch.sessionId])}
+                              >
+                                Start
+                              </button>
+                            </div>
+                          ) : null}
+                          {renderCard(launch)}
+                        </div>
+                      ))
+                    : null}
+                </section>
+              );
+            })
+          : shown.map(renderCard)}
       </div>
-      {hasMore ? <div ref={loadMore} aria-hidden className="h-px" /> : null}
+      {hasMore ? (
+        <>
+          <div ref={loadMore} aria-hidden className="h-px" />
+          <button
+            className="w-full rounded-md py-2 text-[12px] text-content/50 hover:bg-content/5"
+            onClick={() => setLimit((current) => current + LIST_PAGE_SIZE)}
+          >
+            Show more
+          </button>
+        </>
+      ) : null}
       {error ? (
         <p role="alert" className="px-1 pt-3 text-xs text-red-400">
           {error}

@@ -42,6 +42,7 @@ import type { Worktree, Worktrees } from "../../source-control/model/worktrees";
 import { pathKey, projectName } from "../../../shared/lib/paths";
 import type { SplitDir } from "../../workspace/model/layout";
 import { consumeOperatorCommand } from "../../sessions/model/operatorCommand";
+import type { ProjectCoordinatorPreferences } from "../../projects/model/projectCoordinator";
 import { sessionConversationPage, type SessionReadOptions } from "./sessionConversation";
 import {
   CARD_FIELDS,
@@ -139,6 +140,7 @@ export type AgentAppHost = {
     id: string;
     projects: readonly string[];
     showStartedSessionsInSidebar?: boolean;
+    coordinator?: ProjectCoordinatorPreferences;
     /** Files the sessions it starts into a folder named after it. */
     folder?: { name: string; color: string };
   } | undefined;
@@ -408,7 +410,8 @@ function startLaunch(
   const prompt = agentPrompt(input.prompt);
   const draft = input.draft ?? false;
   if (typeof draft !== "boolean") throw new Error("draft must be a boolean");
-  const harness = input.harness ?? source.harness;
+  const defaults = host.monoOf?.(source.id)?.coordinator?.threadDefaults;
+  const harness = input.harness ?? defaults?.harness ?? source.harness;
   if (!HARNESSES.includes(harness as HarnessId))
     throw new Error("Unknown harness; run models.list for available providers");
   const chosenHarness = harness as HarnessId;
@@ -419,7 +422,7 @@ function startLaunch(
     ? modelsFor(chosenHarness).find((entry) => entry.id === requestedModel)
     : resolveModel(
         chosenHarness,
-        chosenHarness === source.harness
+        chosenHarness === defaults?.harness ? defaults.model : chosenHarness === source.harness
           ? source.model
           : preferredModelId(chosenHarness),
       );
@@ -460,7 +463,7 @@ function startLaunch(
     throw new Error(`runtimeMode must be one of: ${RUNTIME_MODES.join(", ")}`);
   const reveal = input.reveal ?? false;
   if (typeof reveal !== "boolean") throw new Error("reveal must be a boolean");
-  const workspaceMode = input.workspaceMode ?? "current";
+  const workspaceMode = input.workspaceMode ?? (input.worktreeCwd !== undefined ? "current" : host.monoOf?.(source.id)?.coordinator?.workspaceMode) ?? "current";
   if (workspaceMode !== "current" && workspaceMode !== "worktree")
     throw new Error("workspaceMode must be current or worktree");
   const worktreeBase = optionalString(input.worktreeBase, "worktreeBase");
@@ -482,7 +485,8 @@ function startLaunch(
     harness: chosenHarness,
     model: model.id,
     modelSettings: mergeModelSettings(model, {
-      ...(chosenHarness === source.harness && model.id === source.model
+      ...(chosenHarness === defaults?.harness && model.id === defaults.model ? defaults.modelSettings : {}),
+      ...(!defaults && chosenHarness === source.harness && model.id === source.model
         ? source.modelSettings
         : {}),
       ...(requestedSettings as Record<string, string>),
@@ -1080,6 +1084,12 @@ export async function handleAgentApp(
           "request ID must use letters, digits, underscores or hyphens",
         );
       const launch = startLaunch(source, input, host);
+      const coordinator = host.monoOf?.(source.id)?.coordinator;
+      if (coordinator) {
+        const owner = host.monoOf?.(source.id);
+        const memory = owner ? (await host.agentFiles(owner.id)).memory : "";
+        launch.prompt = `${launch.prompt}\n\n<project_context>\n${JSON.stringify({ goal: coordinator.goal, instructions: coordinator.instructions, memory })}\n</project_context>`;
+      }
       const notifyMonoId = completionRecipient(source, input, host, true);
       if (input.worktreeCwd !== undefined) {
         const chosen = (await host.worktrees(launch.cwd)).worktrees.find(

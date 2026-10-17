@@ -124,6 +124,18 @@ function fixture() {
 }
 
 describe("agent app commands", () => {
+  it("applies independent project thread defaults, instructions, memory and checkout choice", async () => {
+    const { source, host } = fixture();
+    host.isMono = () => true;
+    host.monoOf = () => ({ id: "mono", projects: [source.cwd], coordinator: { project: source.cwd, goal: "Ship the release", instructions: "Use focused tests", workspaceMode: "worktree", autoContinue: false, paused: false, archived: false, threadDefaults: { harness: "codex", model: "codex:test", modelSettings: { effort: "high" } } } });
+    host.agentFiles = vi.fn(async () => ({ id: "mono", dir: "/mono", soul: "", soulHash: "", memory: "Prefer small changes", memoryHash: "m", memoryPath: "/mono/MEMORY.md", topics: [] }));
+    await handleAgentApp(source, "suggest", "sessions.start", { prompt: "Review authentication", draft: true, notifyOnComplete: false }, host);
+    expect(host.start).toHaveBeenCalledWith(expect.objectContaining({ draft: true, workspaceMode: "worktree", modelSettings: { effort: "high" }, prompt: expect.stringContaining("Review authentication") }), "app-lead-suggest");
+    const launch = vi.mocked(host.start).mock.calls[0][0];
+    expect(launch.prompt).toContain("Use focused tests");
+    expect(launch.prompt).toContain("Prefer small changes");
+    expect(source.modelSettings).not.toEqual({ effort: "high" });
+  });
   it.each([undefined, true, false])(
     "uses the Mono's sidebar preference for both submitted and draft sessions: %s",
     async (showStartedSessionsInSidebar) => {

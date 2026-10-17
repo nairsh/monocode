@@ -80,3 +80,27 @@ it("requires shell publication for structural, approval and lifecycle changes", 
     { ...session, blocks: [{ ...session.blocks[0], streaming: false }] },
   ]) expect(onlyLiveTextChanged(session, next)).toBe(false);
 });
+
+it("publishes a coordinator added synchronously to the runtime ref and ignores true no-ops", () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let publication!: ReturnType<typeof useSessionPublication>;
+  let renders = 0;
+  const Shell = () => {
+    publication = useSessionPublication(() => []);
+    renders++;
+    return createElement("div", null, publication.sessions.map(session => session.title).join(","));
+  };
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    act(() => root.render(createElement(Shell)));
+    act(() => {
+      publication.sessionsRef.current = [{ ...newSession("codex", "/repo"), title: "Project coordinator" }];
+      publication.setSessions(publication.sessionsRef.current);
+    });
+    expect(host.textContent).toBe("Project coordinator");
+    const before = renders;
+    act(() => publication.setSessions(current => current));
+    expect(renders).toBe(before);
+  } finally { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});

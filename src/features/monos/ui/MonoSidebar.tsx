@@ -15,6 +15,7 @@ export function MonoSidebar({
   color,
   windowControls,
   children,
+  fullScreen = false,
 }: {
   open: boolean;
   kind: "details" | "sessions";
@@ -22,6 +23,7 @@ export function MonoSidebar({
   color: string;
   windowControls?: ReactNode;
   children: ReactNode;
+  fullScreen?: boolean;
 }) {
   const resize = useDragResize({
     min: MIN_WIDTH,
@@ -47,9 +49,8 @@ export function MonoSidebar({
       style={
         {
           "--mono-color": color,
-          "--mono-window-controls-width": windowControls
-            ? "calc(7.5rem + 1px)"
-            : "0px",
+          ...(fullScreen ? { position: "fixed", inset: 0, zIndex: 60, width: "100vw", background: "var(--color-background-base)" } : {}),
+          "--mono-window-controls-width": "0px",
         } as CSSProperties
       }
       className="mono-details-panel relative flex h-full min-h-0 shrink-0 flex-col border-l border-stroke font-sans"
@@ -67,8 +68,9 @@ export function MonoSidebar({
       ) : null}
       <div
         className="flex h-full min-h-0 shrink-0 flex-col"
-        style={{ width: resize.width }}
+        style={{ width: fullScreen ? "100%" : resize.width }}
       >
+        {windowControls ? <div className="flex h-10 shrink-0 items-center border-b border-stroke px-4 pr-32 text-[12px] text-content/60"><span className="truncate">{label}</span></div> : null}
         {children}
       </div>
     </aside>

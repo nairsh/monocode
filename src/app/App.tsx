@@ -19,6 +19,9 @@ import { useWorkspaceNavigation } from "./hooks/useWorkspaceNavigation";
 import { useIdleSessionDetach } from "./hooks/useIdleSessionDetach";
 import { HarnessEventQueue } from "./model/harnessFlush";
 import { useSessionPublication, SessionDetailContext, onlyLiveTextChanged } from "./model/sessionPublication";
+import { ensureProjectCoordinator, projectCoordinatorPreferences, projectCoordinatorSnapshot, projectThreadPromptText, subscribeProjectCoordinators, subscribeOpenProjectCoordinator, updateProjectCoordinator } from "../features/projects/model/projectCoordinator";
+import { saveMonosEnabled } from "../features/settings/model/settings";
+import { recordSessionOrigin } from "../features/sessions/model/sessionOrigin";
 import {
   handleAgentApp,
   canAccessAgentAppProject,
@@ -1309,6 +1312,7 @@ function Workspace({
     () => true,
   );
   const monosSnap = useSyncExternalStore(subscribeMonos, monosSnapshot);
+  const coordinatorSnapshot = useSyncExternalStore(subscribeProjectCoordinators, projectCoordinatorSnapshot);
   /** A Mono hides the terminal, so reaching for one leaves it. */
   const leaveCoveringMono = useCallback(() => {
     if (monoViewIdRef.current) closeMonoView();
@@ -4774,6 +4778,11 @@ function Workspace({
   // A Mono open when the app last closed opens again; a moved window keeps
   // what it carried.
   const reopenedMono = useRef(false);
+  useEffect(() => subscribeOpenProjectCoordinator(project => {
+    const id = ensureProjectCoordinator(project);
+    saveMonosEnabled(true);
+    void onOpenMono(id);
+  }), [onOpenMono]);
   useEffect(() => {
     if (reopenedMono.current) return;
     reopenedMono.current = true;
@@ -6837,6 +6846,9 @@ function Workspace({
       const remote = sessionsRef.current.find(
         (session) => session.id === sessionId,
       );
+      const coordinatorId = monoForSession(sessionId)?.id;
+      const coordinatorPreferences = coordinatorId ? projectCoordinatorPreferences(coordinatorId) : undefined;
+      if (coordinatorPreferences?.paused || coordinatorPreferences?.archived) return false;
       if (remote && remoteProjectFor(remote.cwd))
         return !!remoteSessionActions(sessionId)?.submit(
           text,
@@ -8050,6 +8062,8 @@ function Workspace({
           const handAgent = agentPlan ? agentPlan.soul : monoFirstTurn;
           // What the app adds to the user's message rather than them.
           const appContext: string[] = [];
+          const coordinator = monoRecord ? projectCoordinatorPreferences(monoRecord.id) : undefined;
+          if (coordinator) appContext.push(`<project_coordinator>\n${JSON.stringify({ goal: coordinator.goal, threadInstructions: coordinator.instructions })}\nCoordinate this project through the app tools. Suggest independent work as sessions.start with draft:true; the user can start individual suggestions or all suggestions from Overview. Drafts are unsent and must not be reported as running. New threads receive the project instructions and your current memory.\n</project_coordinator>`);
           if (monoRotation) {
             appContext.push(monoRotation.brief(sessionId));
           }
@@ -9391,6 +9405,8 @@ function Workspace({
 
   const onUsageLimitResumeAtReset = useCallback(
     (sessionId: string, enabled: boolean) => {
+      const monoId = monoForSession(sessionId)?.id;
+      if (monoId && projectCoordinatorPreferences(monoId)) updateProjectCoordinator(monoId, { autoContinue: enabled });
       setSessions((prev) =>
         prev.map((session) =>
           session.id === sessionId && session.usageLimit
@@ -9449,6 +9465,21 @@ function Workspace({
   );
 
   const [usageLimitTick, setUsageLimitTick] = useState(0);
+  useEffect(() => {
+    setSessions(current => {
+      let changed = false;
+      const next = current.map(session => {
+        const monoId = monoForSession(session.id)?.id;
+        const preferences = monoId ? projectCoordinatorPreferences(monoId) : undefined;
+        if (!preferences || !session.usageLimit) return session;
+        const resumeAtReset = preferences.autoContinue && !preferences.paused && !preferences.archived;
+        if (session.usageLimit.resumeAtReset === resumeAtReset) return session;
+        changed = true;
+        return { ...session, usageLimit: { ...session.usageLimit, resumeAtReset } };
+      });
+      return changed ? next : current;
+    });
+  }, [coordinatorSnapshot, sessions]);
   useEffect(() => {
     const now = Date.now();
     const timers: number[] = [];
@@ -10967,6 +10998,7 @@ function Workspace({
           : [];
         const sourceTurnId = sourceTurns[sourceTurns.length - 1]?.[0]?.id;
         const rememberSession = (entry: MonoSpawnedSession) => {
+          if (sourceMono) recordSessionOrigin(entry.sessionId, { monoId: sourceMono.id, name: monoLook(sourceMono).name });
           // A habit run is thrown away when it ends; its launches go on the
           // report it posts to the Mono's chat instead.
           if (isHabitRun(source.id)) {
@@ -11038,6 +11070,8 @@ function Workspace({
           payload.input,
           {
             start: async (launch, id, placement, notifyMonoId) => {
+              const coordinator = sourceMono ? projectCoordinatorPreferences(sourceMono.id) : undefined;
+              if (coordinator?.paused || coordinator?.archived) throw new Error("The project coordinator is paused.");
               const rememberLaunch = () => {
                 const created =
                   sessionsRef.current.find((session) => session.id === id) ??
@@ -11062,7 +11096,7 @@ function Workspace({
               );
               if (previous) {
                 if (
-                  previous.text !== launch.prompt ||
+                  (coordinator ? projectThreadPromptText(previous.text) !== projectThreadPromptText(launch.prompt) : previous.text !== launch.prompt) ||
                   (!launch.draft && !!previous.draft)
                 )
                   throw new Error(
@@ -11354,6 +11388,7 @@ function Workspace({
                   projects: mono.projects,
                   showStartedSessionsInSidebar:
                     mono.showStartedSessionsInSidebar,
+                  coordinator: projectCoordinatorPreferences(mono.id),
                   ...(mono.useSidebarFolders
                     ? {
                         folder: {
@@ -12844,6 +12879,29 @@ function Workspace({
         ),
       }
     : undefined;
+  const startingProjectThreads = useRef(new Set<string>());
+  const startProjectThread = async (id: string) => {
+    if (!monoViewMono || !monoViewSession || !monoLaunches.some(launch => launch.sessionId === id)) throw new Error("Thread is not a suggestion from this coordinator.");
+    const preferences = projectCoordinatorPreferences(monoViewMono.id);
+    if (preferences?.paused || preferences?.archived) throw new Error("Restart the coordinator before starting suggested threads.");
+    if (startingProjectThreads.current.has(id)) return;
+    startingProjectThreads.current.add(id);
+    try {
+      const session = await ensureOpenSession(id);
+      const draft = session && sessionDraftBlock(session);
+      if (!session || !draft || session.busy) throw new Error("This thread is no longer an unsent suggestion.");
+      const requestId = draft.appRequestId ?? `project-${draft.id}`;
+      const completed = monoCompletionBatches.current!.watch({ monoId: monoViewMono.id, turn: turnGen.current.get(monoViewSession.id) ?? 0 }, requestId, id, { awaitAcceptance: true });
+      try {
+        const accepted = await submitSession(id, draft.text, draft.attachments ?? [], {
+          draftBlockId: draft.id, appRequestId: requestId,
+          onSettled: outcome => completed(monoSessionCompletionResult({ requestId, sessionId: id, project: session.cwd, prompt: draft.text, outcome, session: sessionsRef.current.find(entry => entry.id === id) })),
+        });
+        if (!accepted) throw new Error("The provider did not accept this thread. Its draft was kept.");
+        completed.accept();
+      } catch (cause) { completed.discard(); throw cause; }
+    } finally { startingProjectThreads.current.delete(id); }
+  };
   const monoOverviewPanel =
     monoViewMono && monoViewSession ? (
       <MonoOverview
@@ -12886,6 +12944,8 @@ function Workspace({
         onBackFromDocument={() => setMonoOverviewDocument(null)}
         onOpenFile={onOpenFile}
         onClose={() => setMonoOverviewOpen(false)}
+        coordinatorSessionId={monoViewSession.id}
+        onStartSession={startProjectThread}
         windowControls={monoCovers && !IS_MAC ? <WindowControls /> : undefined}
       />
     ) : null;
@@ -12915,6 +12975,18 @@ function Workspace({
           onRuntimeModeChange(monoViewSession.id, mode)
         }
         onReset={() => onResetMono(monoViewSession.id)}
+        onPause={async paused => {
+          updateProjectCoordinator(monoViewMono.id, { paused });
+          if (paused) await onStop(monoViewSession.id);
+          else if (!await submitSession(monoViewSession.id, "Resume coordinating this project. Review the current threads and report what needs attention.", [])) throw new Error("The coordinator could not resume. Check its provider and try again.");
+        }}
+        onArchive={async () => {
+          updateProjectCoordinator(monoViewMono.id, { archived: true, paused: true });
+          await onStop(monoViewSession.id);
+          setMonoSettingsFor(null);
+          closeMonoView();
+        }}
+        onDelete={() => onDeleteMono(monoViewMono.id)}
         onClose={() => setMonoSettingsFor(null)}
       />
     ) : null;
@@ -13062,6 +13134,10 @@ function Workspace({
           : undefined
       }
       monoOverviewOpen={monoOverviewOpen}
+      monoAttentionCount={monoLaunches.filter(launch => {
+        const session = sessions.find(session => session.id === launch.sessionId);
+        return session && (sessionNeedsInput(session) || session.usageLimit);
+      }).length}
       onOpenMonoSettings={
         monoCovers && monoViewMono
           ? () => setMonoSettingsFor(monoViewMono.id)

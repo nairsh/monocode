@@ -45,6 +45,7 @@ export function useSessionPublication(initial: () => Session[]) {
   }, [sessionPublication]);
   const setSessions = useCallback((action: SetStateAction<Session[]>) => {
     const next = typeof action === "function" ? action(sessionsRef.current) : action;
+    if (next === sessionsRef.current && next === shellRef.current) return;
     // Direct array updates often carry unchanged objects from the shell. Keep
     // their newer detail instead of rolling back an unrelated streamed tail.
     const shellById = new Map(shellRef.current.map((session) => [session.id, session]));

@@ -34,6 +34,7 @@ import {
   updateMono,
   type MonoState,
 } from "../../features/monos/model/mono";
+import { projectCoordinatorPreferences, projectCoordinatorSnapshot, subscribeProjectCoordinators } from "../../features/projects/model/projectCoordinator";
 
 export type MonoRailProps = {
   /** The Mono open in the main area, if any. */
@@ -72,7 +73,8 @@ export function MonoRailSection({
   onDelete,
 }: MonoRailProps) {
   const snapshot = useSyncExternalStore(subscribeMonos, monosSnapshot);
-  const monos = useMemo(() => listMonos(), [snapshot]);
+  const coordinatorSnapshot = useSyncExternalStore(subscribeProjectCoordinators, projectCoordinatorSnapshot);
+  const monos = useMemo(() => listMonos().filter(mono => !projectCoordinatorPreferences(mono.id)?.archived), [snapshot, coordinatorSnapshot]);
   const ids = monos.map((mono) => mono.id);
   const sortable = useAnimatedReorder(ids, reorderMonos, "y");
   const [menu, setMenu] = useState<{ id: string; anchor: PopoverAnchor }>();

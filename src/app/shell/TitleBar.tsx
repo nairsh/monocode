@@ -113,6 +113,7 @@ type Props = {
   /** Shows or hides the Mono's overview panel beside its chat. */
   onToggleMonoOverview?: () => void;
   monoOverviewOpen?: boolean;
+  monoAttentionCount?: number;
   onOpenMonoSettings?: () => void;
   /** The full-height Mono panel owns these while it is open. */
   hideWindowControls?: boolean;
@@ -659,6 +660,7 @@ function TitleBarComponent({
   mono,
   onToggleMonoOverview,
   monoOverviewOpen = false,
+  monoAttentionCount = 0,
   onOpenMonoSettings,
   hideWindowControls = false,
   projectRailOpen = true,
@@ -1002,6 +1004,7 @@ function TitleBarComponent({
               >
                 <DashboardSquare className="size-3.5" strokeWidth={1.75} />
                 Overview
+                {monoAttentionCount > 0 ? <span aria-label={`${monoAttentionCount} threads need attention`} className="rounded-full bg-amber-400/15 px-1.5 text-[10px] text-amber-400">{monoAttentionCount}</span> : null}
               </button>
             ) : null}
             {onOpenMonoSettings ? (

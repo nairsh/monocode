@@ -101,6 +101,21 @@ it("shows live cards, updates their status and opens the selected session", asyn
   expect(onOpenSession).toHaveBeenCalledWith(launch.sessionId);
 });
 
+it("groups suggested project threads, selects them, starts the selected set and reports failures", async () => {
+  const child = { ...newSession("codex", "/repo"), id: launch.sessionId, title: "Review auth", blocks: [{ id: "draft", role: "user" as const, text: "Review authentication", draft: true }] };
+  const onStartSession = vi.fn(async () => { throw new Error("Provider offline"); });
+  await render([child], [launch], { groupKey: "project-test", onStartSession });
+  expect(container.querySelector('[aria-label="Suggested threads"]')).not.toBeNull();
+  const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  act(() => checkbox.click());
+  const start = [...container.querySelectorAll("button")].find(button => button.textContent === "Start selected")!;
+  await act(async () => start.click());
+  expect(onStartSession).toHaveBeenCalledWith(launch.sessionId);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Provider offline");
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Move Suggested down"]')!.click());
+  expect(JSON.parse(localStorage.getItem("monocode.threadGroups.project-test")!)[1]).toBe("Suggested");
+});
+
 it("loads closed sessions across projects", async () => {
   vi.mocked(listSessionsByProject).mockImplementation(async (cwd) => [
     {

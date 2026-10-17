@@ -15,6 +15,7 @@ import {
 } from "./mono";
 import { forgetAgentContext } from "./monoFiles";
 import { forgetMonoRotation } from "./monoRotation";
+import { projectCoordinatorPreferences } from "../../projects/model/projectCoordinator";
 
 const openingMonos = new Map<string, Promise<Session | undefined>>();
 
@@ -51,7 +52,7 @@ async function loadMonoSession(
     const existing = await host.load(mono.sessionId);
     if (existing) return existing;
   }
-  const home = await host.home();
+  const home = projectCoordinatorPreferences(monoId)?.project ?? await host.home();
   // Removed while the home folder was looked up.
   if (!findMono(monoId)) return undefined;
   const session: Session = { ...host.create(home), runtimeMode: "auto" };

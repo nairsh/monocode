@@ -1,3 +1,4 @@
+import { projectCoordinatorPreferences } from "../../features/projects/model/projectCoordinator";
 import { useEffect, useRef } from "react";
 import type { ControlOutcome } from "../../features/orchestration/model/orchestration";
 import {
@@ -266,7 +267,10 @@ export function useMonoHabits(host: MonoHabitHost, enabled = true) {
       running = true;
       checkAgain = false;
       try {
-        for (const { id, sessionId } of listMonos()) {
+        for (const { id, sessionId } of listMonos().filter(mono => {
+          const preferences = projectCoordinatorPreferences(mono.id);
+          return !preferences?.paused && !preferences?.archived;
+        })) {
           if (stopped) return;
           // Habits are set up in its chat, so one never opened has none.
           if (!sessionId) continue;
