@@ -113,12 +113,19 @@ fixtures use production UI components with simulated native persistence and
 provider callbacks. A separate speech test simulates recognition events and
 capture cleanup; it is not live microphone evidence. Existing transcript,
 animation responsiveness, tab movement/revisit and media tests also pass.
+The separate console/response check identified only a missing fixture favicon;
+the new fixture now references the existing app icon. The focused flows and
+console check were rerun after that test-only correction.
 
 The real Linux Tauri app was launched in Xvfb with isolated XDG state under
 `/workspace/work/native-qa`. Native evidence covers project context navigation,
 cold coordinator restoration, a single composer, the overview header and the
 real command dialog. The native GTK WebKit runtime reports speech recognition
 unavailable and displays the typed fallback.
+The real native flow `Create an issue called Cloud native QA` → Review → Apply
+created `MC-2` with the requested title on the board; the full preview and result
+are captured separately. Native input was paced to let the container webview
+process key events before clicking Review.
 
 Evidence and logs are retained in `/workspace/work/evidence` and
 `/workspace/work/*.log`. Selected screenshots are `project-threads.png`,
@@ -127,6 +134,14 @@ Evidence and logs are retained in `/workspace/work/evidence` and
 `native-voice-cold.png`. The projectless chat output path is read-only in this
 cloud machine, so evidence is retained in the cloud workspace instead of that
 export directory.
+The final selected screenshots/logs are packaged in
+`/workspace/work/cloud-qa-evidence.zip` with a checksum manifest. Intermediate
+screenshots include pre-fix/transient states and are not final validation proof.
+
+The branch was pushed successfully. Creating a draft PR through the cloud CLI
+was blocked by `Post https://api.github.com/graphql: Forbidden`; no connector or
+alternate network route was used to bypass that restriction. Review it at
+`https://github.com/nairsh/monocode/compare/main...codex/voice-projects-upstream`.
 
 ### Reference mismatch ledger / remaining risks
 
